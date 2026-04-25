@@ -132,6 +132,15 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Log secrets usage
+        run: |
+          echo "📋 Secrets used in this workflow:"
+          echo "  - VPS_HOST: ${{ secrets.VPS_HOST && '✅ Set' || '❌ Not set' }}"
+          echo "  - VPS_USER: ${{ secrets.VPS_USER && '✅ Set' || '❌ Not set' }}"
+          echo "  - VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY && '✅ Set' || '❌ Not set' }}"
+          echo "  - GHCR_TOKEN: ${{ secrets.GHCR_TOKEN && '✅ Set' || '❌ Not set' }}"
+          echo "  - ENV_FILE: ${{ secrets.ENV_FILE && '✅ Set' || '❌ Not set' }}"
+
       - name: Update ENV file on server
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -139,8 +148,8 @@ jobs:
           ENV_FILE: ${{ secrets.ENV_FILE }}
         run: |
           if [ -n "$ENV_FILE" ]; then
-            echo "📝 Updating .env file on server..."
-            echo "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > ~/genfity/genfity-ai-gateway/.env"
+            echo "📝 Updating .env file on server (full replace)..."
+            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > ~/genfity/genfity-ai-gateway/.env"
             echo "✅ ENV file updated!"
           else
             echo "⏭️ ENV_FILE secret not set, skipping .env update"
@@ -152,21 +161,29 @@ jobs:
           VPS_USER: ${{ secrets.VPS_USER }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
+          echo "🚀 Deploying with docker compose..."
+
           ssh $VPS_USER@$VPS_HOST << ENDSSH
             cd ~/genfity/genfity-ai-gateway
 
+            # Force pull latest changes (override local, no conflicts)
             git remote set-url origin https://x-access-token:${GHCR_TOKEN}@github.com/${{ github.repository }}.git
             git fetch origin main
             git reset --hard origin/main
             git remote set-url origin https://github.com/${{ github.repository }}.git
 
-            echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+            # Login to GHCR
+            echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u mygads --password-stdin
 
+            # Pull and recreate
             export IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:latest
             sudo -E docker compose pull
             sudo -E docker compose up -d --force-recreate
 
+            # Cleanup old images
+            echo "🧹 Cleaning up..."
             sudo docker image prune -af --filter "until=24h" 2>/dev/null || true
+
             echo "✅ Deployment complete!"
           ENDSSH
 
@@ -175,5 +192,57 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          sleep 10
-          ssh $VPS_USER@$VPS_HOST "curl -sf http://localhost:8094/health && echo '✅ Health check passed!' || echo '⚠️ Health check failed'"
+          echo "🏥 Running health check..."
+          sleep 20
+
+          ssh $VPS_USER@$VPS_HOST << 'ENDSSH'
+            for i in {1..5}; do
+              if curl -sf http://localhost:8094/health > /dev/null 2>&1; then
+                echo "✅ Health check passed!"
+                sudo docker ps | grep genfity-ai-gateway
+                exit 0
+              fi
+              echo "Attempt $i failed, retrying..."
+              sleep 5
+            done
+
+            echo "❌ Health check failed!"
+            sudo docker logs genfity-ai-gateway --tail 50
+            exit 1
+          ENDSSH
+
+      - name: Generate summary
+        if: success()
+        run: |
+          echo "## 🚀 AI Gateway Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** https://ai-gateway.genfity.com" >> $GITHUB_STEP_SUMMARY
+
+  # ===================================================================================
+  # CLEANUP JOB
+  # ===================================================================================
+  cleanup:
+    name: Cleanup Old Resources
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    if: always()
+
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Cleanup server
+        continue-on-error: true
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh $VPS_USER@$VPS_HOST << 'ENDSSH'
+            echo "🧹 Running scheduled cleanup..."
+            sudo docker system prune -f --filter "until=24h"
+            echo "✅ Cleanup complete!"
+          ENDSSH
