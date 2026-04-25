@@ -26,8 +26,8 @@ type SubscriptionPlanSnapshot struct {
 
 type APIKey struct {
 	ID              uuid.UUID  `json:"id"`
-	GenfityUserID   uuid.UUID  `json:"genfity_user_id"`
-	GenfityTenantID *uuid.UUID `json:"genfity_tenant_id,omitempty"`
+	GenfityUserID   string     `json:"genfity_user_id"`
+	GenfityTenantID *string    `json:"genfity_tenant_id,omitempty"`
 	Name            string     `json:"name"`
 	KeyPrefix       string     `json:"key_prefix"`
 	KeyHash         string     `json:"-"`
@@ -76,8 +76,8 @@ type AIModelRoute struct {
 
 type CustomerEntitlement struct {
 	ID                   uuid.UUID  `json:"id"`
-	GenfityUserID        uuid.UUID  `json:"genfity_user_id"`
-	GenfityTenantID      *uuid.UUID `json:"genfity_tenant_id,omitempty"`
+	GenfityUserID        string     `json:"genfity_user_id"`
+	GenfityTenantID      *string    `json:"genfity_tenant_id,omitempty"`
 	PlanCode             string     `json:"plan_code"`
 	Status               string     `json:"status"`
 	PeriodStart          *time.Time `json:"period_start,omitempty"`
@@ -103,8 +103,8 @@ type RouterInstance struct {
 type UsageLedgerEntry struct {
 	ID                 uuid.UUID       `json:"id"`
 	RequestID          string          `json:"request_id"`
-	GenfityUserID      uuid.UUID       `json:"genfity_user_id"`
-	GenfityTenantID    *uuid.UUID      `json:"genfity_tenant_id,omitempty"`
+	GenfityUserID      string          `json:"genfity_user_id"`
+	GenfityTenantID    *string         `json:"genfity_tenant_id,omitempty"`
 	APIKeyID           *uuid.UUID      `json:"api_key_id,omitempty"`
 	PublicModel        string          `json:"public_model"`
 	RouterModel        *string         `json:"router_model,omitempty"`
@@ -126,9 +126,9 @@ type UsageLedgerEntry struct {
 }
 
 type AuthUser struct {
-	ID        uuid.UUID  `json:"id"`
-	Email     string     `json:"email"`
-	Role      string     `json:"role"`
-	TenantID  *uuid.UUID `json:"tenant_id,omitempty"`
-	SessionID string     `json:"session_id,omitempty"`
+	ID        string  `json:"id"`
+	Email     string  `json:"email"`
+	Role      string  `json:"role"`
+	TenantID  *string `json:"tenant_id,omitempty"`
+	SessionID string  `json:"session_id,omitempty"`
 }

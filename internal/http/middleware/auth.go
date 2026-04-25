@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	jwt "github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/hlog"
 
@@ -73,19 +72,14 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 			role := claimString(claims, "role")
 			sessionID := claimString(claims, "sessionId", "session_id")
 			tenantIDStr := claimString(claims, "tenantId", "tenant_id")
-
-			userID, err := uuid.Parse(userIDStr)
-			if err != nil {
+			if userIDStr == "" {
 				respondError(w, http.StatusUnauthorized, "invalid_user_id")
 				return
 			}
 
-			var tenantID *uuid.UUID
+			var tenantID *string
 			if tenantIDStr != "" {
-				tID, err := uuid.Parse(tenantIDStr)
-				if err == nil {
-					tenantID = &tID
-				}
+				tenantID = &tenantIDStr
 			}
 
 			// Check Roles
@@ -103,7 +97,7 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 			}
 
 			user := store.AuthUser{
-				ID:        userID,
+				ID:        userIDStr,
 				Email:     email,
 				Role:      role,
 				TenantID:  tenantID,
@@ -115,7 +109,7 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 			// Add to logger
 			logger := hlog.FromRequest(r)
 			logger.UpdateContext(func(c zerolog.Context) zerolog.Context {
-				return c.Str("user_id", userID.String()).Str("role", role)
+				return c.Str("user_id", userIDStr).Str("role", role)
 			})
 
 			next.ServeHTTP(w, r.WithContext(ctx))

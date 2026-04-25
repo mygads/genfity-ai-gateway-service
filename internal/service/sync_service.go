@@ -53,7 +53,7 @@ func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []st
 	return count, nil
 }
 
-func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID uuid.UUID, balance string) error {
+func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, balance string) error {
 	_, err := s.store.UpsertBalanceSnapshot(ctx, userID, balance)
 	return err
 }
@@ -70,6 +70,6 @@ func (s *SyncService) ExportModelPrices(ctx context.Context) []store.AIModelPric
 	return s.models.ListPrices(ctx)
 }
 
-func (s *SyncService) ExportUsageSummary(ctx context.Context, userID uuid.UUID) map[string]any {
+func (s *SyncService) ExportUsageSummary(ctx context.Context, userID string) map[string]any {
 	return s.usage.SummaryByUser(ctx, userID)
 }

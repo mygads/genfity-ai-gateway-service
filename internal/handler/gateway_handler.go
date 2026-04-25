@@ -116,9 +116,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	payload["model"] = route.RouterModel
 
-	tenantIDStr := apiKey.GenfityUserID.String()
+	tenantIDStr := apiKey.GenfityUserID
 	if apiKey.GenfityTenantID != nil {
-		tenantIDStr = apiKey.GenfityTenantID.String()
+		tenantIDStr = *apiKey.GenfityTenantID
 	}
 
 	if h.rateLimit != nil {

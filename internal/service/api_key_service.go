@@ -24,8 +24,8 @@ type APIKeyService struct {
 }
 
 type CreateAPIKeyInput struct {
-	UserID    uuid.UUID
-	TenantID  *uuid.UUID
+	UserID    string
+	TenantID  *string
 	Name      string
 	ExpiresAt *time.Time
 }
@@ -60,7 +60,7 @@ func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*C
 	}
 	s.store.UpsertAPIKey(ctx, record)
 
-	s.log.Info().Str("user_id", input.UserID.String()).Str("api_key_id", record.ID.String()).Msg("created api key")
+	s.log.Info().Str("user_id", input.UserID).Str("api_key_id", record.ID.String()).Msg("created api key")
 
 	return &CreatedAPIKey{Record: record, RawKey: raw}, nil
 }
@@ -98,7 +98,7 @@ func (s *APIKeyService) Revoke(ctx context.Context, id uuid.UUID) error {
 	return s.store.RevokeAPIKey(ctx, id, time.Now().UTC())
 }
 
-func (s *APIKeyService) ListByUser(ctx context.Context, userID uuid.UUID) []store.APIKey {
+func (s *APIKeyService) ListByUser(ctx context.Context, userID string) []store.APIKey {
 	return s.store.ListAPIKeysByUser(ctx, userID)
 }
 

@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/hlog"
 
@@ -60,11 +59,11 @@ func (m *APIKeyMiddleware) RequireAPIKey(next http.Handler) http.Handler {
 	})
 }
 
-func tenantString(id *uuid.UUID) string {
+func tenantString(id *string) string {
 	if id == nil {
 		return ""
 	}
-	return id.String()
+	return *id
 }
 
 func GetAPIKey(ctx context.Context) store.APIKey {

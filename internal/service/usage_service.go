@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"genfity-ai-gateway-service/internal/store"
@@ -21,11 +20,11 @@ func (s *UsageService) Record(ctx context.Context, entry store.UsageLedgerEntry)
 	return s.store.AppendUsage(ctx, entry)
 }
 
-func (s *UsageService) ListByUser(ctx context.Context, userID uuid.UUID) []store.UsageLedgerEntry {
+func (s *UsageService) ListByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {
 	return s.store.ListUsageByUser(ctx, userID)
 }
 
-func (s *UsageService) SummaryByUser(ctx context.Context, userID uuid.UUID) map[string]any {
+func (s *UsageService) SummaryByUser(ctx context.Context, userID string) map[string]any {
 	entries := s.ListByUser(ctx, userID)
 	var promptTokens int64
 	var completionTokens int64

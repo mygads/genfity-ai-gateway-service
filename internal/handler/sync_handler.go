@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/google/uuid"
-
 	"genfity-ai-gateway-service/internal/service"
 	"genfity-ai-gateway-service/internal/store"
 )
@@ -15,8 +13,8 @@ type SyncHandler struct {
 }
 
 type balanceSyncPayload struct {
-	UserID  uuid.UUID `json:"user_id"`
-	Balance string    `json:"balance"`
+	UserID  string `json:"user_id"`
+	Balance string `json:"balance"`
 }
 
 func NewSyncHandler(sync *service.SyncService) *SyncHandler {
@@ -57,7 +55,7 @@ func (h *SyncHandler) SyncCustomerBalance(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.UserID == uuid.Nil {
+	if payload.UserID == "" {
 		respondError(w, http.StatusBadRequest, "invalid_user_id")
 		return
 	}
@@ -81,8 +79,8 @@ func (h *SyncHandler) ExportModelPrices(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *SyncHandler) ExportUsageSummary(w http.ResponseWriter, r *http.Request) {
-	userID, err := uuid.Parse(r.URL.Query().Get("user_id"))
-	if err != nil {
+	userID := r.URL.Query().Get("user_id")
+	if userID == "" {
 		respondError(w, http.StatusBadRequest, "invalid_user_id")
 		return
 	}

@@ -22,8 +22,8 @@ CREATE TABLE ai_gateway.subscription_plan_snapshots (
 
 CREATE TABLE ai_gateway.customer_entitlements (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    genfity_user_id uuid NOT NULL,
-    genfity_tenant_id uuid,
+    genfity_user_id text NOT NULL,
+    genfity_tenant_id text,
     plan_code text NOT NULL,
     status text NOT NULL DEFAULT 'active',
     period_start timestamptz,
@@ -43,8 +43,8 @@ CREATE INDEX customer_entitlements_status_period_end_idx ON ai_gateway.customer_
 
 CREATE TABLE ai_gateway.api_keys (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    genfity_user_id uuid NOT NULL,
-    genfity_tenant_id uuid,
+    genfity_user_id text NOT NULL,
+    genfity_tenant_id text,
     name text NOT NULL,
     key_prefix text NOT NULL UNIQUE,
     key_hash text NOT NULL,
@@ -116,8 +116,8 @@ CREATE INDEX ai_model_routes_router_idx ON ai_gateway.ai_model_routes (router_in
 CREATE TABLE ai_gateway.usage_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id text NOT NULL UNIQUE,
-    genfity_user_id uuid NOT NULL,
-    genfity_tenant_id uuid,
+    genfity_user_id text NOT NULL,
+    genfity_tenant_id text,
     api_key_id uuid REFERENCES ai_gateway.api_keys(id),
     public_model text NOT NULL,
     router_model text,
@@ -144,8 +144,8 @@ CREATE INDEX usage_ledger_api_key_started_idx ON ai_gateway.usage_ledger (api_ke
 
 CREATE TABLE ai_gateway.quota_counters (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    genfity_user_id uuid NOT NULL,
-    genfity_tenant_id uuid,
+    genfity_user_id text NOT NULL,
+    genfity_tenant_id text,
     period_start timestamptz NOT NULL,
     period_end timestamptz NOT NULL,
     tokens_used bigint NOT NULL DEFAULT 0,

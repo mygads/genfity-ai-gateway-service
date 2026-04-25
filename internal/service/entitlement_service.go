@@ -24,7 +24,7 @@ func (s *EntitlementService) Upsert(ctx context.Context, item store.CustomerEnti
 	if item.ID == uuid.Nil {
 		item.ID = uuid.New()
 	}
-	if item.GenfityUserID == uuid.Nil {
+	if item.GenfityUserID == "" {
 		return store.CustomerEntitlement{}, fmt.Errorf("genfity_user_id is required")
 	}
 	if item.PlanCode == "" {
@@ -37,11 +37,11 @@ func (s *EntitlementService) Upsert(ctx context.Context, item store.CustomerEnti
 	return s.store.UpsertEntitlement(ctx, item), nil
 }
 
-func (s *EntitlementService) GetByUser(ctx context.Context, userID uuid.UUID) (*store.CustomerEntitlement, error) {
+func (s *EntitlementService) GetByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
 	return s.store.GetEntitlementByUser(ctx, userID)
 }
 
-func (s *EntitlementService) CheckActive(ctx context.Context, userID uuid.UUID) (*store.CustomerEntitlement, error) {
+func (s *EntitlementService) CheckActive(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
 	entitlement, err := s.GetByUser(ctx, userID)
 	if err != nil {
 		return nil, err

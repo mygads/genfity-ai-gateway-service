@@ -94,7 +94,7 @@ func (s *PostgresStore) UpsertAPIKey(ctx context.Context, item store.APIKey) sto
 	return item
 }
 
-func (s *PostgresStore) ListAPIKeysByUser(ctx context.Context, userID uuid.UUID) []store.APIKey {
+func (s *PostgresStore) ListAPIKeysByUser(ctx context.Context, userID string) []store.APIKey {
 	rows, err := s.pool.Query(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, last_used_at, expires_at, created_at, revoked_at FROM ai_gateway.api_keys WHERE genfity_user_id = $1 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil
@@ -269,7 +269,7 @@ func (s *PostgresStore) upsertEntitlement(ctx context.Context, item store.Custom
 	return item
 }
 
-func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID uuid.UUID) (*store.CustomerEntitlement, error) {
+func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
 	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at FROM ai_gateway.customer_entitlements WHERE genfity_user_id = $1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1`, userID).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
@@ -279,7 +279,7 @@ func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID uuid.UU
 	return &item, err
 }
 
-func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID uuid.UUID, balance string) (*store.CustomerEntitlement, error) {
+func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string, balance string) (*store.CustomerEntitlement, error) {
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
 	err := s.pool.QueryRow(ctx, `UPDATE ai_gateway.customer_entitlements SET balance_snapshot = $2, updated_from_genfity_at = now(), updated_at = now() WHERE genfity_user_id = $1 RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, userID, balance).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
@@ -345,11 +345,11 @@ func (s *PostgresStore) ListUsage(ctx context.Context) []store.UsageLedgerEntry 
 	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC`)
 }
 
-func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID uuid.UUID) []store.UsageLedgerEntry {
+func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {
 	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 ORDER BY started_at DESC`, userID)
 }
 
-func (s *PostgresStore) ListUsageByTenant(ctx context.Context, tenantID uuid.UUID) []store.UsageLedgerEntry {
+func (s *PostgresStore) ListUsageByTenant(ctx context.Context, tenantID string) []store.UsageLedgerEntry {
 	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_tenant_id = $1 ORDER BY started_at DESC`, tenantID)
 }
 

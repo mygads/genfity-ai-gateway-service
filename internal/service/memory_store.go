@@ -84,7 +84,7 @@ func (s *MemoryStore) ListUsage(_ context.Context) []store.UsageLedgerEntry {
 	return items
 }
 
-func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID uuid.UUID) []store.UsageLedgerEntry {
+func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID string) []store.UsageLedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	items := make([]store.UsageLedgerEntry, 0)
@@ -97,7 +97,7 @@ func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID uuid.UUID) [
 	return items
 }
 
-func (s *MemoryStore) UpsertBalanceSnapshot(_ context.Context, userID uuid.UUID, balance string) (*store.CustomerEntitlement, error) {
+func (s *MemoryStore) UpsertBalanceSnapshot(_ context.Context, userID string, balance string) (*store.CustomerEntitlement, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, item := range s.entitlements {
@@ -135,7 +135,7 @@ func (s *MemoryStore) UpsertEntitlementByUser(_ context.Context, item store.Cust
 	return item
 }
 
-func (s *MemoryStore) ListAPIKeysByUser(_ context.Context, userID uuid.UUID) []store.APIKey {
+func (s *MemoryStore) ListAPIKeysByUser(_ context.Context, userID string) []store.APIKey {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	items := make([]store.APIKey, 0)
@@ -260,7 +260,7 @@ func (s *MemoryStore) GetRouteByModelID(_ context.Context, modelID uuid.UUID) (*
 	return nil, ErrNotFound
 }
 
-func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID uuid.UUID) (*store.CustomerEntitlement, error) {
+func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID string) (*store.CustomerEntitlement, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, item := range s.entitlements {
@@ -310,7 +310,7 @@ func (s *MemoryStore) AppendUsage(_ context.Context, item store.UsageLedgerEntry
 	return item
 }
 
-func (s *MemoryStore) ListUsageByUser(_ context.Context, userID uuid.UUID) []store.UsageLedgerEntry {
+func (s *MemoryStore) ListUsageByUser(_ context.Context, userID string) []store.UsageLedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	items := make([]store.UsageLedgerEntry, 0)

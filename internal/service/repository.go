@@ -14,7 +14,7 @@ type Store interface {
 	ListPlans(context.Context) []store.SubscriptionPlanSnapshot
 
 	UpsertAPIKey(context.Context, store.APIKey) store.APIKey
-	ListAPIKeysByUser(context.Context, uuid.UUID) []store.APIKey
+	ListAPIKeysByUser(context.Context, string) []store.APIKey
 	FindAPIKeyByPrefix(context.Context, string) (*store.APIKey, error)
 	RevokeAPIKey(context.Context, uuid.UUID, time.Time) error
 
@@ -31,8 +31,8 @@ type Store interface {
 
 	UpsertEntitlement(context.Context, store.CustomerEntitlement) store.CustomerEntitlement
 	UpsertEntitlementByUser(context.Context, store.CustomerEntitlement) store.CustomerEntitlement
-	GetEntitlementByUser(context.Context, uuid.UUID) (*store.CustomerEntitlement, error)
-	UpsertBalanceSnapshot(context.Context, uuid.UUID, string) (*store.CustomerEntitlement, error)
+	GetEntitlementByUser(context.Context, string) (*store.CustomerEntitlement, error)
+	UpsertBalanceSnapshot(context.Context, string, string) (*store.CustomerEntitlement, error)
 
 	UpsertRouterInstance(context.Context, store.RouterInstance) store.RouterInstance
 	ListRouterInstances(context.Context) []store.RouterInstance
@@ -40,6 +40,6 @@ type Store interface {
 
 	AppendUsage(context.Context, store.UsageLedgerEntry) store.UsageLedgerEntry
 	ListUsage(context.Context) []store.UsageLedgerEntry
-	ListUsageByUser(context.Context, uuid.UUID) []store.UsageLedgerEntry
-	ListUsageByTenant(context.Context, uuid.UUID) []store.UsageLedgerEntry
+	ListUsageByUser(context.Context, string) []store.UsageLedgerEntry
+	ListUsageByTenant(context.Context, string) []store.UsageLedgerEntry
 }

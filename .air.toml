@@ -2,8 +2,10 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-  cmd = "go build -o ./tmp/main.exe ./cmd/http"
+  cmd = "goose -dir internal/database/migrations postgres $env:DATABASE_URL up; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; go build -o ./tmp/main.exe ./cmd/http"
   bin = "./tmp/main.exe"
+  full_bin = ".\\tmp\\main.exe"
+  entrypoint = ".\\tmp\\main.exe"
   include_ext = ["go", "sql", "toml", "env"]
   exclude_dir = ["tmp", "node_modules", ".git", "docs"]
   delay = 1000

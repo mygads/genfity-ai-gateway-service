@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DB_URL="${DATABASE_URL:-postgresql://genfity:dbgenfity2026@localhost:5432/genfity_ai_gateway?sslmode=disable}"
-USER_ID="${SEED_USER_ID:-11111111-1111-1111-1111-111111111111}"
+USER_ID="${SEED_USER_ID:-cm-local-customer-seed}"
 TENANT_ID="${SEED_TENANT_ID:-}"
 PLAN_CODE="${SEED_PLAN_CODE:-local-dev}"
 MODEL_PUBLIC="${SEED_MODEL_PUBLIC:-genfity/test-model}"
@@ -45,7 +45,7 @@ INSERT INTO ai_gateway.customer_entitlements (
   period_start, period_end, quota_tokens_monthly, balance_snapshot, metadata
 )
 VALUES (
-  '$USER_ID', NULLIF('$TENANT_ID', '')::uuid, '$PLAN_CODE', 'active',
+  '$USER_ID', NULLIF('$TENANT_ID', ''), '$PLAN_CODE', 'active',
   now(), now() + interval '30 days', 100000, 0, '{}'::jsonb
 )
 ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
@@ -92,7 +92,7 @@ INSERT INTO ai_gateway.api_keys (
   genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, last_used_at
 )
 VALUES (
-  '$USER_ID', NULLIF('$TENANT_ID', '')::uuid, '$API_KEY_NAME', '$KEY_PREFIX', '$KEY_HASH', 'active', now()
+  '$USER_ID', NULLIF('$TENANT_ID', ''), '$API_KEY_NAME', '$KEY_PREFIX', '$KEY_HASH', 'active', now()
 )
 ON CONFLICT (key_prefix) DO UPDATE SET
   name = EXCLUDED.name,
