@@ -1,0 +1,23 @@
+services:
+  genfity-ai-gateway:
+    image: ${IMAGE:-ghcr.io/mygads/genfity-ai-gateway-service:latest}
+    container_name: genfity-ai-gateway
+    restart: unless-stopped
+    ports:
+      - "8094:8080"
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - genfity-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  genfity-network:
+    external: true

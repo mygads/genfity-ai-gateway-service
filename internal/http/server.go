@@ -45,6 +45,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	authMiddleware := mw.NewAuthMiddleware(&cfg)
 	apiKeyMiddleware := mw.NewAPIKeyMiddleware(&cfg, apiKeys)
 	internalMiddleware := mw.NewInternalMiddleware(&cfg)
+	globalRateLimitMiddleware := mw.NewGlobalRateLimitMiddleware(redisClient, cfg.RedisPrefix, cfg.GlobalRateLimitEnabled, cfg.GlobalRateLimitRPM, cfg.GlobalRateLimitBurst)
 
 	r := chi.NewRouter()
 	r.Use(mw.RequestID)
@@ -62,8 +63,8 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/models", gatewayHandler.ListModels)
-		r.With(apiKeyMiddleware.RequireAPIKey).Post("/chat/completions", gatewayHandler.ChatCompletions)
-		r.With(apiKeyMiddleware.RequireAPIKey).Post("/embeddings", gatewayHandler.Embeddings)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/chat/completions", gatewayHandler.ChatCompletions)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/embeddings", gatewayHandler.Embeddings)
 	})
 
 	r.Route("/customer", func(r chi.Router) {

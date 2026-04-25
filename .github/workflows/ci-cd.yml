@@ -48,7 +48,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version-file: go.mod
           cache: true
 
       - name: Download dependencies
@@ -58,7 +58,7 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        run: go test -v ./... || true
+        run: go test -v ./...
 
   # ===================================================================================
   # BUILD JOB
@@ -149,7 +149,7 @@ jobs:
         run: |
           if [ -n "$ENV_FILE" ]; then
             echo "📝 Updating .env file on server (full replace)..."
-            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > ~/genfity/genfity-ai-gateway/.env"
+            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > ~/genfity/genfity-ai-gateway-service/.env"
             echo "✅ ENV file updated!"
           else
             echo "⏭️ ENV_FILE secret not set, skipping .env update"
@@ -164,7 +164,7 @@ jobs:
           echo "🚀 Deploying with docker compose..."
 
           ssh $VPS_USER@$VPS_HOST << ENDSSH
-            cd ~/genfity/genfity-ai-gateway
+            cd ~/genfity/genfity-ai-gateway-service
 
             # Force pull latest changes (override local, no conflicts)
             git remote set-url origin https://x-access-token:${GHCR_TOKEN}@github.com/${{ github.repository }}.git
@@ -216,7 +216,7 @@ jobs:
         run: |
           echo "## 🚀 AI Gateway Deployment Successful" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**URL:** https://ai-gateway.genfity.com" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** https://ai.genfity.com" >> $GITHUB_STEP_SUMMARY
 
   # ===================================================================================
   # CLEANUP JOB
