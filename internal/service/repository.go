@@ -12,6 +12,7 @@ import (
 type Store interface {
 	UpsertPlan(context.Context, store.SubscriptionPlanSnapshot) store.SubscriptionPlanSnapshot
 	ListPlans(context.Context) []store.SubscriptionPlanSnapshot
+	GetPlanByCode(context.Context, string) (*store.SubscriptionPlanSnapshot, error)
 
 	UpsertAPIKey(context.Context, store.APIKey) store.APIKey
 	ListAPIKeysByUser(context.Context, string) []store.APIKey

@@ -31,7 +31,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	syncService := service.NewSyncService(store, entitlements, models, usage, logger)
 	var rateLimit *service.RateLimitService
 	if redisClient != nil {
-		rateLimit = service.NewRateLimitService(redisClient, cfg.RedisPrefix, cfg.RateLimitRPM, cfg.RateLimitTPM, cfg.ConcurrentLimit, logger)
+		rateLimit = service.NewRateLimitService(redisClient, cfg.RedisPrefix, logger)
 	}
 	nineClient := router.NewNineRouterClient(cfg.NineRouterCore1InternalURL, cfg.NineRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 

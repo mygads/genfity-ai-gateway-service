@@ -28,12 +28,9 @@ type Config struct {
 	DefaultCurrency       string
 	LogLevel              string
 	RequestTimeoutSeconds int
-	RateLimitRPM            int
-	RateLimitTPM            int
-	ConcurrentLimit         int
-	GlobalRateLimitEnabled  bool
-	GlobalRateLimitRPM      int
-	GlobalRateLimitBurst    int
+	GlobalRateLimitEnabled bool
+	GlobalRateLimitRPM     int
+	GlobalRateLimitBurst   int
 }
 
 func Load() Config {
@@ -59,9 +56,6 @@ func Load() Config {
 		DefaultCurrency:       getEnv("DEFAULT_CURRENCY", "IDR"),
 		LogLevel:              getEnv("LOG_LEVEL", "info"),
 		RequestTimeoutSeconds: getEnvInt("REQUEST_TIMEOUT_SECONDS", 120),
-		RateLimitRPM:           getEnvInt("RATE_LIMIT_RPM", 60),
-		RateLimitTPM:           getEnvInt("RATE_LIMIT_TPM", 120000),
-		ConcurrentLimit:        getEnvInt("CONCURRENT_LIMIT", 5),
 		GlobalRateLimitEnabled: getEnvBool("GLOBAL_RATE_LIMIT_ENABLED", true),
 		GlobalRateLimitRPM:     getEnvInt("GLOBAL_RATE_LIMIT_RPM", 300),
 		GlobalRateLimitBurst:   getEnvInt("GLOBAL_RATE_LIMIT_BURST", 60),

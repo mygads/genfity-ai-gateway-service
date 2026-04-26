@@ -58,7 +58,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := h.entitlements.CheckActive(ctx, apiKey.GenfityUserID)
+	_, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		respondError(w, http.StatusPaymentRequired, err.Error())
 		return
@@ -102,11 +102,12 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err := h.entitlements.CheckActive(ctx, apiKey.GenfityUserID)
+	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		respondError(w, http.StatusPaymentRequired, err.Error())
 		return
 	}
+	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
 
 	route, _, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
@@ -121,17 +122,17 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		tenantIDStr = *apiKey.GenfityTenantID
 	}
 
-	if h.rateLimit != nil {
-		if err := h.rateLimit.CheckRPM(ctx, apiKey.ID.String()); err != nil {
+	if h.rateLimit != nil && limits.HasRPM() {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.ID.String(), limits.RPM); err != nil {
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
 	}
 
 	release := func() {}
-	if h.rateLimit != nil {
+	if h.rateLimit != nil && limits.HasConcurrency() {
 		var acquireErr error
-		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, tenantIDStr)
+		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, tenantIDStr, limits.ConcurrentLimit)
 		if acquireErr != nil {
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return

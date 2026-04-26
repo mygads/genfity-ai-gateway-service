@@ -65,6 +65,17 @@ func (s *MemoryStore) ListPlans(_ context.Context) []store.SubscriptionPlanSnaps
 	return items
 }
 
+func (s *MemoryStore) GetPlanByCode(_ context.Context, planCode string) (*store.SubscriptionPlanSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.plans[planCode]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := item
+	return &copy, nil
+}
+
 func (s *MemoryStore) UpsertAPIKey(_ context.Context, key store.APIKey) store.APIKey {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -16,6 +16,11 @@ type EntitlementService struct {
 	log   zerolog.Logger
 }
 
+type ActiveSubscription struct {
+	Entitlement *store.CustomerEntitlement
+	Plan        *store.SubscriptionPlanSnapshot
+}
+
 func NewEntitlementService(store Store, logger zerolog.Logger) *EntitlementService {
 	return &EntitlementService{store: store, log: logger.With().Str("component", "entitlement_service").Logger()}
 }
@@ -42,6 +47,14 @@ func (s *EntitlementService) GetByUser(ctx context.Context, userID string) (*sto
 }
 
 func (s *EntitlementService) CheckActive(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
+	subscription, err := s.CheckActiveSubscription(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return subscription.Entitlement, nil
+}
+
+func (s *EntitlementService) CheckActiveSubscription(ctx context.Context, userID string) (*ActiveSubscription, error) {
 	entitlement, err := s.GetByUser(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -52,5 +65,12 @@ func (s *EntitlementService) CheckActive(ctx context.Context, userID string) (*s
 	if entitlement.PeriodEnd != nil && entitlement.PeriodEnd.Before(time.Now().UTC()) {
 		return nil, fmt.Errorf("subscription_inactive")
 	}
-	return entitlement, nil
+	plan, err := s.store.GetPlanByCode(ctx, entitlement.PlanCode)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Status != "active" {
+		return nil, fmt.Errorf("subscription_inactive")
+	}
+	return &ActiveSubscription{Entitlement: entitlement, Plan: plan}, nil
 }
