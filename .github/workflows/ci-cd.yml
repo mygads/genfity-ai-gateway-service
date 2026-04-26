@@ -149,8 +149,8 @@ jobs:
         run: |
           if [ -n "$ENV_FILE" ]; then
             echo "📝 Updating .env file on server (full replace)..."
-            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > ~/genfity/genfity-ai-gateway-service/.env"
-            echo "✅ ENV file updated!"
+            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > /tmp/genfity-ai-gateway.env && sudo install -m 600 -o root -g root /tmp/genfity-ai-gateway.env ~/genfity/genfity-ai-gateway/.env && rm -f /tmp/genfity-ai-gateway.env"
+            echo "✅ ENV file updated with full replace!"
           else
             echo "⏭️ ENV_FILE secret not set, skipping .env update"
           fi
@@ -164,7 +164,7 @@ jobs:
           echo "🚀 Deploying with docker compose..."
 
           ssh $VPS_USER@$VPS_HOST << ENDSSH
-            cd ~/genfity/genfity-ai-gateway-service
+            cd ~/genfity/genfity-ai-gateway
 
             # Force pull latest changes (override local, no conflicts)
             git remote set-url origin https://x-access-token:${GHCR_TOKEN}@github.com/${{ github.repository }}.git
