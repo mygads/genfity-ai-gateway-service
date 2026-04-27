@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 DB_URL="${DATABASE_URL:-postgresql://genfity:dbgenfity2026@localhost:5432/genfity_ai_gateway?sslmode=disable}"
@@ -7,8 +7,8 @@ TENANT_ID="${SEED_TENANT_ID:-}"
 PLAN_CODE="${SEED_PLAN_CODE:-local-dev}"
 MODEL_PUBLIC="${SEED_MODEL_PUBLIC:-genfity/test-model}"
 MODEL_DISPLAY="${SEED_MODEL_DISPLAY:-Genfity Test Model}"
-ROUTER_CODE="${SEED_ROUTER_CODE:-ai-core1}"
-ROUTER_MODEL="${SEED_ROUTER_MODEL:-openai/gpt-4o-mini}"
+ROUTER_CODE="${SEED_ROUTER_CODE:-ai-core2}"
+ROUTER_MODEL="${SEED_ROUTER_MODEL:-gpt-5}"
 API_KEY_NAME="${SEED_API_KEY_NAME:-Local Smoke Test Key}"
 RAW_KEY="${SEED_RAW_KEY:-sk_genfity_live_localseed_1234567890abcdefghijklmnopqrstuvwxyz}"
 KEY_PREFIX="${RAW_KEY:0:20}"
@@ -55,6 +55,17 @@ ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
   quota_tokens_monthly = EXCLUDED.quota_tokens_monthly,
   balance_snapshot = EXCLUDED.balance_snapshot,
   updated_at = now();
+
+INSERT INTO ai_gateway.router_instances (
+  code, public_base_url, internal_base_url, status, metadata
+) VALUES (
+  '$ROUTER_CODE', 'https://ai-core2.genfity.com', 'https://ai-core2.genfity.com', 'active', '{}'::jsonb
+)
+ON CONFLICT (code) DO UPDATE SET
+  public_base_url = EXCLUDED.public_base_url,
+  internal_base_url = EXCLUDED.internal_base_url,
+  status = EXCLUDED.status,
+  metadata = EXCLUDED.metadata;
 
 INSERT INTO ai_gateway.ai_models (
   public_model, display_name, description, status, supports_streaming, supports_tools, supports_vision, metadata

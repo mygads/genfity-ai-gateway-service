@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"context"
@@ -385,6 +385,13 @@ func (s *PostgresStore) ListUsage(ctx context.Context) []store.UsageLedgerEntry 
 	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC`)
 }
 
+func (s *PostgresStore) ListAllUsage(ctx context.Context, limit int) []store.UsageLedgerEntry {
+	if limit <= 0 {
+		limit = 100
+	}
+	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC LIMIT `, limit)
+}
+
 func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {
 	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 ORDER BY started_at DESC`, userID)
 }
@@ -456,3 +463,99 @@ func nilUUID(value uuid.UUID) any {
 	}
 	return value
 }
+
+// --- VirtualCombo methods ---
+
+func (s *PostgresStore) UpsertVirtualCombo(ctx context.Context, combo store.VirtualCombo) store.VirtualCombo {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO ai_gateway.virtual_combos (id, model_id, name, description, status, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (id) DO UPDATE SET
+			name = EXCLUDED.name,
+			description = EXCLUDED.description,
+			status = EXCLUDED.status,
+			metadata = EXCLUDED.metadata,
+			updated_at = now()`,
+		combo.ID, combo.ModelID, combo.Name, combo.Description,
+		defaultString(combo.Status, "active"), rawJSON(combo.Metadata),
+	)
+	if err != nil {
+		return combo
+	}
+	_, _ = s.pool.Exec(ctx, `DELETE FROM ai_gateway.virtual_combo_entries WHERE combo_id = $1`, combo.ID)
+	for _, e := range combo.Entries {
+		entryID := e.ID
+		if entryID == uuid.Nil {
+			entryID = uuid.New()
+		}
+		triggerJSON, _ := json.Marshal(e.TriggerOn)
+		_, _ = s.pool.Exec(ctx, `
+			INSERT INTO ai_gateway.virtual_combo_entries
+			(id, combo_id, priority, router_instance_code, router_model, trigger_on, metadata)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			entryID, combo.ID, e.Priority, e.RouterInstanceCode, e.RouterModel, triggerJSON, rawJSON(e.Metadata),
+		)
+	}
+	return combo
+}
+
+func (s *PostgresStore) ListVirtualCombos(ctx context.Context) []store.VirtualCombo {
+	rows, err := s.pool.Query(ctx, `SELECT id, model_id, name, description, status, metadata, created_at, updated_at FROM ai_gateway.virtual_combos ORDER BY name ASC`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var combos []store.VirtualCombo
+	for rows.Next() {
+		var c store.VirtualCombo
+		if err := rows.Scan(&c.ID, &c.ModelID, &c.Name, &c.Description, &c.Status, &c.Metadata, &c.CreatedAt, &c.UpdatedAt); err == nil {
+			c.Entries = s.loadComboEntries(ctx, c.ID)
+			combos = append(combos, c)
+		}
+	}
+	return combos
+}
+
+func (s *PostgresStore) GetVirtualComboByID(ctx context.Context, id uuid.UUID) (*store.VirtualCombo, error) {
+	var c store.VirtualCombo
+	err := s.pool.QueryRow(ctx, `SELECT id, model_id, name, description, status, metadata, created_at, updated_at FROM ai_gateway.virtual_combos WHERE id = $1`, id).Scan(&c.ID, &c.ModelID, &c.Name, &c.Description, &c.Status, &c.Metadata, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	c.Entries = s.loadComboEntries(ctx, c.ID)
+	return &c, nil
+}
+
+func (s *PostgresStore) DeleteVirtualCombo(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM ai_gateway.virtual_combos WHERE id = $1`, id)
+	return err
+}
+
+func (s *PostgresStore) GetVirtualComboByModelID(ctx context.Context, modelID uuid.UUID) (*store.VirtualCombo, error) {
+	var c store.VirtualCombo
+	err := s.pool.QueryRow(ctx, `SELECT id, model_id, name, description, status, metadata, created_at, updated_at FROM ai_gateway.virtual_combos WHERE model_id = $1 AND status = 'active' LIMIT 1`, modelID).Scan(&c.ID, &c.ModelID, &c.Name, &c.Description, &c.Status, &c.Metadata, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	c.Entries = s.loadComboEntries(ctx, c.ID)
+	return &c, nil
+}
+
+func (s *PostgresStore) loadComboEntries(ctx context.Context, comboID uuid.UUID) []store.VirtualComboEntry {
+	rows, err := s.pool.Query(ctx, `SELECT id, combo_id, priority, router_instance_code, router_model, trigger_on, metadata, created_at FROM ai_gateway.virtual_combo_entries WHERE combo_id = $1 ORDER BY priority ASC`, comboID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var entries []store.VirtualComboEntry
+	for rows.Next() {
+		var e store.VirtualComboEntry
+		var triggerJSON []byte
+		if err := rows.Scan(&e.ID, &e.ComboID, &e.Priority, &e.RouterInstanceCode, &e.RouterModel, &triggerJSON, &e.Metadata, &e.CreatedAt); err == nil {
+			_ = json.Unmarshal(triggerJSON, &e.TriggerOn)
+			entries = append(entries, e)
+		}
+	}
+	return entries
+}
+

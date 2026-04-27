@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"context"
@@ -24,6 +24,7 @@ type MemoryStore struct {
 	models       map[uuid.UUID]store.AIModel
 	prices       map[uuid.UUID]store.AIModelPrice
 	routes       map[uuid.UUID]store.AIModelRoute
+	combos       map[uuid.UUID]store.VirtualCombo
 	entitlements map[uuid.UUID]store.CustomerEntitlement
 	routers      map[string]store.RouterInstance
 	usage        []store.UsageLedgerEntry
@@ -36,6 +37,7 @@ func NewMemoryStore() *MemoryStore {
 		models:       make(map[uuid.UUID]store.AIModel),
 		prices:       make(map[uuid.UUID]store.AIModelPrice),
 		routes:       make(map[uuid.UUID]store.AIModelRoute),
+		combos:       make(map[uuid.UUID]store.VirtualCombo),
 		entitlements: make(map[uuid.UUID]store.CustomerEntitlement),
 		routers:      make(map[string]store.RouterInstance),
 		usage:        make([]store.UsageLedgerEntry, 0),
@@ -87,6 +89,56 @@ func (s *MemoryStore) UpsertAPIKey(_ context.Context, key store.APIKey) store.AP
 	}
 	s.apiKeys[key.ID] = key
 	return key
+}
+
+func (s *MemoryStore) ListAPIKeysByUser(_ context.Context, userID string) []store.APIKey {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]store.APIKey, 0)
+	for _, item := range s.apiKeys {
+		if item.GenfityUserID == userID {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
+	return items
+}
+
+func (s *MemoryStore) FindAPIKeyByPrefix(_ context.Context, prefix string) (*store.APIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.apiKeys {
+		if item.KeyPrefix == prefix && item.Status == "active" {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) RevokeAPIKey(_ context.Context, id uuid.UUID, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.apiKeys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	item.Status = "revoked"
+	item.RevokedAt = &at
+	s.apiKeys[id] = item
+	return nil
+}
+
+func (s *MemoryStore) UpdateAPIKeyStatus(_ context.Context, id uuid.UUID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.apiKeys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	item.Status = status
+	s.apiKeys[id] = item
+	return nil
 }
 
 func (s *MemoryStore) ListUsage(_ context.Context) []store.UsageLedgerEntry {
@@ -168,7 +220,12 @@ func (s *MemoryStore) UpsertBalanceSnapshot(_ context.Context, userID string, ba
 func (s *MemoryStore) UpsertEntitlement(_ context.Context, item store.CustomerEntitlement) store.CustomerEntitlement {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	item.UpdatedFromGenfityAt = time.Now().UTC()
+	if item.ID == uuid.Nil {
+		item.ID = uuid.New()
+	}
+	if item.UpdatedFromGenfityAt.IsZero() {
+		item.UpdatedFromGenfityAt = time.Now().UTC()
+	}
 	s.entitlements[item.ID] = item
 	return item
 }
@@ -178,70 +235,19 @@ func (s *MemoryStore) UpsertEntitlementByUser(_ context.Context, item store.Cust
 	defer s.mu.Unlock()
 	item.UpdatedFromGenfityAt = time.Now().UTC()
 	for id, existing := range s.entitlements {
-		if existing.GenfityUserID == item.GenfityUserID {
-			item.ID = id
+		if existing.GenfityUserID == item.GenfityUserID && existing.PlanCode == item.PlanCode {
+			if item.ID == uuid.Nil {
+				item.ID = existing.ID
+			}
 			s.entitlements[id] = item
 			return item
 		}
 	}
+	if item.ID == uuid.Nil {
+		item.ID = uuid.New()
+	}
 	s.entitlements[item.ID] = item
 	return item
-}
-
-func (s *MemoryStore) ListAPIKeysByUser(_ context.Context, userID string) []store.APIKey {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	items := make([]store.APIKey, 0)
-	for _, item := range s.apiKeys {
-		if item.GenfityUserID == userID {
-			items = append(items, item)
-		}
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
-	return items
-}
-
-func (s *MemoryStore) FindAPIKeyByPrefix(_ context.Context, prefix string) (*store.APIKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, item := range s.apiKeys {
-		if item.KeyPrefix == prefix {
-			copy := item
-			return &copy, nil
-		}
-	}
-	return nil, ErrNotFound
-}
-
-func (s *MemoryStore) RevokeAPIKey(_ context.Context, id uuid.UUID, revokedAt time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item, ok := s.apiKeys[id]
-	if !ok {
-		return ErrNotFound
-	}
-	item.Status = "revoked"
-	item.RevokedAt = &revokedAt
-	s.apiKeys[id] = item
-	return nil
-}
-
-func (s *MemoryStore) UpdateAPIKeyStatus(_ context.Context, id uuid.UUID, status string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	item, ok := s.apiKeys[id]
-	if !ok {
-		return ErrNotFound
-	}
-	item.Status = status
-	if status == "revoked" {
-		now := time.Now().UTC()
-		item.RevokedAt = &now
-	} else {
-		item.RevokedAt = nil
-	}
-	s.apiKeys[id] = item
-	return nil
 }
 
 func (s *MemoryStore) UpsertModel(_ context.Context, model store.AIModel) store.AIModel {
@@ -331,6 +337,64 @@ func (s *MemoryStore) GetRouteByModelID(_ context.Context, modelID uuid.UUID) (*
 	return nil, ErrNotFound
 }
 
+// VirtualCombo methods
+
+func (s *MemoryStore) UpsertVirtualCombo(_ context.Context, combo store.VirtualCombo) store.VirtualCombo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now().UTC()
+	if combo.CreatedAt.IsZero() {
+		combo.CreatedAt = now
+	}
+	combo.UpdatedAt = now
+	s.combos[combo.ID] = combo
+	return combo
+}
+
+func (s *MemoryStore) ListVirtualCombos(_ context.Context) []store.VirtualCombo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]store.VirtualCombo, 0, len(s.combos))
+	for _, item := range s.combos {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items
+}
+
+func (s *MemoryStore) GetVirtualComboByID(_ context.Context, id uuid.UUID) (*store.VirtualCombo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.combos[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := item
+	return &copy, nil
+}
+
+func (s *MemoryStore) DeleteVirtualCombo(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.combos[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.combos, id)
+	return nil
+}
+
+func (s *MemoryStore) GetVirtualComboByModelID(_ context.Context, modelID uuid.UUID) (*store.VirtualCombo, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.combos {
+		if item.ModelID == modelID && item.Status == "active" {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID string) (*store.CustomerEntitlement, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -407,6 +471,17 @@ func (s *MemoryStore) AppendUsage(_ context.Context, item store.UsageLedgerEntry
 	defer s.mu.Unlock()
 	s.usage = append(s.usage, item)
 	return item
+}
+
+func (s *MemoryStore) ListAllUsage(_ context.Context, limit int) []store.UsageLedgerEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]store.UsageLedgerEntry, 0, len(s.usage))
+	items = append(items, s.usage...)
+	if limit > 0 && len(items) > limit {
+		return items[len(items)-limit:]
+	}
+	return items
 }
 
 func (s *MemoryStore) ListUsageByUser(_ context.Context, userID string) []store.UsageLedgerEntry {

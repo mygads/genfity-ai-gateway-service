@@ -1,7 +1,6 @@
-package http
+﻿package http
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -26,19 +25,23 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	apiKeys := service.NewAPIKeyService(store, cfg.APIKeyPepper, logger)
 	models := service.NewModelService(store, logger)
 	routers := service.NewRouterService(store, logger)
+	combos := service.NewComboService(store, logger)
 	entitlements := service.NewEntitlementService(store, logger)
 	usage := service.NewUsageService(store, logger)
 	syncService := service.NewSyncService(store, entitlements, models, usage, logger)
+
 	var rateLimit *service.RateLimitService
 	if redisClient != nil {
 		rateLimit = service.NewRateLimitService(redisClient, cfg.RedisPrefix, logger)
 	}
-	nineClient := router.NewNineRouterClient(cfg.NineRouterCore1InternalURL, cfg.NineRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 
-	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, nineClient)
+	cliProxyClient := router.NewCLIProxyClient(cfg.AIRouterCore1InternalURL, cfg.AIRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+
+	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, combos, cliProxyClient)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
-	adminHandler := handler.NewAdminHandler(models, routers)
-	routerProxyHandler := handler.NewRouterProxyHandler(nineClient)
+	adminHandler := handler.NewAdminHandler(models, routers, usage)
+	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient)
+	comboHandler := handler.NewComboHandler(combos)
 	syncHandler := handler.NewSyncHandler(syncService)
 	healthHandler := handler.NewHealthHandler(syncService)
 
@@ -92,14 +95,19 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Post("/model-routes", adminHandler.UpsertModelRoute)
 		r.Get("/router-instances", adminHandler.ListRouterInstances)
 		r.Post("/router-instances", adminHandler.UpsertRouterInstance)
+		r.Get("/usage", adminHandler.ListAllUsage)
+
+		// Legacy router proxy routes (deprecated/stubbed for providers)
 		r.Get("/routers/{code}/health", routerProxyHandler.Health)
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)
 		r.Get("/routers/{code}/providers", routerProxyHandler.Providers)
 		r.Get("/routers/{code}/providers/{providerID}/models", routerProxyHandler.ProviderModels)
-		r.Get("/routers/{code}/combos", routerProxyHandler.Combos)
-		r.Post("/routers/{code}/combos", routerProxyHandler.CreateCombo)
-		r.Patch("/routers/{code}/combos/{comboID}", routerProxyHandler.UpdateCombo)
-		r.Delete("/routers/{code}/combos/{comboID}", routerProxyHandler.DeleteCombo)
+
+		// New internal Virtual Combos management
+		r.Get("/combos", comboHandler.ListCombos)
+		r.Post("/combos", comboHandler.CreateCombo)
+		r.Put("/combos/{comboID}", comboHandler.UpdateCombo)
+		r.Delete("/combos/{comboID}", comboHandler.DeleteCombo)
 	})
 
 	r.Route("/internal", func(r chi.Router) {
@@ -113,9 +121,9 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Get("/export/usage-summary", syncHandler.ExportUsageSummary)
 	})
 
-	return &Server{Router: r, cfg: cfg, log: logger}
-}
-
-func (s *Server) ListenAndServe() error {
-	return http.ListenAndServe(s.cfg.HTTPAddr, s.Router)
+	return &Server{
+		Router: r,
+		cfg:    cfg,
+		log:    logger,
+	}
 }

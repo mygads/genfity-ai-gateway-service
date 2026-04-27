@@ -1,7 +1,8 @@
-package main
+﻿package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -55,25 +56,31 @@ func main() {
 		logger.Info().Msg("redis up")
 	}
 
-	nineClient := router.NewNineRouterClient(cfg.NineRouterCore1InternalURL, cfg.NineRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-	if _, err := nineClient.RouterHealth(startupCtx); err != nil {
-		logger.Fatal().Err(err).Msg("9router down")
+	cliClient := router.NewCLIProxyClient(cfg.AIRouterCore1InternalURL, cfg.AIRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	if _, err := cliClient.RouterHealth(startupCtx); err != nil {
+		logger.Warn().Err(err).Msg("cli_proxy down or unreachable at startup, will keep trying at runtime")
+	} else {
+		logger.Info().Msg("cli_proxy up")
 	}
-	logger.Info().Msg("9router up")
 
-	store := service.NewPostgresStore(dbpool)
+	var store service.Store = service.NewPostgresStore(dbpool)
+
 	server := httpserver.New(cfg, redisClient, store, logger)
+	httpServer := &http.Server{
+		Addr:    cfg.HTTPAddr,
+		Handler: server.Router,
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info().Str("addr", cfg.HTTPAddr).Msg("gateway ready")
-		errCh <- server.ListenAndServe()
+		errCh <- httpServer.ListenAndServe()
 	}()
 
 	logger.Info().
 		Str("db", "up").
 		Str("redis", map[bool]string{true: "up", false: "off"}[redisClient != nil]).
-		Str("9router", "up").
+		Str("cli_proxy", "checked").
 		Msg("checks ok")
 
 	select {
@@ -81,7 +88,7 @@ func main() {
 		logger.Info().Msg("shutdown signal received")
 		time.Sleep(250 * time.Millisecond)
 	case err := <-errCh:
-		if err != nil {
+		if err != nil && err != http.ErrServerClosed {
 			logger.Fatal().Err(err).Msg("server stopped")
 		}
 	}

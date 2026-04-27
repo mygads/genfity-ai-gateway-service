@@ -1,4 +1,4 @@
-package handler
+﻿package handler
 
 import (
 	"encoding/json"
@@ -13,10 +13,11 @@ import (
 type AdminHandler struct {
 	models  *service.ModelService
 	routers *service.RouterService
+	usage   *service.UsageService
 }
 
-func NewAdminHandler(models *service.ModelService, routers *service.RouterService) *AdminHandler {
-	return &AdminHandler{models: models, routers: routers}
+func NewAdminHandler(models *service.ModelService, routers *service.RouterService, usage *service.UsageService) *AdminHandler {
+	return &AdminHandler{models: models, routers: routers, usage: usage}
 }
 
 func (h *AdminHandler) ListModels(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +90,10 @@ func (h *AdminHandler) UpsertRouterInstance(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	respondJSON(w, http.StatusOK, instance)
+}
+
+func (h *AdminHandler) ListAllUsage(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, http.StatusOK, map[string]any{"usage": h.usage.ListAll(r.Context(), 200)})
 }
 
 func (h *AdminHandler) DeleteModel(w http.ResponseWriter, r *http.Request) {

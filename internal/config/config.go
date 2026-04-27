@@ -1,4 +1,4 @@
-package config
+﻿package config
 
 import (
 	"os"
@@ -19,9 +19,10 @@ type Config struct {
 	GenfityJWTSecret      string
 	GenfityInternalSecret string
 
-	NineRouterCore1InternalURL string
-	NineRouterCore1PublicURL   string
-	NineRouterCore1APIKey      string
+	// Renamed from NineRouterCore1
+	AIRouterCore1InternalURL string
+	AIRouterCore1PublicURL   string
+	AIRouterCore1APIKey      string
 
 	APIKeyPepper          string
 	EncryptionKey         string
@@ -47,9 +48,10 @@ func Load() Config {
 		GenfityJWTSecret:      getEnv("GENFITY_JWT_SECRET", getEnv("JWT_SECRET", "")),
 		GenfityInternalSecret: getEnv("GENFITY_INTERNAL_SECRET", ""),
 
-		NineRouterCore1InternalURL: getEnv("NINE_ROUTER_CORE1_INTERNAL_URL", "http://ai-core1-9router:20128"),
-		NineRouterCore1PublicURL:   getEnv("NINE_ROUTER_CORE1_PUBLIC_URL", "https://ai-core1.genfity.com"),
-		NineRouterCore1APIKey:      getEnv("NINE_ROUTER_CORE1_API_KEY", ""),
+		// Use new AI_ROUTER_ variables but fallback to legacy NINE_ROUTER_ for compat
+		AIRouterCore1InternalURL: getEnv("AI_ROUTER_CORE1_INTERNAL_URL", getEnv("NINE_ROUTER_CORE1_INTERNAL_URL", "http://localhost:8317")),
+		AIRouterCore1PublicURL:   getEnv("AI_ROUTER_CORE1_PUBLIC_URL", getEnv("NINE_ROUTER_CORE1_PUBLIC_URL", "https://ai-core1.genfity.com")),
+		AIRouterCore1APIKey:      getEnv("AI_ROUTER_CORE1_API_KEY", getEnv("NINE_ROUTER_CORE1_API_KEY", "")),
 
 		APIKeyPepper:          getEnv("API_KEY_PEPPER", ""),
 		EncryptionKey:         getEnv("ENCRYPTION_KEY", ""),

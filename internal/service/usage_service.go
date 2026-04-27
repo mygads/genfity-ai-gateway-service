@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"context"
@@ -69,4 +69,7 @@ func (s *UsageService) summaryForEntries(entries []store.UsageLedgerEntry) map[s
 
 func (s *UsageService) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	return s.store.DebitCreditBalance(ctx, userID, planCode, debitUsd)
+}
+func (s *UsageService) ListAll(ctx context.Context, limit int) []store.UsageLedgerEntry {
+	return s.store.ListAllUsage(ctx, limit)
 }

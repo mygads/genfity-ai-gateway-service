@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"context"
@@ -31,6 +31,13 @@ type Store interface {
 	ListRoutes(context.Context) []store.AIModelRoute
 	GetRouteByModelID(context.Context, uuid.UUID) (*store.AIModelRoute, error)
 
+	// VirtualCombo methods
+	UpsertVirtualCombo(context.Context, store.VirtualCombo) store.VirtualCombo
+	ListVirtualCombos(context.Context) []store.VirtualCombo
+	GetVirtualComboByID(context.Context, uuid.UUID) (*store.VirtualCombo, error)
+	DeleteVirtualCombo(context.Context, uuid.UUID) error
+	GetVirtualComboByModelID(context.Context, uuid.UUID) (*store.VirtualCombo, error)
+
 	UpsertEntitlement(context.Context, store.CustomerEntitlement) store.CustomerEntitlement
 	UpsertEntitlementByUser(context.Context, store.CustomerEntitlement) store.CustomerEntitlement
 	GetEntitlementByUser(context.Context, string) (*store.CustomerEntitlement, error)
@@ -45,5 +52,6 @@ type Store interface {
 	ListUsageByUser(context.Context, string) []store.UsageLedgerEntry
 	ListUsageByUserSince(context.Context, string, time.Time) []store.UsageLedgerEntry
 	ListUsageByTenant(context.Context, string) []store.UsageLedgerEntry
+	ListAllUsage(ctx context.Context, limit int) []store.UsageLedgerEntry
 	DebitCreditBalance(context.Context, string, string, float64) error
 }

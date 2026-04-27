@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"genfity-ai-gateway-service/internal/service"
 	"genfity-ai-gateway-service/internal/store"
 )
+
+// --- entitlement helpers ---
 
 func entitlementAllowsModel(entitlement any, publicModel string) bool {
 	typed, ok := entitlement.(*service.ActiveSubscription)
@@ -54,17 +57,36 @@ func entitlementAllowsModel(entitlement any, publicModel string) bool {
 	return false
 }
 
+// --- GatewayHandler ---
+
 type GatewayHandler struct {
 	models       *service.ModelService
 	entitlements *service.EntitlementService
 	usage        *service.UsageService
 	rateLimit    *service.RateLimitService
-	nineClient   *router.NineRouterClient
+	comboSvc     *service.ComboService
+	cliProxy     *router.CLIProxyClient
 }
 
-func NewGatewayHandler(models *service.ModelService, entitlements *service.EntitlementService, usage *service.UsageService, rateLimit *service.RateLimitService, nineClient *router.NineRouterClient) *GatewayHandler {
-	return &GatewayHandler{models: models, entitlements: entitlements, usage: usage, rateLimit: rateLimit, nineClient: nineClient}
+func NewGatewayHandler(
+	models *service.ModelService,
+	entitlements *service.EntitlementService,
+	usage *service.UsageService,
+	rateLimit *service.RateLimitService,
+	comboSvc *service.ComboService,
+	cliProxy *router.CLIProxyClient,
+) *GatewayHandler {
+	return &GatewayHandler{
+		models:       models,
+		entitlements: entitlements,
+		usage:        usage,
+		rateLimit:    rateLimit,
+		comboSvc:     comboSvc,
+		cliProxy:     cliProxy,
+	}
 }
+
+// --- helpers ---
 
 func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int64) {
 	var payload map[string]any
@@ -121,12 +143,6 @@ func formatAmount(value float64) string {
 	return fmt.Sprintf("%.6f", value)
 }
 
-func recordUsageAndMaybeDebit(ctx any, h *GatewayHandler, apiKey *store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, responseBody []byte) {
-	contextValue, ok := ctx.(interface{ Done() <-chan struct{} })
-	_ = contextValue
-	_ = ok
-}
-
 func (h *GatewayHandler) writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
@@ -135,16 +151,54 @@ func (h *GatewayHandler) writeUpstreamResponse(w http.ResponseWriter, resp *http
 	_, _ = w.Write(body)
 }
 
+// isRetriableStatus returns true when the upstream error code should trigger
+// a combo fallback to the next entry.
+func isRetriableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests,   // 429 quota/rate limit
+		http.StatusServiceUnavailable, // 503
+		http.StatusBadGateway,         // 502
+		http.StatusGatewayTimeout,     // 504
+		http.StatusInternalServerError: // 500
+		return true
+	}
+	return false
+}
+
+// isRetriableTrigger checks whether an error body contains one of the
+// combo entry TriggerOn keywords (e.g. "quota_exceeded", "rate_limit", "error").
+func isRetriableTrigger(body []byte, triggers []string) bool {
+	if len(triggers) == 0 {
+		return true
+	}
+	text := strings.ToLower(string(body))
+	for _, t := range triggers {
+		if strings.Contains(text, strings.ToLower(t)) {
+			return true
+		}
+	}
+	return false
+}
+
+// --- ListModels ---
+
 func (h *GatewayHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 	models := h.models.ListModels(r.Context())
 	var list []map[string]any
 	for _, m := range models {
 		if m.Status == "active" {
-			list = append(list, map[string]any{"id": m.PublicModel, "object": "model", "created": m.CreatedAt.Unix(), "owned_by": "genfity"})
+			list = append(list, map[string]any{
+				"id":       m.PublicModel,
+				"object":   "model",
+				"created": m.CreatedAt.Unix(),
+				"owned_by": "genfity",
+			})
 		}
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 }
+
+// --- Embeddings ---
 
 func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	apiKey := middleware.GetAPIKey(r.Context())
@@ -171,6 +225,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
+
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "model_not_allowed")
@@ -178,16 +233,18 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	payload["model"] = route.RouterModel
 
-	resp, err := h.nineClient.Embeddings(ctx, payload)
+	resp, err := h.cliProxy.Embeddings(ctx, payload)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "upstream_error")
 		return
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	h.processUsage(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
+	h.recordUsage(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
 	h.writeUpstreamResponse(w, resp, body)
 }
+
+// --- ChatCompletions with virtual combo fallback ---
 
 func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request) {
 	apiKey := middleware.GetAPIKey(r.Context())
@@ -214,17 +271,15 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
+
 	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, "model_not_allowed")
 		return
 	}
-	payload["model"] = route.RouterModel
-	tenantIDStr := apiKey.GenfityUserID
-	if apiKey.GenfityTenantID != nil {
-		tenantIDStr = *apiKey.GenfityTenantID
-	}
+
 	if h.rateLimit != nil && limits.HasRPM() {
 		if err := h.rateLimit.CheckRPM(ctx, apiKey.ID.String(), limits.RPM); err != nil {
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
@@ -232,6 +287,10 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	release := func() {}
+	tenantIDStr := apiKey.GenfityUserID
+	if apiKey.GenfityTenantID != nil {
+		tenantIDStr = *apiKey.GenfityTenantID
+	}
 	if h.rateLimit != nil && limits.HasConcurrency() {
 		var acquireErr error
 		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, tenantIDStr, limits.ConcurrentLimit)
@@ -241,16 +300,105 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	defer release()
-	resp, err := h.nineClient.ChatCompletions(ctx, payload)
-	if err != nil {
-		respondError(w, http.StatusBadGateway, "upstream_error")
+
+	// Build the candidate list: primary route first, then combo fallbacks if any.
+	type candidate struct {
+		routerInstanceCode string
+		routerModel        string
+		triggerOn          []string
+	}
+
+	primaryCandidate := candidate{
+		routerInstanceCode: route.RouterInstanceCode,
+		routerModel:        route.RouterModel,
+	}
+	candidates := []candidate{primaryCandidate}
+
+	if h.comboSvc != nil {
+		if combo, comboErr := h.comboSvc.GetComboForModel(ctx, model.ID); comboErr == nil {
+			entries := combo.Entries
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].Priority < entries[j].Priority
+			})
+			// Append combo entries as additional fallback candidates.
+			for _, e := range entries {
+				candidates = append(candidates, candidate{
+					routerInstanceCode: e.RouterInstanceCode,
+					routerModel:        e.RouterModel,
+					triggerOn:          e.TriggerOn,
+				})
+			}
+		}
+	}
+
+	var lastResp *http.Response
+	var lastBody []byte
+	var lastStatusCode int
+
+	for _, cand := range candidates {
+		p := clonePayload(payload)
+		p["model"] = cand.routerModel
+
+		resp, callErr := h.cliProxy.ChatCompletions(ctx, p)
+		if callErr != nil {
+			// Network-level error: try next candidate.
+			continue
+		}
+
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		statusCode := resp.StatusCode
+
+		if !isRetriableStatus(statusCode) || !isRetriableTrigger(body, cand.triggerOn) {
+			// Success or non-retriable error: use this response.
+			effectiveRoute := &store.AIModelRoute{
+				ID:                 route.ID,
+				ModelID:            route.ModelID,
+				RouterInstanceCode: cand.routerInstanceCode,
+				RouterModel:        cand.routerModel,
+				Status:             route.Status,
+				CreatedAt:          route.CreatedAt,
+			}
+			h.recordUsage(ctx, apiKey, subscription, model, effectiveRoute, started, statusCode, body, publicModel)
+			for k, v := range resp.Header {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(statusCode)
+			_, _ = w.Write(body)
+			return
+		}
+
+		// Retriable: save it and try next candidate.
+		lastResp = resp
+		lastBody = body
+		lastStatusCode = statusCode
+	}
+
+	// All candidates exhausted, write the last known response.
+	if lastResp != nil {
+		effectiveRoute := route
+		h.recordUsage(ctx, apiKey, subscription, model, effectiveRoute, started, lastStatusCode, lastBody, publicModel)
+		for k, v := range lastResp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(lastStatusCode)
+		_, _ = w.Write(lastBody)
 		return
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	h.processUsage(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
-	h.writeUpstreamResponse(w, resp, body)
+
+	respondError(w, http.StatusBadGateway, "all_candidates_failed")
 }
+
+// clonePayload deep-copies a JSON payload map so that candidates
+// can mutate their own copy independently.
+func clonePayload(original map[string]any) map[string]any {
+	b, _ := json.Marshal(original)
+	var copy map[string]any
+	_ = json.Unmarshal(b, &copy)
+	return copy
+}
+
+// --- usage recording ---
 
 func (h *GatewayHandler) processUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, body []byte, publicModel string) {
 	h.recordUsage(ctx, apiKey, subscription, model, route, started, statusCode, body, publicModel)
@@ -262,7 +410,6 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 
 	promptTokens, completionTokens, totalTokens := parseUsageFromBody(body)
 
-	// Compute cost from model price
 	prices := h.models.ListPrices(ctx)
 	price := modelPrice(prices, model.ID)
 	inputCostUsd := 0.0
@@ -329,7 +476,6 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	}
 	h.usage.Record(ctx, entry)
 
-	// Debit credit balance only if active plan is credit_package
 	if statusCode < 400 && totalCostUsd > 0 && subscription.Entitlement != nil {
 		var meta map[string]any
 		if len(subscription.Entitlement.Metadata) > 0 {
@@ -337,10 +483,8 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		}
 		if pg, _ := meta["pricingGroup"].(string); pg == "credit_package" {
 			if err := h.usage.DebitCreditBalance(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, totalCostUsd); err != nil {
-				// log but don't block
 				_ = err
 			}
 		}
 	}
 }
-

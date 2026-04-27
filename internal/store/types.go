@@ -1,4 +1,4 @@
-package store
+﻿package store
 
 import (
 	"encoding/json"
@@ -70,6 +70,29 @@ type AIModelRoute struct {
 	RouterInstanceCode string          `json:"router_instance_code"`
 	RouterModel        string          `json:"router_model"`
 	Status             string          `json:"status"`
+	Metadata           json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
+}
+
+type VirtualCombo struct {
+	ID          uuid.UUID            `json:"id"`
+	ModelID     uuid.UUID            `json:"model_id"`
+	Name        string               `json:"name"`
+	Description string               `json:"description,omitempty"`
+	Status      string               `json:"status"`
+	Metadata    json.RawMessage      `json:"metadata,omitempty"`
+	Entries     []VirtualComboEntry  `json:"entries"`
+	CreatedAt   time.Time            `json:"created_at"`
+	UpdatedAt   time.Time            `json:"updated_at"`
+}
+
+type VirtualComboEntry struct {
+	ID                 uuid.UUID       `json:"id"`
+	ComboID            uuid.UUID       `json:"combo_id"`
+	Priority           int             `json:"priority"`
+	RouterInstanceCode string          `json:"router_instance_code"`
+	RouterModel        string          `json:"router_model"`
+	TriggerOn          []string        `json:"trigger_on,omitempty"`
 	Metadata           json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
 }
