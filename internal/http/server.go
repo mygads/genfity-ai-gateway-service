@@ -35,7 +35,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	}
 	nineClient := router.NewNineRouterClient(cfg.NineRouterCore1InternalURL, cfg.NineRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 
-	gatewayHandler := handler.NewGatewayHandler(models, entitlements, rateLimit, nineClient)
+	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, nineClient)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers)
 	routerProxyHandler := handler.NewRouterProxyHandler(nineClient)
@@ -62,7 +62,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	r.Get("/health", healthHandler.Check)
 
 	r.Route("/v1", func(r chi.Router) {
-		r.Get("/models", gatewayHandler.ListModels)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Get("/models", gatewayHandler.ListModels)
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/chat/completions", gatewayHandler.ChatCompletions)
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/embeddings", gatewayHandler.Embeddings)
 	})
@@ -73,6 +73,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Get("/api-keys", customerHandler.ListAPIKeys)
 		r.Post("/api-keys", customerHandler.CreateAPIKey)
 		r.Delete("/api-keys/{id}", customerHandler.RevokeAPIKey)
+		r.Patch("/api-keys/{id}", customerHandler.UpdateAPIKeyStatus)
 		r.Get("/models", customerHandler.ListModels)
 		r.Get("/usage", customerHandler.Usage)
 		r.Get("/usage/summary", customerHandler.UsageSummary)

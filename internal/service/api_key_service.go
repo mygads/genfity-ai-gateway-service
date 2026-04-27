@@ -27,6 +27,7 @@ type CreateAPIKeyInput struct {
 	UserID    string
 	TenantID  *string
 	Name      string
+	Status    string
 	ExpiresAt *time.Time
 }
 
@@ -54,7 +55,7 @@ func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*C
 		Name:            strings.TrimSpace(input.Name),
 		KeyPrefix:       prefix,
 		KeyHash:         hash,
-		Status:          "active",
+		Status:          defaultStatus(input.Status),
 		ExpiresAt:       input.ExpiresAt,
 		CreatedAt:       now,
 	}
@@ -98,6 +99,14 @@ func (s *APIKeyService) Revoke(ctx context.Context, id uuid.UUID) error {
 	return s.store.RevokeAPIKey(ctx, id, time.Now().UTC())
 }
 
+func (s *APIKeyService) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status != "active" && status != "inactive" && status != "revoked" {
+		return fmt.Errorf("invalid_status")
+	}
+	return s.store.UpdateAPIKeyStatus(ctx, id, status)
+}
+
 func (s *APIKeyService) ListByUser(ctx context.Context, userID string) []store.APIKey {
 	return s.store.ListAPIKeysByUser(ctx, userID)
 }
@@ -117,6 +126,14 @@ func generateRawAPIKey() (raw string, prefix string, err error) {
 	raw = fmt.Sprintf("sk_genfity_live_%s", payload)
 	prefix = raw[:20]
 	return raw, prefix, nil
+}
+
+func defaultStatus(status string) string {
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status == "inactive" || status == "revoked" {
+		return status
+	}
+	return "active"
 }
 
 func extractPrefix(raw string) string {

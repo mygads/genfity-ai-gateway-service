@@ -111,11 +111,8 @@ func (c *NineRouterClient) forwardJSON(ctx context.Context, path string, payload
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("router_error status=%d body=%s", resp.StatusCode, string(b))
-	}
+	// Always return the response so callers can stream the body AND record usage.
+	// Gateway handlers are responsible for forwarding the upstream status code.
 	return resp, nil
 }
 

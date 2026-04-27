@@ -143,6 +143,17 @@ func (s *PostgresStore) RevokeAPIKey(ctx context.Context, id uuid.UUID, revokedA
 	return nil
 }
 
+func (s *PostgresStore) UpdateAPIKeyStatus(ctx context.Context, id uuid.UUID, status string) error {
+	cmd, err := s.pool.Exec(ctx, `UPDATE ai_gateway.api_keys SET status = $2, revoked_at = CASE WHEN $2 = 'revoked' THEN now() ELSE NULL END WHERE id = $1`, id, status)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *PostgresStore) UpsertModel(ctx context.Context, item store.AIModel) store.AIModel {
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO ai_gateway.ai_models (id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision)
@@ -274,21 +285,23 @@ func (s *PostgresStore) upsertEntitlement(ctx context.Context, item store.Custom
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET genfity_tenant_id = EXCLUDED.genfity_tenant_id, status = EXCLUDED.status, period_start = EXCLUDED.period_start, period_end = EXCLUDED.period_end, quota_tokens_monthly = EXCLUDED.quota_tokens_monthly, balance_snapshot = EXCLUDED.balance_snapshot, metadata = EXCLUDED.metadata, updated_from_genfity_at = EXCLUDED.updated_from_genfity_at, updated_at = now()
 		RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`,
-		nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.PlanCode, defaultString(item.Status, "active"), item.PeriodStart, item.PeriodEnd, item.QuotaTokensMonthly, item.BalanceSnapshot, rawJSON(nil), defaultTime(item.UpdatedFromGenfityAt),
+		nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.PlanCode, defaultString(item.Status, "active"), item.PeriodStart, item.PeriodEnd, item.QuotaTokensMonthly, item.BalanceSnapshot, rawJSON(item.Metadata), defaultTime(item.UpdatedFromGenfityAt),
 	).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
 	if err != nil {
 		panic(err)
 	}
+	item.Metadata = metadata
 	return item
 }
 
 func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
-	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at FROM ai_gateway.customer_entitlements WHERE genfity_user_id = $1 AND status = 'active' ORDER BY updated_at DESC LIMIT 1`, userID).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
+	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at FROM ai_gateway.customer_entitlements WHERE genfity_user_id = $1 AND status = 'active' AND (period_end IS NULL OR period_end > now()) ORDER BY CASE WHEN metadata->>'pricingGroup' = 'unlimited_plan' THEN 0 WHEN metadata->>'pricingGroup' = 'credit_package' THEN 1 ELSE 2 END, updated_at DESC LIMIT 1`, userID).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	item.Metadata = metadata
 	return &item, err
 }
 
@@ -299,6 +312,7 @@ func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	item.Metadata = metadata
 	return &item, err
 }
 
@@ -341,6 +355,19 @@ func (s *PostgresStore) GetRouterInstance(ctx context.Context, code string) (*st
 	return &item, err
 }
 
+func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE ai_gateway.customer_entitlements
+		 SET balance_snapshot = GREATEST(0, COALESCE(balance_snapshot, 0) - $3),
+		     updated_at = now()
+		 WHERE genfity_user_id = $1
+		   AND plan_code = $2
+		   AND metadata->>'pricingGroup' = 'credit_package'
+		   AND status = 'active'`,
+		userID, planCode, debitUsd)
+	return err
+}
+
 func (s *PostgresStore) AppendUsage(ctx context.Context, item store.UsageLedgerEntry) store.UsageLedgerEntry {
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO ai_gateway.usage_ledger (id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost, output_cost, total_cost, status, error_code, latency_ms, started_at, finished_at, metadata)
@@ -360,6 +387,10 @@ func (s *PostgresStore) ListUsage(ctx context.Context) []store.UsageLedgerEntry 
 
 func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {
 	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 ORDER BY started_at DESC`, userID)
+}
+
+func (s *PostgresStore) ListUsageByUserSince(ctx context.Context, userID string, since time.Time) []store.UsageLedgerEntry {
+	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 AND started_at >= $2 ORDER BY started_at DESC`, userID, since)
 }
 
 func (s *PostgresStore) ListUsageByTenant(ctx context.Context, tenantID string) []store.UsageLedgerEntry {

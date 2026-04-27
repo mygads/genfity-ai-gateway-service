@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -95,6 +98,45 @@ func (s *MemoryStore) ListUsage(_ context.Context) []store.UsageLedgerEntry {
 	return items
 }
 
+func (s *MemoryStore) ListUsageByUserSince(_ context.Context, userID string, since time.Time) []store.UsageLedgerEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]store.UsageLedgerEntry, 0)
+	for _, item := range s.usage {
+		if item.GenfityUserID == userID && !item.StartedAt.Before(since) {
+			items = append(items, item)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].StartedAt.After(items[j].StartedAt) })
+	return items
+}
+
+func (s *MemoryStore) DebitCreditBalance(_ context.Context, userID string, planCode string, debitUsd float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID || item.PlanCode != planCode {
+			continue
+		}
+		if entitlementPricingGroup(item) != "credit_package" || item.BalanceSnapshot == nil {
+			continue
+		}
+		current, err := strconv.ParseFloat(*item.BalanceSnapshot, 64)
+		if err != nil {
+			return err
+		}
+		next := current - debitUsd
+		if next < 0 {
+			next = 0
+		}
+		value := fmt.Sprintf("%.6f", next)
+		item.BalanceSnapshot = &value
+		s.entitlements[id] = item
+		return nil
+	}
+	return ErrNotFound
+}
+
 func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID string) []store.UsageLedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -180,6 +222,24 @@ func (s *MemoryStore) RevokeAPIKey(_ context.Context, id uuid.UUID, revokedAt ti
 	}
 	item.Status = "revoked"
 	item.RevokedAt = &revokedAt
+	s.apiKeys[id] = item
+	return nil
+}
+
+func (s *MemoryStore) UpdateAPIKeyStatus(_ context.Context, id uuid.UUID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.apiKeys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	item.Status = status
+	if status == "revoked" {
+		now := time.Now().UTC()
+		item.RevokedAt = &now
+	} else {
+		item.RevokedAt = nil
+	}
 	s.apiKeys[id] = item
 	return nil
 }
@@ -274,13 +334,41 @@ func (s *MemoryStore) GetRouteByModelID(_ context.Context, modelID uuid.UUID) (*
 func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID string) (*store.CustomerEntitlement, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now().UTC()
+	var credit *store.CustomerEntitlement
 	for _, item := range s.entitlements {
-		if item.GenfityUserID == userID {
-			copy := item
+		if item.GenfityUserID != userID || item.Status != "active" {
+			continue
+		}
+		if item.PeriodEnd != nil && item.PeriodEnd.Before(now) {
+			continue
+		}
+		copy := item
+		if entitlementPricingGroup(item) == "unlimited_plan" {
 			return &copy, nil
 		}
+		if credit == nil {
+			credit = &copy
+		}
+	}
+	if credit != nil {
+		return credit, nil
 	}
 	return nil, ErrNotFound
+}
+
+func entitlementPricingGroup(item store.CustomerEntitlement) string {
+	if len(item.Metadata) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(item.Metadata, &payload); err != nil {
+		return ""
+	}
+	if value, ok := payload["pricingGroup"].(string); ok {
+		return value
+	}
+	return ""
 }
 
 func (s *MemoryStore) UpsertRouterInstance(_ context.Context, item store.RouterInstance) store.RouterInstance {

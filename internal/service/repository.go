@@ -18,6 +18,7 @@ type Store interface {
 	ListAPIKeysByUser(context.Context, string) []store.APIKey
 	FindAPIKeyByPrefix(context.Context, string) (*store.APIKey, error)
 	RevokeAPIKey(context.Context, uuid.UUID, time.Time) error
+	UpdateAPIKeyStatus(context.Context, uuid.UUID, string) error
 
 	UpsertModel(context.Context, store.AIModel) store.AIModel
 	ListModels(context.Context) []store.AIModel
@@ -42,5 +43,7 @@ type Store interface {
 	AppendUsage(context.Context, store.UsageLedgerEntry) store.UsageLedgerEntry
 	ListUsage(context.Context) []store.UsageLedgerEntry
 	ListUsageByUser(context.Context, string) []store.UsageLedgerEntry
+	ListUsageByUserSince(context.Context, string, time.Time) []store.UsageLedgerEntry
 	ListUsageByTenant(context.Context, string) []store.UsageLedgerEntry
+	DebitCreditBalance(context.Context, string, string, float64) error
 }

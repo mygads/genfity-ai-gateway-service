@@ -75,16 +75,17 @@ type AIModelRoute struct {
 }
 
 type CustomerEntitlement struct {
-	ID                   uuid.UUID  `json:"id"`
-	GenfityUserID        string     `json:"genfity_user_id"`
-	GenfityTenantID      *string    `json:"genfity_tenant_id,omitempty"`
-	PlanCode             string     `json:"plan_code"`
-	Status               string     `json:"status"`
-	PeriodStart          *time.Time `json:"period_start,omitempty"`
-	PeriodEnd            *time.Time `json:"period_end,omitempty"`
-	QuotaTokensMonthly   *int64     `json:"quota_tokens_monthly,omitempty"`
-	BalanceSnapshot      *string    `json:"balance_snapshot,omitempty"`
-	UpdatedFromGenfityAt time.Time  `json:"updated_from_genfity_at"`
+	ID                   uuid.UUID       `json:"id"`
+	GenfityUserID        string          `json:"genfity_user_id"`
+	GenfityTenantID      *string         `json:"genfity_tenant_id,omitempty"`
+	PlanCode             string          `json:"plan_code"`
+	Status               string          `json:"status"`
+	PeriodStart          *time.Time      `json:"period_start,omitempty"`
+	PeriodEnd            *time.Time      `json:"period_end,omitempty"`
+	QuotaTokensMonthly   *int64          `json:"quota_tokens_monthly,omitempty"`
+	BalanceSnapshot      *string         `json:"balance_snapshot,omitempty"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	UpdatedFromGenfityAt time.Time       `json:"updated_from_genfity_at"`
 }
 
 type RouterInstance struct {
