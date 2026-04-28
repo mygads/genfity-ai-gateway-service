@@ -4,7 +4,7 @@ AI Gateway backend untuk `ai.genfity.com`, dibangun dengan pola Go service.
 Didesain untuk berintegrasi penuh dengan `genfity-app` sebagai Frontend / Master Data.
 
 ## Fitur Utama Baru (CLIProxyAPI Migration)
-- Upstream utama router diubah dari `9Router` ke `CLIProxyAPI`.
+- Upstream utama router memakai `CLIProxyAPI`.
 - Model virtual / combo fallback di-handle langsung oleh `GatewayHandler` di Genfity Service. Genfity-app (sebagai admin) cukup melakukan CRUD ke route `/admin/combos`.
 - Endpoint `/internal/sync/*` dan `/customer/*` tetap dipertahankan karena `genfity-app` (Frontend) bergantung pada endpoint ini untuk:
   - Sinkronisasi plan & entitlement dari DB master (Prisma) ke Gateway.
@@ -74,8 +74,8 @@ REDIS_URL=redis://localhost:6379/3
 REDIS_PREFIX=ai-gateway:prod
 GENFITY_JWT_SECRET=<jwt-secret>
 GENFITY_INTERNAL_SECRET=<shared-internal-secret>
-AI_ROUTER_CORE1_INTERNAL_URL=http://ai-core2-cliproxy:8317
-AI_ROUTER_CORE1_API_KEY=
+AI_ROUTER_CORE2_INTERNAL_URL=http://ai-core2-cliproxy:8317
+AI_ROUTER_CORE2_API_KEY=
 API_KEY_PEPPER=<secret>
 ```
 

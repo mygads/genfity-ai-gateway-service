@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -33,10 +33,39 @@ func main() {
 	}
 	defer dbpool.Close()
 
-	if err := dbpool.Ping(startupCtx); err != nil {
-		logger.Fatal().Err(err).Msg("db down")
+	// Retry DB ping with exponential-ish backoff so a temporarily down
+	// postgres at startup does not crash the service forever.
+	dbBackoffs := []time.Duration{
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		15 * time.Second,
+		30 * time.Second,
 	}
-	logger.Info().Msg("db up")
+	dbReady := false
+	for attempt := 0; attempt < 30; attempt++ {
+		pingCtx, cancel := context.WithTimeout(startupCtx, 5*time.Second)
+		err := dbpool.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			dbReady = true
+			if attempt > 0 {
+				logger.Info().Int("attempt", attempt+1).Msg("db up after retry")
+			} else {
+				logger.Info().Msg("db up")
+			}
+			break
+		}
+		wait := dbBackoffs[len(dbBackoffs)-1]
+		if attempt < len(dbBackoffs) {
+			wait = dbBackoffs[attempt]
+		}
+		logger.Warn().Err(err).Int("attempt", attempt+1).Dur("retry_in", wait).Msg("db not ready, retrying")
+		time.Sleep(wait)
+	}
+	if !dbReady {
+		logger.Fatal().Msg("db unreachable after retries, giving up")
+	}
 
 	redisOptions, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
@@ -48,19 +77,52 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := redisClient.Ping(startupCtx).Err(); err != nil {
-		logger.Warn().Err(err).Msg("redis off, rate limit disabled")
+	// Retry redis ping a few times before falling back to "rate limit disabled"
+	redisReady := false
+	for attempt := 0; attempt < 5; attempt++ {
+		pingCtx, cancel := context.WithTimeout(startupCtx, 3*time.Second)
+		err := redisClient.Ping(pingCtx).Err()
+		cancel()
+		if err == nil {
+			redisReady = true
+			if attempt > 0 {
+				logger.Info().Int("attempt", attempt+1).Msg("redis up after retry")
+			} else {
+				logger.Info().Msg("redis up")
+			}
+			break
+		}
+		wait := time.Duration(2*(attempt+1)) * time.Second
+		logger.Warn().Err(err).Int("attempt", attempt+1).Dur("retry_in", wait).Msg("redis not ready, retrying")
+		time.Sleep(wait)
+	}
+	if !redisReady {
+		logger.Warn().Msg("redis off after retries, rate limit disabled")
 		_ = redisClient.Close()
 		redisClient = nil
-	} else {
-		logger.Info().Msg("redis up")
 	}
 
-	cliClient := router.NewCLIProxyClient(cfg.AIRouterCore1InternalURL, cfg.AIRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-	if _, err := cliClient.RouterHealth(startupCtx); err != nil {
-		logger.Warn().Err(err).Msg("cli_proxy down or unreachable at startup, will keep trying at runtime")
-	} else {
-		logger.Info().Msg("cli_proxy up")
+	cliClient := router.NewCLIProxyClient(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	cliReady := false
+	for attempt := 0; attempt < 3; attempt++ {
+		hcCtx, cancel := context.WithTimeout(startupCtx, 5*time.Second)
+		_, err := cliClient.RouterHealth(hcCtx)
+		cancel()
+		if err == nil {
+			cliReady = true
+			if attempt > 0 {
+				logger.Info().Int("attempt", attempt+1).Msg("cli_proxy up after retry")
+			} else {
+				logger.Info().Msg("cli_proxy up")
+			}
+			break
+		}
+		wait := time.Duration(2*(attempt+1)) * time.Second
+		logger.Warn().Err(err).Int("attempt", attempt+1).Dur("retry_in", wait).Msg("cli_proxy not ready, retrying")
+		time.Sleep(wait)
+	}
+	if !cliReady {
+		logger.Warn().Msg("cli_proxy down or unreachable at startup, will keep trying at runtime")
 	}
 
 	var store service.Store = service.NewPostgresStore(dbpool)

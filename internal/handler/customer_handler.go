@@ -1,4 +1,4 @@
-package handler
+﻿package handler
 
 import (
 	"encoding/json"
@@ -8,6 +8,7 @@ import (
 
 	"genfity-ai-gateway-service/internal/http/middleware"
 	"genfity-ai-gateway-service/internal/service"
+	"genfity-ai-gateway-service/internal/store"
 )
 
 type CustomerHandler struct {
@@ -21,12 +22,22 @@ func NewCustomerHandler(apiKeys *service.APIKeyService, models *service.ModelSer
 	return &CustomerHandler{apiKeys: apiKeys, models: models, usage: usage, entitlements: entitlements}
 }
 
+func activeModels(models []store.AIModel) []store.AIModel {
+	items := make([]store.AIModel, 0, len(models))
+	for _, model := range models {
+		if model.Status == "active" {
+			items = append(items, model)
+		}
+	}
+	return items
+}
+
 func (h *CustomerHandler) Overview(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
 	respondJSON(w, http.StatusOK, map[string]any{
 		"user_id":       user.ID,
 		"role":          user.Role,
-		"models":        h.models.ListModels(r.Context()),
+		"models":        activeModels(h.models.ListModels(r.Context())),
 		"usage_summary": h.usage.SummaryByUser(r.Context(), user.ID),
 	})
 }
@@ -69,7 +80,7 @@ func (h *CustomerHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 
 func (h *CustomerHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
-		"models": h.models.ListModels(r.Context()),
+		"models": activeModels(h.models.ListModels(r.Context())),
 	})
 }
 

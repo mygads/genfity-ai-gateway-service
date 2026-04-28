@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"os"
@@ -19,16 +19,15 @@ type Config struct {
 	GenfityJWTSecret      string
 	GenfityInternalSecret string
 
-	// Renamed from NineRouterCore1
-	AIRouterCore1InternalURL string
-	AIRouterCore1PublicURL   string
-	AIRouterCore1APIKey      string
+	AIRouterCore2InternalURL string
+	AIRouterCore2PublicURL   string
+	AIRouterCore2APIKey      string
 
-	APIKeyPepper          string
-	EncryptionKey         string
-	DefaultCurrency       string
-	LogLevel              string
-	RequestTimeoutSeconds int
+	APIKeyPepper           string
+	EncryptionKey          string
+	DefaultCurrency        string
+	LogLevel               string
+	RequestTimeoutSeconds  int
 	GlobalRateLimitEnabled bool
 	GlobalRateLimitRPM     int
 	GlobalRateLimitBurst   int
@@ -48,16 +47,15 @@ func Load() Config {
 		GenfityJWTSecret:      getEnv("GENFITY_JWT_SECRET", getEnv("JWT_SECRET", "")),
 		GenfityInternalSecret: getEnv("GENFITY_INTERNAL_SECRET", ""),
 
-		// Use new AI_ROUTER_ variables but fallback to legacy NINE_ROUTER_ for compat
-		AIRouterCore1InternalURL: getEnv("AI_ROUTER_CORE1_INTERNAL_URL", getEnv("NINE_ROUTER_CORE1_INTERNAL_URL", "http://localhost:8317")),
-		AIRouterCore1PublicURL:   getEnv("AI_ROUTER_CORE1_PUBLIC_URL", getEnv("NINE_ROUTER_CORE1_PUBLIC_URL", "https://ai-core1.genfity.com")),
-		AIRouterCore1APIKey:      getEnv("AI_ROUTER_CORE1_API_KEY", getEnv("NINE_ROUTER_CORE1_API_KEY", "")),
+		AIRouterCore2InternalURL: getEnv("AI_ROUTER_CORE2_INTERNAL_URL", "http://localhost:8317"),
+		AIRouterCore2PublicURL:   getEnv("AI_ROUTER_CORE2_PUBLIC_URL", "https://ai-core2.genfity.com"),
+		AIRouterCore2APIKey:      getEnv("AI_ROUTER_CORE2_API_KEY", ""),
 
-		APIKeyPepper:          getEnv("API_KEY_PEPPER", ""),
-		EncryptionKey:         getEnv("ENCRYPTION_KEY", ""),
-		DefaultCurrency:       getEnv("DEFAULT_CURRENCY", "IDR"),
-		LogLevel:              getEnv("LOG_LEVEL", "info"),
-		RequestTimeoutSeconds: getEnvInt("REQUEST_TIMEOUT_SECONDS", 120),
+		APIKeyPepper:           getEnv("API_KEY_PEPPER", ""),
+		EncryptionKey:          getEnv("ENCRYPTION_KEY", ""),
+		DefaultCurrency:        getEnv("DEFAULT_CURRENCY", "IDR"),
+		LogLevel:               getEnv("LOG_LEVEL", "info"),
+		RequestTimeoutSeconds:  getEnvInt("REQUEST_TIMEOUT_SECONDS", 120),
 		GlobalRateLimitEnabled: getEnvBool("GLOBAL_RATE_LIMIT_ENABLED", true),
 		GlobalRateLimitRPM:     getEnvInt("GLOBAL_RATE_LIMIT_RPM", 300),
 		GlobalRateLimitBurst:   getEnvInt("GLOBAL_RATE_LIMIT_BURST", 60),

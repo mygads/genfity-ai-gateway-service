@@ -4,7 +4,7 @@ services:
     container_name: genfity-ai-gateway
     restart: unless-stopped
     ports:
-      - "8094:8080"
+      - "127.0.0.1:8094:8080"
     env_file:
       - .env
     extra_hosts:

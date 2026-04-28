@@ -49,11 +49,11 @@ func (s *RateLimitService) CheckRPM(ctx context.Context, apiKeyID string, limit 
 	return nil
 }
 
-func (s *RateLimitService) CheckTPM(ctx context.Context, tenantID string, estimatedTokens int64, limit int) error {
+func (s *RateLimitService) CheckTPM(ctx context.Context, accountID string, estimatedTokens int64, limit int) error {
 	if limit <= 0 {
 		return nil
 	}
-	key := fmt.Sprintf("%s:rl:tenant:%s:tpm", s.prefix, tenantID)
+	key := fmt.Sprintf("%s:rl:account:%s:tpm", s.prefix, accountID)
 	count, err := s.client.IncrBy(ctx, key, estimatedTokens).Result()
 	if err != nil {
 		return err
@@ -67,11 +67,11 @@ func (s *RateLimitService) CheckTPM(ctx context.Context, tenantID string, estima
 	return nil
 }
 
-func (s *RateLimitService) AcquireConcurrency(ctx context.Context, tenantID string, limit int) (func(), error) {
+func (s *RateLimitService) AcquireConcurrency(ctx context.Context, accountID string, limit int) (func(), error) {
 	if limit <= 0 {
 		return func() {}, nil
 	}
-	key := fmt.Sprintf("%s:concurrent:tenant:%s", s.prefix, tenantID)
+	key := fmt.Sprintf("%s:concurrent:account:%s", s.prefix, accountID)
 	count, err := s.client.Incr(ctx, key).Result()
 	if err != nil {
 		return nil, err

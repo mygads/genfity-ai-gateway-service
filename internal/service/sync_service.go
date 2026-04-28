@@ -33,7 +33,9 @@ func (s *SyncService) SyncSubscriptionPlans(ctx context.Context, payload []store
 		if item.ID == uuid.Nil {
 			item.ID = uuid.New()
 		}
-		s.store.UpsertPlan(ctx, item)
+		if _, err := s.store.UpsertPlan(ctx, item); err != nil {
+			return count, err
+		}
 		count++
 	}
 	return count, nil

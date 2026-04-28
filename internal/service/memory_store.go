@@ -1,4 +1,4 @@
-﻿package service
+package service
 
 import (
 	"context"
@@ -15,36 +15,42 @@ import (
 	"genfity-ai-gateway-service/internal/store"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound            = errors.New("not found")
+	ErrQuotaExceeded       = errors.New("quota exceeded")
+	ErrInsufficientBalance = errors.New("insufficient balance")
+)
 
 type MemoryStore struct {
-	mu           sync.RWMutex
-	plans        map[string]store.SubscriptionPlanSnapshot
-	apiKeys      map[uuid.UUID]store.APIKey
-	models       map[uuid.UUID]store.AIModel
-	prices       map[uuid.UUID]store.AIModelPrice
-	routes       map[uuid.UUID]store.AIModelRoute
-	combos       map[uuid.UUID]store.VirtualCombo
-	entitlements map[uuid.UUID]store.CustomerEntitlement
-	routers      map[string]store.RouterInstance
-	usage        []store.UsageLedgerEntry
+	mu            sync.RWMutex
+	plans         map[string]store.SubscriptionPlanSnapshot
+	apiKeys       map[uuid.UUID]store.APIKey
+	models        map[uuid.UUID]store.AIModel
+	prices        map[uuid.UUID]store.AIModelPrice
+	routes        map[uuid.UUID]store.AIModelRoute
+	combos        map[uuid.UUID]store.VirtualCombo
+	entitlements  map[uuid.UUID]store.CustomerEntitlement
+	routers       map[string]store.RouterInstance
+	quotaReserved map[string]int64
+	usage         []store.UsageLedgerEntry
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		plans:        make(map[string]store.SubscriptionPlanSnapshot),
-		apiKeys:      make(map[uuid.UUID]store.APIKey),
-		models:       make(map[uuid.UUID]store.AIModel),
-		prices:       make(map[uuid.UUID]store.AIModelPrice),
-		routes:       make(map[uuid.UUID]store.AIModelRoute),
-		combos:       make(map[uuid.UUID]store.VirtualCombo),
-		entitlements: make(map[uuid.UUID]store.CustomerEntitlement),
-		routers:      make(map[string]store.RouterInstance),
-		usage:        make([]store.UsageLedgerEntry, 0),
+		plans:         make(map[string]store.SubscriptionPlanSnapshot),
+		apiKeys:       make(map[uuid.UUID]store.APIKey),
+		models:        make(map[uuid.UUID]store.AIModel),
+		prices:        make(map[uuid.UUID]store.AIModelPrice),
+		routes:        make(map[uuid.UUID]store.AIModelRoute),
+		combos:        make(map[uuid.UUID]store.VirtualCombo),
+		entitlements:  make(map[uuid.UUID]store.CustomerEntitlement),
+		routers:       make(map[string]store.RouterInstance),
+		quotaReserved: make(map[string]int64),
+		usage:         make([]store.UsageLedgerEntry, 0),
 	}
 }
 
-func (s *MemoryStore) UpsertPlan(_ context.Context, plan store.SubscriptionPlanSnapshot) store.SubscriptionPlanSnapshot {
+func (s *MemoryStore) UpsertPlan(_ context.Context, plan store.SubscriptionPlanSnapshot) (store.SubscriptionPlanSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
@@ -56,7 +62,7 @@ func (s *MemoryStore) UpsertPlan(_ context.Context, plan store.SubscriptionPlanS
 		plan.SyncedFromGenfityAt = now
 	}
 	s.plans[plan.PlanCode] = plan
-	return plan
+	return plan, nil
 }
 
 func (s *MemoryStore) ListPlans(_ context.Context) []store.SubscriptionPlanSnapshot {
@@ -81,14 +87,14 @@ func (s *MemoryStore) GetPlanByCode(_ context.Context, planCode string) (*store.
 	return &copy, nil
 }
 
-func (s *MemoryStore) UpsertAPIKey(_ context.Context, key store.APIKey) store.APIKey {
+func (s *MemoryStore) UpsertAPIKey(_ context.Context, key store.APIKey) (store.APIKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if key.CreatedAt.IsZero() {
 		key.CreatedAt = time.Now().UTC()
 	}
 	s.apiKeys[key.ID] = key
-	return key
+	return key, nil
 }
 
 func (s *MemoryStore) ListAPIKeysByUser(_ context.Context, userID string) []store.APIKey {
@@ -179,7 +185,99 @@ func (s *MemoryStore) DebitCreditBalance(_ context.Context, userID string, planC
 		}
 		next := current - debitUsd
 		if next < 0 {
-			next = 0
+			return ErrInsufficientBalance
+		}
+		value := fmt.Sprintf("%.6f", next)
+		item.BalanceSnapshot = &value
+		s.entitlements[id] = item
+		return nil
+	}
+	return ErrNotFound
+}
+
+func memoryQuotaKey(userID string, periodStart time.Time, periodEnd time.Time) string {
+	return userID + ":" + periodStart.UTC().Format(time.RFC3339Nano) + ":" + periodEnd.UTC().Format(time.RFC3339Nano)
+}
+
+func (s *MemoryStore) SumUsageTokensByUserSince(_ context.Context, userID string, since time.Time) int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var total int64
+	for _, item := range s.usage {
+		if item.GenfityUserID == userID && item.Status == "success" && !item.StartedAt.Before(since) {
+			total += item.TotalTokens
+		}
+	}
+	return total
+}
+
+func (s *MemoryStore) IncrementQuotaCounter(_ context.Context, _ string, _ *string, _ time.Time, _ time.Time, _ int64) error {
+	return nil
+}
+
+func (s *MemoryStore) ReserveQuotaTokens(_ context.Context, userID string, _ *string, periodStart time.Time, periodEnd time.Time, tokens int64, limit int64) error {
+	if tokens <= 0 || limit <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var used int64
+	for _, item := range s.usage {
+		if item.GenfityUserID == userID && item.Status == "success" && !item.StartedAt.Before(periodStart) {
+			used += item.TotalTokens
+		}
+	}
+	key := memoryQuotaKey(userID, periodStart, periodEnd)
+	if used+s.quotaReserved[key]+tokens > limit {
+		return ErrQuotaExceeded
+	}
+	s.quotaReserved[key] += tokens
+	return nil
+}
+
+func (s *MemoryStore) FinalizeQuotaTokens(_ context.Context, userID string, periodStart time.Time, periodEnd time.Time, reservedTokens int64, _ int64, _ bool) error {
+	if reservedTokens <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := memoryQuotaKey(userID, periodStart, periodEnd)
+	next := s.quotaReserved[key] - reservedTokens
+	if next <= 0 {
+		delete(s.quotaReserved, key)
+		return nil
+	}
+	s.quotaReserved[key] = next
+	return nil
+}
+
+func (s *MemoryStore) ReserveCreditBalance(ctx context.Context, userID string, planCode string, amountUsd float64) error {
+	if amountUsd <= 0 {
+		return nil
+	}
+	return s.DebitCreditBalance(ctx, userID, planCode, amountUsd)
+}
+
+func (s *MemoryStore) FinalizeCreditBalance(_ context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {
+	if reservedUsd <= 0 && actualUsd <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID || item.PlanCode != planCode {
+			continue
+		}
+		if entitlementPricingGroup(item) != "credit_package" || item.BalanceSnapshot == nil {
+			continue
+		}
+		current, err := strconv.ParseFloat(*item.BalanceSnapshot, 64)
+		if err != nil {
+			return err
+		}
+		next := current + reservedUsd - actualUsd
+		if next < 0 {
+			return ErrInsufficientBalance
 		}
 		value := fmt.Sprintf("%.6f", next)
 		item.BalanceSnapshot = &value
@@ -217,7 +315,7 @@ func (s *MemoryStore) UpsertBalanceSnapshot(_ context.Context, userID string, ba
 	return nil, ErrNotFound
 }
 
-func (s *MemoryStore) UpsertEntitlement(_ context.Context, item store.CustomerEntitlement) store.CustomerEntitlement {
+func (s *MemoryStore) UpsertEntitlement(_ context.Context, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if item.ID == uuid.Nil {
@@ -227,10 +325,10 @@ func (s *MemoryStore) UpsertEntitlement(_ context.Context, item store.CustomerEn
 		item.UpdatedFromGenfityAt = time.Now().UTC()
 	}
 	s.entitlements[item.ID] = item
-	return item
+	return item, nil
 }
 
-func (s *MemoryStore) UpsertEntitlementByUser(_ context.Context, item store.CustomerEntitlement) store.CustomerEntitlement {
+func (s *MemoryStore) UpsertEntitlementByUser(_ context.Context, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	item.UpdatedFromGenfityAt = time.Now().UTC()
@@ -240,17 +338,17 @@ func (s *MemoryStore) UpsertEntitlementByUser(_ context.Context, item store.Cust
 				item.ID = existing.ID
 			}
 			s.entitlements[id] = item
-			return item
+			return item, nil
 		}
 	}
 	if item.ID == uuid.Nil {
 		item.ID = uuid.New()
 	}
 	s.entitlements[item.ID] = item
-	return item
+	return item, nil
 }
 
-func (s *MemoryStore) UpsertModel(_ context.Context, model store.AIModel) store.AIModel {
+func (s *MemoryStore) UpsertModel(_ context.Context, model store.AIModel) (store.AIModel, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now().UTC()
@@ -259,7 +357,7 @@ func (s *MemoryStore) UpsertModel(_ context.Context, model store.AIModel) store.
 	}
 	model.UpdatedAt = now
 	s.models[model.ID] = model
-	return model
+	return model, nil
 }
 
 func (s *MemoryStore) ListModels(_ context.Context) []store.AIModel {
@@ -271,6 +369,17 @@ func (s *MemoryStore) ListModels(_ context.Context) []store.AIModel {
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].DisplayName < items[j].DisplayName })
 	return items
+}
+
+func (s *MemoryStore) GetModelByID(_ context.Context, id uuid.UUID) (*store.AIModel, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.models[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := item
+	return &copy, nil
 }
 
 func (s *MemoryStore) GetModelByPublicName(_ context.Context, publicModel string) (*store.AIModel, error) {
@@ -285,14 +394,74 @@ func (s *MemoryStore) GetModelByPublicName(_ context.Context, publicModel string
 	return nil, ErrNotFound
 }
 
-func (s *MemoryStore) UpsertPrice(_ context.Context, price store.AIModelPrice) store.AIModelPrice {
+func (s *MemoryStore) UpdateModel(_ context.Context, model store.AIModel) (store.AIModel, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.models[model.ID]
+	if !ok {
+		return store.AIModel{}, ErrNotFound
+	}
+	if model.CreatedAt.IsZero() {
+		model.CreatedAt = current.CreatedAt
+	}
+	model.UpdatedAt = time.Now().UTC()
+	s.models[model.ID] = model
+	return model, nil
+}
+
+func (s *MemoryStore) DeleteModel(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.models[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.models, id)
+	return nil
+}
+
+func (s *MemoryStore) UpsertPrice(_ context.Context, price store.AIModelPrice) (store.AIModelPrice, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if price.CreatedAt.IsZero() {
 		price.CreatedAt = time.Now().UTC()
 	}
 	s.prices[price.ID] = price
-	return price
+	return price, nil
+}
+
+func (s *MemoryStore) GetPriceByID(_ context.Context, id uuid.UUID) (*store.AIModelPrice, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.prices[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := item
+	return &copy, nil
+}
+
+func (s *MemoryStore) UpdatePrice(_ context.Context, price store.AIModelPrice) (store.AIModelPrice, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.prices[price.ID]
+	if !ok {
+		return store.AIModelPrice{}, ErrNotFound
+	}
+	if price.CreatedAt.IsZero() {
+		price.CreatedAt = current.CreatedAt
+	}
+	s.prices[price.ID] = price
+	return price, nil
+}
+
+func (s *MemoryStore) DeletePrice(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.prices[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.prices, id)
+	return nil
 }
 
 func (s *MemoryStore) ListPrices(_ context.Context) []store.AIModelPrice {
@@ -305,14 +474,49 @@ func (s *MemoryStore) ListPrices(_ context.Context) []store.AIModelPrice {
 	return items
 }
 
-func (s *MemoryStore) UpsertRoute(_ context.Context, route store.AIModelRoute) store.AIModelRoute {
+func (s *MemoryStore) UpsertRoute(_ context.Context, route store.AIModelRoute) (store.AIModelRoute, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if route.CreatedAt.IsZero() {
 		route.CreatedAt = time.Now().UTC()
 	}
 	s.routes[route.ID] = route
-	return route
+	return route, nil
+}
+
+func (s *MemoryStore) GetRouteByID(_ context.Context, id uuid.UUID) (*store.AIModelRoute, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	item, ok := s.routes[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	copy := item
+	return &copy, nil
+}
+
+func (s *MemoryStore) UpdateRoute(_ context.Context, route store.AIModelRoute) (store.AIModelRoute, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.routes[route.ID]
+	if !ok {
+		return store.AIModelRoute{}, ErrNotFound
+	}
+	if route.CreatedAt.IsZero() {
+		route.CreatedAt = current.CreatedAt
+	}
+	s.routes[route.ID] = route
+	return route, nil
+}
+
+func (s *MemoryStore) DeleteRoute(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.routes[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.routes, id)
+	return nil
 }
 
 func (s *MemoryStore) ListRoutes(_ context.Context) []store.AIModelRoute {
@@ -435,14 +639,56 @@ func entitlementPricingGroup(item store.CustomerEntitlement) string {
 	return ""
 }
 
-func (s *MemoryStore) UpsertRouterInstance(_ context.Context, item store.RouterInstance) store.RouterInstance {
+func (s *MemoryStore) UpsertRouterInstance(_ context.Context, item store.RouterInstance) (store.RouterInstance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = time.Now().UTC()
 	}
 	s.routers[item.Code] = item
-	return item
+	return item, nil
+}
+
+func (s *MemoryStore) GetRouterInstanceByID(_ context.Context, id uuid.UUID) (*store.RouterInstance, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range s.routers {
+		if item.ID == id {
+			copy := item
+			return &copy, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (s *MemoryStore) UpdateRouterInstance(_ context.Context, item store.RouterInstance) (store.RouterInstance, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for code, current := range s.routers {
+		if current.ID == item.ID {
+			if item.CreatedAt.IsZero() {
+				item.CreatedAt = current.CreatedAt
+			}
+			if code != item.Code {
+				delete(s.routers, code)
+			}
+			s.routers[item.Code] = item
+			return item, nil
+		}
+	}
+	return store.RouterInstance{}, ErrNotFound
+}
+
+func (s *MemoryStore) DeleteRouterInstance(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for code, item := range s.routers {
+		if item.ID == id {
+			delete(s.routers, code)
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *MemoryStore) ListRouterInstances(_ context.Context) []store.RouterInstance {
@@ -466,11 +712,11 @@ func (s *MemoryStore) GetRouterInstance(_ context.Context, code string) (*store.
 	return &copy, nil
 }
 
-func (s *MemoryStore) AppendUsage(_ context.Context, item store.UsageLedgerEntry) store.UsageLedgerEntry {
+func (s *MemoryStore) AppendUsage(_ context.Context, item store.UsageLedgerEntry) (store.UsageLedgerEntry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.usage = append(s.usage, item)
-	return item
+	return item, nil
 }
 
 func (s *MemoryStore) ListAllUsage(_ context.Context, limit int) []store.UsageLedgerEntry {

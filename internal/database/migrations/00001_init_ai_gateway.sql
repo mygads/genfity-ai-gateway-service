@@ -113,30 +113,6 @@ CREATE TABLE ai_gateway.ai_model_routes (
 CREATE UNIQUE INDEX ai_model_routes_active_model_idx ON ai_gateway.ai_model_routes (model_id) WHERE status = 'active';
 CREATE INDEX ai_model_routes_router_idx ON ai_gateway.ai_model_routes (router_instance_code, status);
 
-
-CREATE TABLE ai_gateway.virtual_combos (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    model_id uuid NOT NULL REFERENCES ai_gateway.ai_models(id) ON DELETE CASCADE,
-    name text NOT NULL UNIQUE,
-    description text NOT NULL DEFAULT '',
-    status text NOT NULL DEFAULT 'active',
-    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE TABLE ai_gateway.virtual_combo_entries (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    combo_id uuid NOT NULL REFERENCES ai_gateway.virtual_combos(id) ON DELETE CASCADE,
-    priority integer NOT NULL,
-    router_instance_code text NOT NULL REFERENCES ai_gateway.router_instances(code),
-    router_model text NOT NULL,
-    trigger_on jsonb NOT NULL DEFAULT '[]'::jsonb,
-    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-
-CREATE INDEX virtual_combo_entries_combo_priority_idx ON ai_gateway.virtual_combo_entries (combo_id, priority);
 CREATE TABLE ai_gateway.usage_ledger (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id text NOT NULL UNIQUE,
@@ -208,7 +184,7 @@ CREATE TABLE ai_gateway.sync_runs (
 );
 
 INSERT INTO ai_gateway.router_instances (code, public_base_url, internal_base_url, status)
-VALUES ('ai-core1', 'https://ai-core1.genfity.com', 'http://ai-core1-9router:20128', 'active')
+VALUES ('ai-core2', 'https://ai-core2.genfity.com', 'http://cli-proxy-api:8317', 'active')
 ON CONFLICT (code) DO NOTHING;
 
 -- +goose Down

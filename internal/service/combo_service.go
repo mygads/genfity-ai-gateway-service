@@ -44,7 +44,11 @@ func (s *ComboService) UpsertCombo(ctx context.Context, payload map[string]any) 
 		}
 		combo.Entries[i].ComboID = combo.ID
 	}
-	return s.store.UpsertVirtualCombo(ctx, combo), nil
+		saved := s.store.UpsertVirtualCombo(ctx, combo)
+	if reloaded, err := s.store.GetVirtualComboByID(ctx, saved.ID); err == nil {
+		return *reloaded, nil
+	}
+	return saved, nil
 }
 
 func (s *ComboService) DeleteCombo(ctx context.Context, id uuid.UUID) error {
@@ -54,3 +58,4 @@ func (s *ComboService) DeleteCombo(ctx context.Context, id uuid.UUID) error {
 func (s *ComboService) GetComboForModel(ctx context.Context, modelID uuid.UUID) (*store.VirtualCombo, error) {
 	return s.store.GetVirtualComboByModelID(ctx, modelID)
 }
+

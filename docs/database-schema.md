@@ -23,7 +23,7 @@ Pricing runtime per model.
 Mapping dari public model ke target model/route di router instance tertentu.
 
 ### `router_instances`
-Metadata router internal seperti `ai-core1`.
+Metadata router internal seperti `ai-core2`.
 
 ### `usage_ledger`
 Ledger durable untuk token usage, latency, cost, dan error runtime.
@@ -52,6 +52,6 @@ Audit trail sinkronisasi dari Genfity ke gateway.
 
 Migration awal menambahkan router instance default:
 
-- `code=ai-core1`
-- `public_base_url=https://ai-core1.genfity.com`
-- `internal_base_url=http://ai-core1-9router:20128`
+- `code=ai-core2`
+- `public_base_url=https://ai-core2.genfity.com`
+- `internal_base_url=http://cli-proxy-api:8317`

@@ -33,8 +33,11 @@ Behavior:
 - validates api key
 - validates entitlement
 - resolves route
-- applies rate limit
-- proxies to 9Router
+- applies RPM by API key
+- applies TPM/concurrency/quota by `genfity_user_id` account scope
+- reserves quota/credit before upstream call and finalizes after usage is known
+- proxies to CLIProxyAPI
+- `/v1/embeddings` is unchanged for now and is not part of the new reservation flow
 
 ## Customer JWT
 
@@ -53,9 +56,26 @@ Header:
 ## Admin JWT
 
 - `GET/POST /admin/models`
+- `PATCH/DELETE /admin/models/{id}`
 - `GET/POST /admin/model-prices`
+- `PATCH/DELETE /admin/model-prices/{id}`
 - `GET/POST /admin/model-routes`
+- `PATCH/DELETE /admin/model-routes/{id}`
 - `GET/POST /admin/router-instances`
+- `PATCH/DELETE /admin/router-instances/{id}`
+- `GET/POST/PUT /admin/combos`
+- `GET/POST/PUT/DELETE /admin/combos/{id}`
+- `GET/POST/PUT/DELETE /admin/routers/{code}/combos...` legacy/global alias for `/admin/combos`, not router-filtered
+
+PATCH behavior:
+
+- Partial update: omitted fields are preserved.
+- Missing IDs return `404 not_found`.
+
+Provider management:
+
+- 9Router-style provider management is deprecated for CLIProxyAPI.
+- Provider endpoints return `501 provider_management_not_supported_by_cliproxy`.
 
 Header:
 

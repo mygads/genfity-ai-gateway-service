@@ -59,7 +59,10 @@ func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*C
 		ExpiresAt:       input.ExpiresAt,
 		CreatedAt:       now,
 	}
-	s.store.UpsertAPIKey(ctx, record)
+	record, err = s.store.UpsertAPIKey(ctx, record)
+	if err != nil {
+		return nil, err
+	}
 
 	s.log.Info().Str("user_id", input.UserID).Str("api_key_id", record.ID.String()).Msg("created api key")
 
@@ -91,8 +94,11 @@ func (s *APIKeyService) Validate(ctx context.Context, rawKey string) (*store.API
 
 	now := time.Now().UTC()
 	record.LastUsedAt = &now
-	s.store.UpsertAPIKey(ctx, *record)
-	return record, nil
+	updated, err := s.store.UpsertAPIKey(ctx, *record)
+	if err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 func (s *APIKeyService) Revoke(ctx context.Context, id uuid.UUID) error {

@@ -1,4 +1,4 @@
-﻿package service
+package service
 
 import (
 	"context"
@@ -19,7 +19,7 @@ func NewUsageService(store Store, logger zerolog.Logger) *UsageService {
 	return &UsageService{store: store, log: logger.With().Str("component", "usage_service").Logger()}
 }
 
-func (s *UsageService) Record(ctx context.Context, entry store.UsageLedgerEntry) store.UsageLedgerEntry {
+func (s *UsageService) Record(ctx context.Context, entry store.UsageLedgerEntry) (store.UsageLedgerEntry, error) {
 	return s.store.AppendUsage(ctx, entry)
 }
 
@@ -67,9 +67,34 @@ func (s *UsageService) summaryForEntries(entries []store.UsageLedgerEntry) map[s
 	}
 }
 
+func (s *UsageService) TokensUsedSince(ctx context.Context, userID string, since time.Time) int64 {
+	return s.store.SumUsageTokensByUserSince(ctx, userID, since)
+}
+
+func (s *UsageService) IncrementQuotaCounter(ctx context.Context, userID string, tenantID *string, periodStart time.Time, periodEnd time.Time, tokens int64) error {
+	return s.store.IncrementQuotaCounter(ctx, userID, tenantID, periodStart, periodEnd, tokens)
+}
+
+func (s *UsageService) ReserveQuotaTokens(ctx context.Context, userID string, tenantID *string, periodStart time.Time, periodEnd time.Time, tokens int64, limit int64) error {
+	return s.store.ReserveQuotaTokens(ctx, userID, tenantID, periodStart, periodEnd, tokens, limit)
+}
+
+func (s *UsageService) FinalizeQuotaTokens(ctx context.Context, userID string, periodStart time.Time, periodEnd time.Time, reservedTokens int64, usedTokens int64, countRequest bool) error {
+	return s.store.FinalizeQuotaTokens(ctx, userID, periodStart, periodEnd, reservedTokens, usedTokens, countRequest)
+}
+
 func (s *UsageService) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	return s.store.DebitCreditBalance(ctx, userID, planCode, debitUsd)
 }
+
+func (s *UsageService) ReserveCreditBalance(ctx context.Context, userID string, planCode string, amountUsd float64) error {
+	return s.store.ReserveCreditBalance(ctx, userID, planCode, amountUsd)
+}
+
+func (s *UsageService) FinalizeCreditBalance(ctx context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {
+	return s.store.FinalizeCreditBalance(ctx, userID, planCode, reservedUsd, actualUsd)
+}
+
 func (s *UsageService) ListAll(ctx context.Context, limit int) []store.UsageLedgerEntry {
 	return s.store.ListAllUsage(ctx, limit)
 }

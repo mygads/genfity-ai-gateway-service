@@ -1,4 +1,4 @@
-﻿package http
+package http
 
 import (
 	"time"
@@ -35,12 +35,12 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		rateLimit = service.NewRateLimitService(redisClient, cfg.RedisPrefix, logger)
 	}
 
-	cliProxyClient := router.NewCLIProxyClient(cfg.AIRouterCore1InternalURL, cfg.AIRouterCore1APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	cliProxyClient := router.NewCLIProxyClient(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 
-	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, combos, cliProxyClient)
+	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, combos, routers, cliProxyClient, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers, usage)
-	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient)
+	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	comboHandler := handler.NewComboHandler(combos)
 	syncHandler := handler.NewSyncHandler(syncService)
 	healthHandler := handler.NewHealthHandler(syncService)
@@ -67,6 +67,8 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	r.Route("/v1", func(r chi.Router) {
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Get("/models", gatewayHandler.ListModels)
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/chat/completions", gatewayHandler.ChatCompletions)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/messages", gatewayHandler.Messages)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/messages/count_tokens", gatewayHandler.CountMessageTokens)
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/embeddings", gatewayHandler.Embeddings)
 	})
 
@@ -88,25 +90,36 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Use(authMiddleware.RequireRoles(cfg.AllowedAdminRoles()...))
 		r.Get("/models", adminHandler.ListModels)
 		r.Post("/models", adminHandler.CreateModel)
+		r.Patch("/models/{id}", adminHandler.UpdateModel)
 		r.Delete("/models/{id}", adminHandler.DeleteModel)
 		r.Get("/model-prices", adminHandler.ListModelPrices)
 		r.Post("/model-prices", adminHandler.UpsertModelPrice)
+		r.Patch("/model-prices/{id}", adminHandler.UpdateModelPrice)
+		r.Delete("/model-prices/{id}", adminHandler.DeleteModelPrice)
 		r.Get("/model-routes", adminHandler.ListModelRoutes)
 		r.Post("/model-routes", adminHandler.UpsertModelRoute)
+		r.Patch("/model-routes/{id}", adminHandler.UpdateModelRoute)
+		r.Delete("/model-routes/{id}", adminHandler.DeleteModelRoute)
 		r.Get("/router-instances", adminHandler.ListRouterInstances)
 		r.Post("/router-instances", adminHandler.UpsertRouterInstance)
+		r.Patch("/router-instances/{id}", adminHandler.UpdateRouterInstance)
+		r.Delete("/router-instances/{id}", adminHandler.DeleteRouterInstance)
 		r.Get("/usage", adminHandler.ListAllUsage)
 
-		// Legacy router proxy routes (deprecated/stubbed for providers)
 		r.Get("/routers/{code}/health", routerProxyHandler.Health)
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)
 		r.Get("/routers/{code}/providers", routerProxyHandler.Providers)
 		r.Get("/routers/{code}/providers/{providerID}/models", routerProxyHandler.ProviderModels)
+		r.Get("/routers/{code}/combos", comboHandler.ListCombos)
+		r.Post("/routers/{code}/combos", comboHandler.CreateCombo)
+		r.Put("/routers/{code}/combos/{comboID}", comboHandler.UpdateCombo)
+		r.Patch("/routers/{code}/combos/{comboID}", comboHandler.UpdateCombo)
+		r.Delete("/routers/{code}/combos/{comboID}", comboHandler.DeleteCombo)
 
-		// New internal Virtual Combos management
 		r.Get("/combos", comboHandler.ListCombos)
 		r.Post("/combos", comboHandler.CreateCombo)
 		r.Put("/combos/{comboID}", comboHandler.UpdateCombo)
+		r.Patch("/combos/{comboID}", comboHandler.UpdateCombo)
 		r.Delete("/combos/{comboID}", comboHandler.DeleteCombo)
 	})
 

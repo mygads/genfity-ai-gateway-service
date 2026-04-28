@@ -150,7 +150,7 @@ jobs:
         run: |
           if [ -n "$ENV_FILE" ]; then
             echo "📝 Updating .env file on server (full replace)..."
-            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > /tmp/genfity-ai-gateway.env && sudo install -m 600 -o root -g root /tmp/genfity-ai-gateway.env ~/genfity/genfity-ai-gateway/.env && rm -f /tmp/genfity-ai-gateway.env"
+            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > /tmp/genfity-ai-gateway.env && sudo install -m 600 -o root -g root /tmp/genfity-ai-gateway.env /home/$VPS_USER/genfity/genfity-ai-gateway/.env && rm -f /tmp/genfity-ai-gateway.env"
             echo "✅ ENV file updated with full replace!"
           else
             echo "⏭️ ENV_FILE secret not set, skipping .env update"

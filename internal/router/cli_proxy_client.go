@@ -1,4 +1,4 @@
-﻿package router
+package router
 
 import (
 	"bytes"
@@ -21,23 +21,12 @@ type CLIProxyClient struct {
 	httpClient *http.Client
 }
 
-// NineRouterClient is a backward-compat alias kept so that nothing
-// outside this package needs to change before the rename is complete.
-// Deprecated: use CLIProxyClient directly.
-type NineRouterClient = CLIProxyClient
-
 func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
 	return &CLIProxyClient{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: timeout},
 	}
-}
-
-// NewNineRouterClient is a backward-compat constructor.
-// Deprecated: use NewCLIProxyClient.
-func NewNineRouterClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
-	return NewCLIProxyClient(baseURL, apiKey, timeout)
 }
 
 // ListModels fetches /v1/models from CLIProxyAPI.
@@ -60,6 +49,16 @@ func (c *CLIProxyClient) RouterHealth(ctx context.Context) (map[string]any, erro
 // ChatCompletions forwards a chat-completion request and streams the response back.
 func (c *CLIProxyClient) ChatCompletions(ctx context.Context, payload map[string]any) (*http.Response, error) {
 	return c.forwardJSON(ctx, "/v1/chat/completions", payload)
+}
+
+// Messages forwards an Anthropic-compatible messages request.
+func (c *CLIProxyClient) Messages(ctx context.Context, payload map[string]any) (*http.Response, error) {
+	return c.forwardJSON(ctx, "/v1/messages", payload)
+}
+
+// CountMessageTokens forwards an Anthropic-compatible token-count request.
+func (c *CLIProxyClient) CountMessageTokens(ctx context.Context, payload map[string]any) (*http.Response, error) {
+	return c.forwardJSON(ctx, "/v1/messages/count_tokens", payload)
 }
 
 // Embeddings forwards an embeddings request.

@@ -2,14 +2,14 @@
 
 ## Containers
 
-Use one Go service container for AI Gateway and one existing 9Router container.
+Use one Go service container for AI Gateway and one CLIProxyAPI container (`cli-proxy-api`) as the upstream router.
 
 Gateway listens on `HTTP_ADDR`, default `:8080`.
 
-9Router internal URL should be reachable from the gateway container:
+CLIProxyAPI internal URL should be reachable from the gateway container:
 
 ```env
-NINE_ROUTER_CORE1_INTERNAL_URL=http://ai-core1-9router:20128
+AI_ROUTER_CORE2_INTERNAL_URL=http://cli-proxy-api:8317
 ```
 
 ## Database
@@ -33,16 +33,16 @@ REDIS_PREFIX=ai-gateway:prod
 Public routing:
 
 - `https://ai.genfity.com` -> Go AI Gateway service
-- `https://ai-core1.genfity.com` -> 9Router dashboard/core if admin access is needed
+- `https://ai-core2.genfity.com` -> CLIProxyAPI dashboard/core if admin access is needed
 
-Runtime gateway must call 9Router by internal Docker hostname, not public DNS.
+Runtime gateway must call CLIProxyAPI by internal Docker hostname, not public DNS.
 
 ## Required secrets
 
 - `GENFITY_JWT_SECRET`
 - `GENFITY_INTERNAL_SECRET`
 - `API_KEY_PEPPER`
-- `NINE_ROUTER_CORE1_API_KEY` if 9Router requires API key
+- `AI_ROUTER_CORE2_API_KEY` if CLIProxyAPI requires API key
 
 ## Verification
 
