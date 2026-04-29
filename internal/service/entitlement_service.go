@@ -39,7 +39,7 @@ func (s *EntitlementService) Upsert(ctx context.Context, item store.CustomerEnti
 		item.Status = "active"
 	}
 	item.UpdatedFromGenfityAt = time.Now().UTC()
-	return s.store.UpsertEntitlement(ctx, item)
+	return s.store.UpsertEntitlementByUser(ctx, item)
 }
 
 func (s *EntitlementService) GetByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {

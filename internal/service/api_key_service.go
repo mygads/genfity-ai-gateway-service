@@ -93,12 +93,11 @@ func (s *APIKeyService) Validate(ctx context.Context, rawKey string) (*store.API
 	}
 
 	now := time.Now().UTC()
-	record.LastUsedAt = &now
-	updated, err := s.store.UpsertAPIKey(ctx, *record)
-	if err != nil {
+	if err := s.store.UpdateAPIKeyLastUsedAt(ctx, record.ID, now); err != nil {
 		return nil, err
 	}
-	return &updated, nil
+	record.LastUsedAt = &now
+	return record, nil
 }
 
 func (s *APIKeyService) Revoke(ctx context.Context, id uuid.UUID) error {

@@ -18,6 +18,10 @@ type APIKeyMiddleware struct {
 	apiKeys *service.APIKeyService
 }
 
+type ctxKey int
+
+const apiKeyCtxKey ctxKey = iota
+
 func NewAPIKeyMiddleware(cfg *config.Config, apiKeys *service.APIKeyService) *APIKeyMiddleware {
 	return &APIKeyMiddleware{cfg: cfg, apiKeys: apiKeys}
 }
@@ -48,7 +52,7 @@ func (m *APIKeyMiddleware) RequireAPIKey(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), "api_key", *keyRecord)
+		ctx := context.WithValue(r.Context(), apiKeyCtxKey, *keyRecord)
 
 		logger := hlog.FromRequest(r)
 		logger.UpdateContext(func(c zerolog.Context) zerolog.Context {
@@ -67,7 +71,7 @@ func tenantString(id *string) string {
 }
 
 func GetAPIKey(ctx context.Context) store.APIKey {
-	val := ctx.Value("api_key")
+	val := ctx.Value(apiKeyCtxKey)
 	if val == nil {
 		return store.APIKey{}
 	}

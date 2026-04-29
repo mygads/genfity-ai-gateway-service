@@ -19,6 +19,7 @@ type Store interface {
 	FindAPIKeyByPrefix(context.Context, string) (*store.APIKey, error)
 	RevokeAPIKey(context.Context, uuid.UUID, time.Time) error
 	UpdateAPIKeyStatus(context.Context, uuid.UUID, string) error
+	UpdateAPIKeyLastUsedAt(context.Context, uuid.UUID, time.Time) error
 
 	UpsertModel(context.Context, store.AIModel) (store.AIModel, error)
 	UpdateModel(context.Context, store.AIModel) (store.AIModel, error)

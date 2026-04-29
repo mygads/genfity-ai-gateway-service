@@ -34,13 +34,13 @@ type Config struct {
 }
 
 func Load() Config {
-	return Config{
+	cfg := Config{
 		AppEnv:   getEnv("APP_ENV", "development"),
 		HTTPAddr: getEnv("HTTP_ADDR", ":8080"),
 
 		DatabaseURL: getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/genfity_ai_gateway?sslmode=disable"),
 		RedisURL:    getEnv("REDIS_URL", "redis://localhost:6379/3"),
-		RedisPrefix: getEnv("REDIS_PREFIX", "ai-gateway:prod"),
+		RedisPrefix: getEnv("REDIS_PREFIX", "ai-gateway:dev"),
 
 		GenfityAuthMode:       getEnv("GENFITY_AUTH_MODE", "jwt"),
 		GenfityAuthJWKSURL:    getEnv("GENFITY_AUTH_JWKS_URL", ""),
@@ -48,7 +48,7 @@ func Load() Config {
 		GenfityInternalSecret: getEnv("GENFITY_INTERNAL_SECRET", ""),
 
 		AIRouterCore2InternalURL: getEnv("AI_ROUTER_CORE2_INTERNAL_URL", "http://localhost:8317"),
-		AIRouterCore2PublicURL:   getEnv("AI_ROUTER_CORE2_PUBLIC_URL", "https://ai-core2.genfity.com"),
+		AIRouterCore2PublicURL:   getEnv("AI_ROUTER_CORE2_PUBLIC_URL", ""),
 		AIRouterCore2APIKey:      getEnv("AI_ROUTER_CORE2_API_KEY", ""),
 
 		APIKeyPepper:           getEnv("API_KEY_PEPPER", ""),
@@ -59,6 +59,33 @@ func Load() Config {
 		GlobalRateLimitEnabled: getEnvBool("GLOBAL_RATE_LIMIT_ENABLED", true),
 		GlobalRateLimitRPM:     getEnvInt("GLOBAL_RATE_LIMIT_RPM", 300),
 		GlobalRateLimitBurst:   getEnvInt("GLOBAL_RATE_LIMIT_BURST", 60),
+	}
+	cfg.validate()
+	return cfg
+}
+
+func (c Config) IsDevelopment() bool {
+	return strings.EqualFold(c.AppEnv, "development") || strings.EqualFold(c.AppEnv, "dev") || strings.EqualFold(c.AppEnv, "local")
+}
+
+func (c Config) validate() {
+	if c.IsDevelopment() {
+		return
+	}
+	requireConfig("DATABASE_URL", c.DatabaseURL)
+	requireConfig("REDIS_URL", c.RedisURL)
+	requireConfig("GENFITY_INTERNAL_SECRET", c.GenfityInternalSecret)
+	requireConfig("API_KEY_PEPPER", c.APIKeyPepper)
+	requireConfig("ENCRYPTION_KEY", c.EncryptionKey)
+	requireConfig("AI_ROUTER_CORE2_API_KEY", c.AIRouterCore2APIKey)
+	if strings.EqualFold(c.GenfityAuthMode, "jwt") {
+		requireConfig("GENFITY_JWT_SECRET", c.GenfityJWTSecret)
+	}
+}
+
+func requireConfig(name, value string) {
+	if strings.TrimSpace(value) == "" {
+		panic("missing required config: " + name)
 	}
 }
 

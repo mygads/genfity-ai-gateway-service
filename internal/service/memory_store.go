@@ -151,6 +151,18 @@ func (s *MemoryStore) UpdateAPIKeyStatus(_ context.Context, id uuid.UUID, status
 	return nil
 }
 
+func (s *MemoryStore) UpdateAPIKeyLastUsedAt(_ context.Context, id uuid.UUID, ts time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.apiKeys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	item.LastUsedAt = &ts
+	s.apiKeys[id] = item
+	return nil
+}
+
 func (s *MemoryStore) ListUsage(_ context.Context) []store.UsageLedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -271,6 +283,7 @@ func (s *MemoryStore) ReserveCreditBalance(_ context.Context, userID string, pla
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	matched := false
 	for id, item := range s.entitlements {
 		if item.GenfityUserID != userID || item.PlanCode != planCode {
 			continue
@@ -278,6 +291,7 @@ func (s *MemoryStore) ReserveCreditBalance(_ context.Context, userID string, pla
 		if entitlementPricingGroup(item) != "credit_package" || item.BalanceSnapshot == nil {
 			continue
 		}
+		matched = true
 		snapshot, err := strconv.ParseFloat(*item.BalanceSnapshot, 64)
 		if err != nil {
 			return err
@@ -298,7 +312,10 @@ func (s *MemoryStore) ReserveCreditBalance(_ context.Context, userID string, pla
 		s.entitlements[id] = item
 		return nil
 	}
-	return ErrInsufficientBalance
+	if matched {
+		return ErrInsufficientBalance
+	}
+	return ErrNotFound
 }
 
 func (s *MemoryStore) FinalizeCreditBalance(_ context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {

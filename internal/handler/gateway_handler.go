@@ -35,7 +35,8 @@ func entitlementAllowsModel(entitlement any, publicModel string) bool {
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(metadata, &payload); err != nil {
-		return true
+		// Fail-closed: corrupt metadata means we cannot verify allowance.
+		return false
 	}
 	pricingGroup, _ := payload["pricingGroup"].(string)
 	if pricingGroup != "unlimited_plan" {
@@ -46,11 +47,12 @@ func entitlementAllowsModel(entitlement any, publicModel string) bool {
 		allowedRaw = payload["allowed_models"]
 	}
 	if allowedRaw == nil {
-		return true
+		// Unlimited plan must explicitly allow-list models. Fail-closed.
+		return false
 	}
 	allowed, ok := allowedRaw.([]any)
 	if !ok {
-		return true
+		return false
 	}
 	for _, item := range allowed {
 		if modelName, ok := item.(string); ok && strings.EqualFold(modelName, publicModel) {
@@ -58,6 +60,24 @@ func entitlementAllowsModel(entitlement any, publicModel string) bool {
 		}
 	}
 	return false
+}
+
+// mapSubscriptionError converts an entitlement/subscription check error to a
+// stable client-facing code. Internal details are never leaked to the caller.
+func mapSubscriptionError(ctx context.Context, err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, service.ErrNotFound) {
+		return "subscription_inactive"
+	}
+	msg := err.Error()
+	switch msg {
+	case "subscription_inactive", "quota_exceeded", "insufficient_balance":
+		return msg
+	}
+	zerolog.Ctx(ctx).Warn().Err(err).Msg("subscription check failed")
+	return "subscription_inactive"
 }
 
 // --- GatewayHandler ---
@@ -99,6 +119,45 @@ func NewGatewayHandler(
 }
 
 // --- helpers ---
+
+const (
+	maxRuntimeRequestBodyBytes int64 = 8 << 20
+	maxStreamCaptureBytes            = 1 << 20
+)
+
+func decodeRuntimePayload(w http.ResponseWriter, r *http.Request, payload *map[string]any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRuntimeRequestBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(payload)
+}
+
+type tailCaptureBuffer struct {
+	limit int
+	buf   bytes.Buffer
+}
+
+func (b *tailCaptureBuffer) Write(p []byte) (int, error) {
+	if b.limit <= 0 {
+		return len(p), nil
+	}
+	if len(p) >= b.limit {
+		b.buf.Reset()
+		_, _ = b.buf.Write(p[len(p)-b.limit:])
+		return len(p), nil
+	}
+	if overflow := b.buf.Len() + len(p) - b.limit; overflow > 0 {
+		kept := append([]byte(nil), b.buf.Bytes()[overflow:]...)
+		b.buf.Reset()
+		_, _ = b.buf.Write(kept)
+	}
+	_, _ = b.buf.Write(p)
+	return len(p), nil
+}
+
+func (b *tailCaptureBuffer) Bytes() []byte {
+	return b.buf.Bytes()
+}
 
 func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int64) {
 	var payload map[string]any
@@ -521,8 +580,7 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(resp.StatusCode)
 
-	var captured bytes.Buffer
-	writer := io.MultiWriter(w, &captured)
+	captured := tailCaptureBuffer{limit: maxStreamCaptureBytes}
 	buf := make([]byte, 32*1024)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -531,7 +589,9 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
-			_, _ = writer.Write(buf[:n])
+			chunk := buf[:n]
+			_, _ = w.Write(chunk)
+			_, _ = captured.Write(chunk)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -614,7 +674,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	started := time.Now().UTC()
 
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeRuntimePayload(w, r, &payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
@@ -626,7 +686,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 
 	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
-		respondError(w, http.StatusPaymentRequired, err.Error())
+		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
 	if !entitlementAllowsModel(subscription, publicModel) {
@@ -639,14 +699,20 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "model_not_allowed")
 		return
 	}
-	payload["model"] = route.RouterModel
+	upstreamPayload, err := clonePayload(payload)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("clone embeddings payload failed")
+		respondError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	upstreamPayload["model"] = route.RouterModel
 
 	client, ok := h.clientForRouter(ctx, route.RouterInstanceCode)
 	if !ok {
 		respondError(w, http.StatusBadGateway, "router_unavailable")
 		return
 	}
-	resp, err := client.Embeddings(ctx, payload)
+	resp, err := client.Embeddings(ctx, upstreamPayload)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "upstream_error")
 		return
@@ -665,7 +731,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	started := time.Now().UTC()
 
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeRuntimePayload(w, r, &payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
@@ -677,7 +743,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
-		respondError(w, http.StatusPaymentRequired, err.Error())
+		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
 	if !entitlementAllowsModel(subscription, publicModel) {
@@ -716,6 +782,18 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, statusCode, errorCode)
 		return
 	}
+	settled := false
+	defer func() {
+		if settled {
+			return
+		}
+		if reservation.QuotaTokens == 0 && reservation.CreditUSD == 0 {
+			return
+		}
+		// Release reservations on early/abnormal exit (panic, ctx cancel before settlement).
+		bgCtx := context.Background()
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+	}()
 
 	type candidate struct {
 		routerInstanceCode string
@@ -747,7 +825,12 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	var lastStatusCode int
 
 	for _, cand := range candidates {
-		p := clonePayload(payload)
+		p, cloneErr := clonePayload(payload)
+		if cloneErr != nil {
+			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone messages payload failed")
+			respondError(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
 		p["model"] = cand.routerModel
 
 		client, ok := h.clientForRouter(ctx, cand.routerInstanceCode)
@@ -756,6 +839,10 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		}
 		resp, callErr := client.Messages(ctx, p)
 		if callErr != nil {
+			zerolog.Ctx(ctx).Warn().Err(callErr).
+				Str("router_instance_code", cand.routerInstanceCode).
+				Str("router_model", cand.routerModel).
+				Msg("messages upstream candidate failed")
 			continue
 		}
 
@@ -779,6 +866,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 					Str("api_key_id", apiKey.ID.String()).
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
+			settled = true
 			return
 		}
 
@@ -798,6 +886,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				respondError(w, http.StatusInternalServerError, "settlement_failed")
 				return
 			}
+			settled = true
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
@@ -816,6 +905,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "settlement_failed")
 			return
 		}
+		settled = true
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
@@ -828,6 +918,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
 	}
+	settled = true
 	respondError(w, http.StatusBadGateway, "all_candidates_failed")
 }
 
@@ -836,7 +927,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 	ctx := r.Context()
 
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeRuntimePayload(w, r, &payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
@@ -848,7 +939,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 
 	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
-		respondError(w, http.StatusPaymentRequired, err.Error())
+		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
 	if !entitlementAllowsModel(subscription, publicModel) {
@@ -861,14 +952,20 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusBadRequest, "model_not_allowed")
 		return
 	}
-	payload["model"] = route.RouterModel
+	upstreamPayload, err := clonePayload(payload)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().Err(err).Msg("clone count tokens payload failed")
+		respondError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	upstreamPayload["model"] = route.RouterModel
 
 	client, ok := h.clientForRouter(ctx, route.RouterInstanceCode)
 	if !ok {
 		respondError(w, http.StatusBadGateway, "router_unavailable")
 		return
 	}
-	resp, err := client.CountMessageTokens(ctx, payload)
+	resp, err := client.CountMessageTokens(ctx, upstreamPayload)
 	if err != nil {
 		respondError(w, http.StatusBadGateway, "upstream_error")
 		return
@@ -886,7 +983,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	started := time.Now().UTC()
 
 	var payload map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	if err := decodeRuntimePayload(w, r, &payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
@@ -898,7 +995,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
-		respondError(w, http.StatusPaymentRequired, err.Error())
+		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
 	if !entitlementAllowsModel(subscription, publicModel) {
@@ -937,6 +1034,17 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, statusCode, errorCode)
 		return
 	}
+	settled := false
+	defer func() {
+		if settled {
+			return
+		}
+		if reservation.QuotaTokens == 0 && reservation.CreditUSD == 0 {
+			return
+		}
+		bgCtx := context.Background()
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+	}()
 
 	// Build the candidate list: primary route first, then combo fallbacks if any.
 	type candidate struct {
@@ -969,16 +1077,21 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	}
 
 	streamRequested := isStreamingPayload(payload)
-	if streamRequested {
-		ensureStreamUsageOption(payload)
-	}
 	var lastResp *http.Response
 	var lastBody []byte
 	var lastStatusCode int
 
 	for _, cand := range candidates {
-		p := clonePayload(payload)
+		p, cloneErr := clonePayload(payload)
+		if cloneErr != nil {
+			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone chat payload failed")
+			respondError(w, http.StatusInternalServerError, "internal_error")
+			return
+		}
 		p["model"] = cand.routerModel
+		if streamRequested {
+			ensureStreamUsageOption(p)
+		}
 
 		client, ok := h.clientForRouter(ctx, cand.routerInstanceCode)
 		if !ok {
@@ -986,6 +1099,10 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		}
 		resp, callErr := client.ChatCompletions(ctx, p)
 		if callErr != nil {
+			zerolog.Ctx(ctx).Warn().Err(callErr).
+				Str("router_instance_code", cand.routerInstanceCode).
+				Str("router_model", cand.routerModel).
+				Msg("chat upstream candidate failed")
 			continue
 		}
 
@@ -1009,6 +1126,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 					Str("api_key_id", apiKey.ID.String()).
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
+			settled = true
 			return
 		}
 
@@ -1029,6 +1147,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				respondError(w, http.StatusInternalServerError, "settlement_failed")
 				return
 			}
+			settled = true
 			h.writeUpstreamResponse(w, resp, body)
 			return
 		}
@@ -1046,6 +1165,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			respondError(w, http.StatusInternalServerError, "settlement_failed")
 			return
 		}
+		settled = true
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
@@ -1058,16 +1178,22 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
 	}
+	settled = true
 	respondError(w, http.StatusBadGateway, "all_candidates_failed")
 }
 
 // clonePayload deep-copies a JSON payload map so that candidates
-// can mutate their own copy independently.
-func clonePayload(original map[string]any) map[string]any {
-	b, _ := json.Marshal(original)
+// can mutate their own copy independently. Returns an error if marshal/unmarshal fails.
+func clonePayload(original map[string]any) (map[string]any, error) {
+	b, err := json.Marshal(original)
+	if err != nil {
+		return nil, err
+	}
 	var copy map[string]any
-	_ = json.Unmarshal(b, &copy)
-	return copy
+	if err := json.Unmarshal(b, &copy); err != nil {
+		return nil, err
+	}
+	return copy, nil
 }
 
 // --- usage recording ---

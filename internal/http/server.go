@@ -53,8 +53,12 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	r := chi.NewRouter()
 	r.Use(mw.RequestID)
 	r.Use(mw.Logging(logger))
+	allowedOrigins := []string{"https://genfity.com", "https://www.genfity.com"}
+	if cfg.AppEnv == "development" || cfg.AppEnv == "dev" || cfg.AppEnv == "local" {
+		allowedOrigins = append(allowedOrigins, "http://localhost:3000")
+	}
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"https://genfity.com", "https://www.genfity.com", "http://localhost:3000"},
+		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Internal-Secret", "X-Request-ID"},
 		ExposedHeaders:   []string{"X-Request-ID"},

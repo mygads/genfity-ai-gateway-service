@@ -62,6 +62,7 @@ func (s *RateLimitService) CheckTPM(ctx context.Context, accountID string, estim
 		_ = s.client.Expire(ctx, key, time.Minute).Err()
 	}
 	if int(count) > limit {
+		_ = s.client.IncrBy(ctx, key, -estimatedTokens).Err()
 		return fmt.Errorf("rate_limit_exceeded")
 	}
 	return nil
@@ -76,12 +77,20 @@ func (s *RateLimitService) AcquireConcurrency(ctx context.Context, accountID str
 	if err != nil {
 		return nil, err
 	}
+	if count == 1 {
+		_ = s.client.Expire(ctx, key, 10*time.Minute).Err()
+	}
 	if int(count) > limit {
 		_ = s.client.Decr(ctx, key).Err()
 		return nil, fmt.Errorf("rate_limit_exceeded")
 	}
 	release := func() {
-		_ = s.client.Decr(ctx, key).Err()
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		next, err := s.client.Decr(releaseCtx, key).Result()
+		if err == nil && next <= 0 {
+			_ = s.client.Del(releaseCtx, key).Err()
+		}
 	}
 	return release, nil
 }

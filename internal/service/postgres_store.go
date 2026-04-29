@@ -154,6 +154,11 @@ func (s *PostgresStore) UpdateAPIKeyStatus(ctx context.Context, id uuid.UUID, st
 	return nil
 }
 
+func (s *PostgresStore) UpdateAPIKeyLastUsedAt(ctx context.Context, id uuid.UUID, ts time.Time) error {
+	_, err := s.pool.Exec(ctx, `UPDATE ai_gateway.api_keys SET last_used_at = $2 WHERE id = $1`, id, ts)
+	return err
+}
+
 func (s *PostgresStore) UpsertModel(ctx context.Context, item store.AIModel) (store.AIModel, error) {
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO ai_gateway.ai_models (id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision)
@@ -555,12 +560,13 @@ func (s *PostgresStore) FinalizeQuotaTokens(ctx context.Context, userID string, 
 		requestCount = 1
 	}
 	_, err := s.pool.Exec(ctx, `
-		UPDATE ai_gateway.quota_counters
-		SET tokens_reserved = GREATEST(tokens_reserved - $4, 0),
-			tokens_used = tokens_used + $5,
-			request_count = request_count + $6,
-			updated_at = now()
-		WHERE genfity_user_id = $1 AND period_start = $2 AND period_end = $3`,
+		INSERT INTO ai_gateway.quota_counters (genfity_user_id, period_start, period_end, tokens_used, tokens_reserved, request_count, updated_at)
+		VALUES ($1, $2, $3, $5, 0, $6, now())
+		ON CONFLICT (genfity_user_id, period_start, period_end)
+		DO UPDATE SET tokens_reserved = GREATEST(ai_gateway.quota_counters.tokens_reserved - $4, 0),
+			tokens_used = ai_gateway.quota_counters.tokens_used + $5,
+			request_count = ai_gateway.quota_counters.request_count + $6,
+			updated_at = now()`,
 		userID, periodStart, periodEnd, reservedTokens, usedTokens, requestCount)
 	return err
 }
@@ -633,13 +639,13 @@ func (s *PostgresStore) IncrementQuotaCounter(ctx context.Context, userID string
 func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_snapshot = balance_snapshot - $3,
+			 SET balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - $3, 0),
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
 			   AND plan_code = $2
 			   AND metadata->>'pricingGroup' = 'credit_package'
 			   AND status = 'active'
-			   AND COALESCE(balance_snapshot, 0) >= $3`,
+			   AND GREATEST(COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0), 0) >= $3`,
 		userID, planCode, debitUsd)
 	if err != nil {
 		return err
@@ -671,7 +677,7 @@ func (s *PostgresStore) ListAllUsage(ctx context.Context, limit int) []store.Usa
 	if limit <= 0 {
 		limit = 100
 	}
-	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC LIMIT `, limit)
+	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC LIMIT $1`, limit)
 }
 
 func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {

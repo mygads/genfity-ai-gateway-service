@@ -58,10 +58,16 @@ func respondAdminWriteError(w http.ResponseWriter, err error) {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
-		case "23503", "23505":
-			respondError(w, http.StatusConflict, pgErr.ConstraintName)
-		case "23502", "23514", "22P02":
-			respondError(w, http.StatusBadRequest, pgErr.ConstraintName)
+		case "23505":
+			respondError(w, http.StatusConflict, "unique_violation")
+		case "23503":
+			respondError(w, http.StatusConflict, "fk_violation")
+		case "23502":
+			respondError(w, http.StatusBadRequest, "not_null_violation")
+		case "23514":
+			respondError(w, http.StatusBadRequest, "check_violation")
+		case "22P02":
+			respondError(w, http.StatusBadRequest, "invalid_text_representation")
 		default:
 			respondError(w, http.StatusInternalServerError, "database_error")
 		}
@@ -71,7 +77,7 @@ func respondAdminWriteError(w http.ResponseWriter, err error) {
 		respondError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	respondError(w, http.StatusBadRequest, err.Error())
+	respondError(w, http.StatusBadRequest, "invalid_request")
 }
 
 func (h *AdminHandler) ListModels(w http.ResponseWriter, r *http.Request) {

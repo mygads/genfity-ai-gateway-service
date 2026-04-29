@@ -77,7 +77,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Retry redis ping a few times before falling back to "rate limit disabled"
+	// Retry redis ping a few times before falling back to "rate limit disabled" in development.
 	redisReady := false
 	for attempt := 0; attempt < 5; attempt++ {
 		pingCtx, cancel := context.WithTimeout(startupCtx, 3*time.Second)
@@ -97,6 +97,9 @@ func main() {
 		time.Sleep(wait)
 	}
 	if !redisReady {
+		if !cfg.IsDevelopment() {
+			logger.Fatal().Msg("redis unreachable after retries, refusing to start without rate limiting")
+		}
 		logger.Warn().Msg("redis off after retries, rate limit disabled")
 		_ = redisClient.Close()
 		redisClient = nil
@@ -129,8 +132,13 @@ func main() {
 
 	server := httpserver.New(cfg, redisClient, store, logger)
 	httpServer := &http.Server{
-		Addr:    cfg.HTTPAddr,
-		Handler: server.Router,
+		Addr:              cfg.HTTPAddr,
+		Handler:           server.Router,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	errCh := make(chan error, 1)
@@ -148,7 +156,12 @@ func main() {
 	select {
 	case <-ctx.Done():
 		logger.Info().Msg("shutdown signal received")
-		time.Sleep(250 * time.Millisecond)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Error().Err(err).Msg("graceful shutdown failed")
+			_ = httpServer.Close()
+		}
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
 			logger.Fatal().Err(err).Msg("server stopped")
