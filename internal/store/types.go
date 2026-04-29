@@ -1,4 +1,4 @@
-﻿package store
+package store
 
 import (
 	"encoding/json"
@@ -75,15 +75,15 @@ type AIModelRoute struct {
 }
 
 type VirtualCombo struct {
-	ID          uuid.UUID            `json:"id"`
-	ModelID     uuid.UUID            `json:"model_id"`
-	Name        string               `json:"name"`
-	Description string               `json:"description,omitempty"`
-	Status      string               `json:"status"`
-	Metadata    json.RawMessage      `json:"metadata,omitempty"`
-	Entries     []VirtualComboEntry  `json:"entries"`
-	CreatedAt   time.Time            `json:"created_at"`
-	UpdatedAt   time.Time            `json:"updated_at"`
+	ID          uuid.UUID           `json:"id"`
+	ModelID     uuid.UUID           `json:"model_id"`
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Status      string              `json:"status"`
+	Metadata    json.RawMessage     `json:"metadata,omitempty"`
+	Entries     []VirtualComboEntry `json:"entries"`
+	CreatedAt   time.Time           `json:"created_at"`
+	UpdatedAt   time.Time           `json:"updated_at"`
 }
 
 type VirtualComboEntry struct {
@@ -107,6 +107,7 @@ type CustomerEntitlement struct {
 	PeriodEnd            *time.Time      `json:"period_end,omitempty"`
 	QuotaTokensMonthly   *int64          `json:"quota_tokens_monthly,omitempty"`
 	BalanceSnapshot      *string         `json:"balance_snapshot,omitempty"`
+	BalanceReserved      *string         `json:"balance_reserved,omitempty"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
 	UpdatedFromGenfityAt time.Time       `json:"updated_from_genfity_at"`
 }

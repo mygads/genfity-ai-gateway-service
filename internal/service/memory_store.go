@@ -32,6 +32,8 @@ type MemoryStore struct {
 	entitlements  map[uuid.UUID]store.CustomerEntitlement
 	routers       map[string]store.RouterInstance
 	quotaReserved map[string]int64
+	quotaUsed     map[string]int64
+	quotaRequests map[string]int64
 	usage         []store.UsageLedgerEntry
 }
 
@@ -46,6 +48,8 @@ func NewMemoryStore() *MemoryStore {
 		entitlements:  make(map[uuid.UUID]store.CustomerEntitlement),
 		routers:       make(map[string]store.RouterInstance),
 		quotaReserved: make(map[string]int64),
+		quotaUsed:     make(map[string]int64),
+		quotaRequests: make(map[string]int64),
 		usage:         make([]store.UsageLedgerEntry, 0),
 	}
 }
@@ -211,7 +215,14 @@ func (s *MemoryStore) SumUsageTokensByUserSince(_ context.Context, userID string
 	return total
 }
 
-func (s *MemoryStore) IncrementQuotaCounter(_ context.Context, _ string, _ *string, _ time.Time, _ time.Time, _ int64) error {
+func (s *MemoryStore) IncrementQuotaCounter(_ context.Context, userID string, _ *string, periodStart time.Time, periodEnd time.Time, tokens int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := memoryQuotaKey(userID, periodStart, periodEnd)
+	if tokens > 0 {
+		s.quotaUsed[key] += tokens
+	}
+	s.quotaRequests[key]++
 	return nil
 }
 
@@ -221,13 +232,16 @@ func (s *MemoryStore) ReserveQuotaTokens(_ context.Context, userID string, _ *st
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var used int64
-	for _, item := range s.usage {
-		if item.GenfityUserID == userID && item.Status == "success" && !item.StartedAt.Before(periodStart) {
-			used += item.TotalTokens
+	key := memoryQuotaKey(userID, periodStart, periodEnd)
+	used := s.quotaUsed[key]
+	if used == 0 {
+		// Fall back to scanning ledger if counter has not yet been initialized.
+		for _, item := range s.usage {
+			if item.GenfityUserID == userID && item.Status == "success" && !item.StartedAt.Before(periodStart) {
+				used += item.TotalTokens
+			}
 		}
 	}
-	key := memoryQuotaKey(userID, periodStart, periodEnd)
 	if used+s.quotaReserved[key]+tokens > limit {
 		return ErrQuotaExceeded
 	}
@@ -251,15 +265,8 @@ func (s *MemoryStore) FinalizeQuotaTokens(_ context.Context, userID string, peri
 	return nil
 }
 
-func (s *MemoryStore) ReserveCreditBalance(ctx context.Context, userID string, planCode string, amountUsd float64) error {
+func (s *MemoryStore) ReserveCreditBalance(_ context.Context, userID string, planCode string, amountUsd float64) error {
 	if amountUsd <= 0 {
-		return nil
-	}
-	return s.DebitCreditBalance(ctx, userID, planCode, amountUsd)
-}
-
-func (s *MemoryStore) FinalizeCreditBalance(_ context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {
-	if reservedUsd <= 0 && actualUsd <= 0 {
 		return nil
 	}
 	s.mu.Lock()
@@ -271,20 +278,79 @@ func (s *MemoryStore) FinalizeCreditBalance(_ context.Context, userID string, pl
 		if entitlementPricingGroup(item) != "credit_package" || item.BalanceSnapshot == nil {
 			continue
 		}
-		current, err := strconv.ParseFloat(*item.BalanceSnapshot, 64)
+		snapshot, err := strconv.ParseFloat(*item.BalanceSnapshot, 64)
 		if err != nil {
 			return err
 		}
-		next := current + reservedUsd - actualUsd
-		if next < 0 {
+		var reserved float64
+		if item.BalanceReserved != nil {
+			reserved, err = strconv.ParseFloat(*item.BalanceReserved, 64)
+			if err != nil {
+				return err
+			}
+		}
+		if snapshot-reserved < amountUsd {
 			return ErrInsufficientBalance
 		}
-		value := fmt.Sprintf("%.6f", next)
-		item.BalanceSnapshot = &value
+		nextReserved := reserved + amountUsd
+		value := fmt.Sprintf("%.6f", nextReserved)
+		item.BalanceReserved = &value
 		s.entitlements[id] = item
 		return nil
 	}
-	return ErrNotFound
+	return ErrInsufficientBalance
+}
+
+func (s *MemoryStore) FinalizeCreditBalance(_ context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {
+	if reservedUsd <= 0 && actualUsd <= 0 {
+		return nil
+	}
+	if reservedUsd < 0 {
+		reservedUsd = 0
+	}
+	if actualUsd < 0 {
+		actualUsd = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID || item.PlanCode != planCode {
+			continue
+		}
+		if entitlementPricingGroup(item) != "credit_package" || item.BalanceSnapshot == nil {
+			continue
+		}
+		snapshot, err := strconv.ParseFloat(*item.BalanceSnapshot, 64)
+		if err != nil {
+			return err
+		}
+		var reserved float64
+		if item.BalanceReserved != nil {
+			reserved, err = strconv.ParseFloat(*item.BalanceReserved, 64)
+			if err != nil {
+				return err
+			}
+		}
+		nextReserved := reserved - reservedUsd
+		if nextReserved < 0 {
+			nextReserved = 0
+		}
+		debit := actualUsd
+		if debit > snapshot {
+			debit = snapshot
+		}
+		nextSnapshot := snapshot - debit
+		if nextSnapshot < 0 {
+			nextSnapshot = 0
+		}
+		snapshotValue := fmt.Sprintf("%.6f", nextSnapshot)
+		reservedValue := fmt.Sprintf("%.6f", nextReserved)
+		item.BalanceSnapshot = &snapshotValue
+		item.BalanceReserved = &reservedValue
+		s.entitlements[id] = item
+		return nil
+	}
+	return nil
 }
 
 func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID string) []store.UsageLedgerEntry {

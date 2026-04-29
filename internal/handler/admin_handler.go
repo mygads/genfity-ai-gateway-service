@@ -19,6 +19,37 @@ type AdminHandler struct {
 	usage   *service.UsageService
 }
 
+// patchHasField returns true if the PATCH body contained a key (even if null).
+func patchHasField(fields map[string]json.RawMessage, key string) bool {
+	_, ok := fields[key]
+	return ok
+}
+
+// patchIsNull returns true if the PATCH body contained the key with explicit JSON null.
+func patchIsNull(fields map[string]json.RawMessage, key string) bool {
+	raw, ok := fields[key]
+	if !ok {
+		return false
+	}
+	return string(raw) == "null"
+}
+
+// patchDecodeOptionalString decodes a *string from the field; ok=false if absent or invalid.
+func patchDecodeOptionalString(fields map[string]json.RawMessage, key string) (*string, bool) {
+	raw, ok := fields[key]
+	if !ok {
+		return nil, false
+	}
+	if string(raw) == "null" {
+		return nil, true
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, false
+	}
+	return &v, true
+}
+
 func NewAdminHandler(models *service.ModelService, routers *service.RouterService, usage *service.UsageService) *AdminHandler {
 	return &AdminHandler{models: models, routers: routers, usage: usage}
 }
@@ -147,39 +178,55 @@ func (h *AdminHandler) UpdateModelPrice(w http.ResponseWriter, r *http.Request) 
 		respondAdminWriteError(w, err)
 		return
 	}
-	var payload struct {
-		ModelID             *uuid.UUID `json:"model_id"`
-		InputPricePer1M     *string    `json:"input_price_per_1m"`
-		OutputPricePer1M    *string    `json:"output_price_per_1m"`
-		CachedPricePer1M    *string    `json:"cached_price_per_1m"`
-		ReasoningPricePer1M *string    `json:"reasoning_price_per_1m"`
-		Currency            *string    `json:"currency"`
-		Active              *bool      `json:"active"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.ModelID != nil {
-		current.ModelID = *payload.ModelID
+	if raw, ok := fields["model_id"]; ok {
+		var v uuid.UUID
+		if err := json.Unmarshal(raw, &v); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid_model_id")
+			return
+		}
+		current.ModelID = v
 	}
-	if payload.InputPricePer1M != nil {
-		current.InputPricePer1M = *payload.InputPricePer1M
+	if v, ok := patchDecodeOptionalString(fields, "input_price_per_1m"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "input_price_per_1m_required")
+			return
+		}
+		current.InputPricePer1M = *v
 	}
-	if payload.OutputPricePer1M != nil {
-		current.OutputPricePer1M = *payload.OutputPricePer1M
+	if v, ok := patchDecodeOptionalString(fields, "output_price_per_1m"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "output_price_per_1m_required")
+			return
+		}
+		current.OutputPricePer1M = *v
 	}
-	if payload.CachedPricePer1M != nil {
-		current.CachedPricePer1M = payload.CachedPricePer1M
+	if patchHasField(fields, "cached_price_per_1m") {
+		v, _ := patchDecodeOptionalString(fields, "cached_price_per_1m")
+		current.CachedPricePer1M = v
 	}
-	if payload.ReasoningPricePer1M != nil {
-		current.ReasoningPricePer1M = payload.ReasoningPricePer1M
+	if patchHasField(fields, "reasoning_price_per_1m") {
+		v, _ := patchDecodeOptionalString(fields, "reasoning_price_per_1m")
+		current.ReasoningPricePer1M = v
 	}
-	if payload.Currency != nil {
-		current.Currency = *payload.Currency
+	if v, ok := patchDecodeOptionalString(fields, "currency"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "currency_required")
+			return
+		}
+		current.Currency = *v
 	}
-	if payload.Active != nil {
-		current.Active = *payload.Active
+	if raw, ok := fields["active"]; ok {
+		var v bool
+		if err := json.Unmarshal(raw, &v); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid_active")
+			return
+		}
+		current.Active = v
 	}
 	out, err := h.models.UpdatePrice(r.Context(), *current)
 	if err != nil {
@@ -231,31 +278,47 @@ func (h *AdminHandler) UpdateModelRoute(w http.ResponseWriter, r *http.Request) 
 		respondAdminWriteError(w, err)
 		return
 	}
-	var payload struct {
-		ModelID            *uuid.UUID       `json:"model_id"`
-		RouterInstanceCode *string          `json:"router_instance_code"`
-		RouterModel        *string          `json:"router_model"`
-		Status             *string          `json:"status"`
-		Metadata           *json.RawMessage `json:"metadata"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.ModelID != nil {
-		current.ModelID = *payload.ModelID
+	if raw, ok := fields["model_id"]; ok {
+		var v uuid.UUID
+		if err := json.Unmarshal(raw, &v); err != nil {
+			respondError(w, http.StatusBadRequest, "invalid_model_id")
+			return
+		}
+		current.ModelID = v
 	}
-	if payload.RouterInstanceCode != nil {
-		current.RouterInstanceCode = *payload.RouterInstanceCode
+	if v, ok := patchDecodeOptionalString(fields, "router_instance_code"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "router_instance_code_required")
+			return
+		}
+		current.RouterInstanceCode = *v
 	}
-	if payload.RouterModel != nil {
-		current.RouterModel = *payload.RouterModel
+	if v, ok := patchDecodeOptionalString(fields, "router_model"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "router_model_required")
+			return
+		}
+		current.RouterModel = *v
 	}
-	if payload.Status != nil {
-		current.Status = *payload.Status
+	if v, ok := patchDecodeOptionalString(fields, "status"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "status_required")
+			return
+		}
+		current.Status = *v
 	}
-	if payload.Metadata != nil {
-		current.Metadata = *payload.Metadata
+	if patchHasField(fields, "metadata") {
+		raw := fields["metadata"]
+		if string(raw) == "null" {
+			current.Metadata = nil
+		} else {
+			current.Metadata = json.RawMessage(raw)
+		}
 	}
 	out, err := h.models.UpdateRoute(r.Context(), *current)
 	if err != nil {
@@ -307,43 +370,64 @@ func (h *AdminHandler) UpdateRouterInstance(w http.ResponseWriter, r *http.Reque
 		respondAdminWriteError(w, err)
 		return
 	}
-	var payload struct {
-		Code              *string          `json:"code"`
-		PublicBaseURL     *string          `json:"public_base_url"`
-		InternalBaseURL   *string          `json:"internal_base_url"`
-		Status            *string          `json:"status"`
-		EncryptedAPIKey   *string          `json:"encrypted_api_key"`
-		HealthStatus      *string          `json:"health_status"`
-		LastHealthCheckAt *time.Time       `json:"last_health_check_at"`
-		Metadata          *json.RawMessage `json:"metadata"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if payload.Code != nil {
-		current.Code = *payload.Code
+	if v, ok := patchDecodeOptionalString(fields, "code"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "code_required")
+			return
+		}
+		current.Code = *v
 	}
-	if payload.PublicBaseURL != nil {
-		current.PublicBaseURL = payload.PublicBaseURL
+	if patchHasField(fields, "public_base_url") {
+		v, _ := patchDecodeOptionalString(fields, "public_base_url")
+		current.PublicBaseURL = v
 	}
-	if payload.InternalBaseURL != nil {
-		current.InternalBaseURL = *payload.InternalBaseURL
+	if v, ok := patchDecodeOptionalString(fields, "internal_base_url"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "internal_base_url_required")
+			return
+		}
+		current.InternalBaseURL = *v
 	}
-	if payload.Status != nil {
-		current.Status = *payload.Status
+	if v, ok := patchDecodeOptionalString(fields, "status"); ok {
+		if v == nil {
+			respondError(w, http.StatusBadRequest, "status_required")
+			return
+		}
+		current.Status = *v
 	}
-	if payload.EncryptedAPIKey != nil {
-		current.EncryptedAPIKey = payload.EncryptedAPIKey
+	if patchHasField(fields, "encrypted_api_key") {
+		v, _ := patchDecodeOptionalString(fields, "encrypted_api_key")
+		current.EncryptedAPIKey = v
 	}
-	if payload.HealthStatus != nil {
-		current.HealthStatus = payload.HealthStatus
+	if patchHasField(fields, "health_status") {
+		v, _ := patchDecodeOptionalString(fields, "health_status")
+		current.HealthStatus = v
 	}
-	if payload.LastHealthCheckAt != nil {
-		current.LastHealthCheckAt = payload.LastHealthCheckAt
+	if patchHasField(fields, "last_health_check_at") {
+		raw := fields["last_health_check_at"]
+		if string(raw) == "null" {
+			current.LastHealthCheckAt = nil
+		} else {
+			var v time.Time
+			if err := json.Unmarshal(raw, &v); err != nil {
+				respondError(w, http.StatusBadRequest, "invalid_last_health_check_at")
+				return
+			}
+			current.LastHealthCheckAt = &v
+		}
 	}
-	if payload.Metadata != nil {
-		current.Metadata = *payload.Metadata
+	if patchHasField(fields, "metadata") {
+		raw := fields["metadata"]
+		if string(raw) == "null" {
+			current.Metadata = nil
+		} else {
+			current.Metadata = json.RawMessage(raw)
+		}
 	}
 	instance, err := h.routers.UpdateInstance(r.Context(), *current)
 	if err != nil {

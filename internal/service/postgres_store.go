@@ -566,31 +566,54 @@ func (s *PostgresStore) FinalizeQuotaTokens(ctx context.Context, userID string, 
 }
 
 func (s *PostgresStore) ReserveCreditBalance(ctx context.Context, userID string, planCode string, amountUsd float64) error {
-	return s.DebitCreditBalance(ctx, userID, planCode, amountUsd)
-}
-
-func (s *PostgresStore) FinalizeCreditBalance(ctx context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {
-	adjustment := reservedUsd - actualUsd
-	if adjustment == 0 {
+	if amountUsd <= 0 {
 		return nil
 	}
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_snapshot = balance_snapshot + $3,
+			 SET balance_reserved = COALESCE(balance_reserved, 0) + $3,
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
 			   AND plan_code = $2
 			   AND metadata->>'pricingGroup' = 'credit_package'
 			   AND status = 'active'
-			   AND COALESCE(balance_snapshot, 0) + $3 >= 0`,
-		userID, planCode, adjustment)
+			   AND COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0) >= $3`,
+		userID, planCode, amountUsd)
 	if err != nil {
 		return err
 	}
 	if cmd.RowsAffected() == 0 {
-		return ErrNotFound
+		return ErrInsufficientBalance
 	}
 	return nil
+}
+
+// FinalizeCreditBalance releases the reservation and debits the actual cost.
+// If actualUsd exceeds reservedUsd (cost overrun), the debit is capped at the
+// available balance — the entitlement balance can never go negative. Any
+// remaining shortfall is silently absorbed by the platform; the caller should
+// log overruns separately if they need to chase them.
+func (s *PostgresStore) FinalizeCreditBalance(ctx context.Context, userID string, planCode string, reservedUsd float64, actualUsd float64) error {
+	if reservedUsd <= 0 && actualUsd <= 0 {
+		return nil
+	}
+	if actualUsd < 0 {
+		actualUsd = 0
+	}
+	if reservedUsd < 0 {
+		reservedUsd = 0
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE ai_gateway.customer_entitlements
+			 SET balance_reserved = GREATEST(COALESCE(balance_reserved, 0) - $3, 0),
+			     balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - LEAST($4, COALESCE(balance_snapshot, 0)), 0),
+			     updated_at = now()
+			 WHERE genfity_user_id = $1
+			   AND plan_code = $2
+			   AND metadata->>'pricingGroup' = 'credit_package'
+			   AND status = 'active'`,
+		userID, planCode, reservedUsd, actualUsd)
+	return err
 }
 
 func (s *PostgresStore) IncrementQuotaCounter(ctx context.Context, userID string, tenantID *string, periodStart time.Time, periodEnd time.Time, tokens int64) error {

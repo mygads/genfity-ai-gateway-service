@@ -31,13 +31,17 @@ Header:
 Behavior:
 
 - validates api key
-- validates entitlement
+- validates entitlement (`402 insufficient_balance` for credit packages with empty balance)
 - resolves route
-- applies RPM by API key
-- applies TPM/concurrency/quota by `genfity_user_id` account scope
-- reserves quota/credit before upstream call and finalizes after usage is known
-- proxies to CLIProxyAPI
-- `/v1/embeddings` is unchanged for now and is not part of the new reservation flow
+- enforces RPM/TPM/concurrency by `genfity_user_id` account scope
+- reserves quota tokens (returns `429 quota_exceeded` if monthly quota would be exceeded; returns `400 max_tokens_required` if quota or paid credit is in effect and the request neither caps `max_tokens` nor has a model context window to fall back on)
+- reserves credit balance for credit packages (returns `402 insufficient_balance` if available - reserved < estimated cost)
+- proxies to CLIProxyAPI/ai-core2
+- on completion, finalizes quota (debits actual tokens, releases reservation, increments request_count regardless of success/failure) and finalizes credit balance (debits actual cost capped to current snapshot, releases reservation)
+- if all upstream candidates fail, releases reservations and returns `502 all_candidates_failed`
+- if settlement fails after upstream completed, returns `500 settlement_failed`
+- in-body provider errors on HTTP 200 are treated as failures: ledger entry status becomes `failed` with the provider's `error.code`/`error.type` (or `provider_error`), and finalize releases the credit reserve without debit
+- `/v1/embeddings` is unchanged for now and is not part of the new reservation flow; it does not currently enforce RPM/TPM/concurrency/quota or perform credit reservation
 
 ## Customer JWT
 
@@ -70,11 +74,13 @@ Header:
 PATCH behavior:
 
 - Partial update: omitted fields are preserved.
+- Explicit JSON `null` clears optional pointer fields (e.g. `cached_price_per_1m`, `reasoning_price_per_1m`, `public_base_url`, `encrypted_api_key`, `health_status`, `last_health_check_at`, `metadata`).
+- Required fields cannot be set to `null`; doing so returns `400 <field>_required`.
 - Missing IDs return `404 not_found`.
 
 Provider management:
 
-- 9Router-style provider management is deprecated for CLIProxyAPI.
+- Legacy 9Router/ai-core1 provider management is deprecated; CLIProxyAPI/ai-core2 is the current upstream.
 - Provider endpoints return `501 provider_management_not_supported_by_cliproxy`.
 
 Header:

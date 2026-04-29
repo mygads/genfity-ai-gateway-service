@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	"genfity-ai-gateway-service/internal/http/middleware"
 	"genfity-ai-gateway-service/internal/router"
@@ -108,6 +109,67 @@ func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int6
 		}
 	}
 	return parseUsageFromSSEBody(body)
+}
+
+// detectProviderErrorFromBody inspects an upstream response body (JSON or SSE)
+// and returns a non-empty error code if the body conveys an in-body provider error.
+// This is necessary because some providers return HTTP 200 with `{"error": ...}`.
+func detectProviderErrorFromBody(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if code := detectErrorFromJSONBytes(body); code != "" {
+		return code
+	}
+	// SSE fallback: scan each data: line.
+	for _, rawLine := range strings.Split(string(body), "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		if code := detectErrorFromJSONBytes([]byte(data)); code != "" {
+			return code
+		}
+	}
+	return ""
+}
+
+func detectErrorFromJSONBytes(b []byte) string {
+	var payload map[string]any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return ""
+	}
+	return detectErrorFromPayload(payload)
+}
+
+func detectErrorFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if errVal, ok := payload["error"]; ok && errVal != nil {
+		switch v := errVal.(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return "provider_error"
+			}
+		case map[string]any:
+			if code, ok := v["code"].(string); ok && code != "" {
+				return code
+			}
+			if msg, ok := v["message"].(string); ok && strings.TrimSpace(msg) != "" {
+				return "provider_error"
+			}
+			if t, ok := v["type"].(string); ok && t != "" {
+				return t
+			}
+			return "provider_error"
+		}
+	}
+	return ""
 }
 
 func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total int64) {
@@ -337,6 +399,8 @@ type usageSettlement struct {
 	CompletionTokens int64
 	TotalTokens      int64
 	TotalCostUSD     float64
+	Success          bool
+	ErrorCode        string
 }
 
 func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenReservationEstimate {
@@ -419,15 +483,15 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 	return reservation, 0, ""
 }
 
-func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey store.APIKey, reservation runtimeReservation, settlement usageSettlement, success bool) error {
+func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey store.APIKey, reservation runtimeReservation, settlement usageSettlement, success bool, countRequest bool) error {
 	usedTokens := int64(0)
 	actualUSD := 0.0
 	if success {
 		usedTokens = settlement.TotalTokens
 		actualUSD = settlement.TotalCostUSD
 	}
-	if reservation.QuotaTokens > 0 {
-		if err := h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, reservation.PeriodStart, reservation.PeriodEnd, reservation.QuotaTokens, usedTokens, success); err != nil {
+	if reservation.QuotaTokens > 0 || countRequest {
+		if err := h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, reservation.PeriodStart, reservation.PeriodEnd, reservation.QuotaTokens, usedTokens, countRequest); err != nil {
 			return err
 		}
 	}
@@ -442,10 +506,10 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) error {
 	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, started, statusCode, body, publicModel)
 	if err != nil {
-		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false)
+		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true)
 		return err
 	}
-	return h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, statusCode < 400)
+	return h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, true)
 }
 
 func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response) []byte {
@@ -630,7 +694,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.rateLimit != nil && limits.HasRPM() {
-		if err := h.rateLimit.CheckRPM(ctx, apiKey.ID.String(), limits.RPM); err != nil {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
@@ -707,7 +771,14 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			body := h.streamUpstreamResponse(w, resp)
 			resp.Body.Close()
-			_ = h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
+			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).
+					Str("public_model", publicModel).
+					Str("router_instance_code", cand.routerInstanceCode).
+					Str("router_model", cand.routerModel).
+					Str("api_key_id", apiKey.ID.String()).
+					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
+			}
 			return
 		}
 
@@ -753,7 +824,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false); err != nil {
+	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
 	}
@@ -844,7 +915,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	}
 
 	if h.rateLimit != nil && limits.HasRPM() {
-		if err := h.rateLimit.CheckRPM(ctx, apiKey.ID.String(), limits.RPM); err != nil {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
@@ -930,7 +1001,14 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			}
 			body := h.streamUpstreamResponse(w, resp)
 			resp.Body.Close()
-			_ = h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
+			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).
+					Str("public_model", publicModel).
+					Str("router_instance_code", cand.routerInstanceCode).
+					Str("router_model", cand.routerModel).
+					Str("api_key_id", apiKey.ID.String()).
+					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
+			}
 			return
 		}
 
@@ -976,7 +1054,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false); err != nil {
+	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
 	}
@@ -993,10 +1071,6 @@ func clonePayload(original map[string]any) map[string]any {
 }
 
 // --- usage recording ---
-
-func (h *GatewayHandler) processUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, body []byte, publicModel string) {
-	h.recordUsageWithLegacyBilling(ctx, apiKey, subscription, model, route, started, statusCode, body, publicModel)
-}
 
 func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, body []byte, publicModel string) (usageSettlement, error) {
 	finished := time.Now().UTC()
@@ -1019,6 +1093,17 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	if statusCode >= 400 {
 		statusStr = "failed"
 	}
+	// Some upstreams (notably CLIProxyAPI/ai-core2) return HTTP 200 with an
+	// `{"error": ...}` payload when the underlying provider call failed. Treat
+	// those as failed so the ledger and reservation finalize reflect reality.
+	bodyErrorCode := ""
+	if statusCode < 400 {
+		bodyErrorCode = detectProviderErrorFromBody(body)
+		if bodyErrorCode != "" {
+			statusStr = "failed"
+		}
+	}
+	success := statusStr == "success"
 
 	inCost := formatAmount(inputCostUsd)
 	outCost := formatAmount(outputCostUsd)
@@ -1047,6 +1132,15 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		entryMetaJSON, _ = json.Marshal(entryMeta)
 	}
 
+	var errorCodePtr *string
+	if bodyErrorCode != "" {
+		ec := bodyErrorCode
+		errorCodePtr = &ec
+	} else if statusCode >= 400 {
+		ec := fmt.Sprintf("http_%d", statusCode)
+		errorCodePtr = &ec
+	}
+
 	entry := store.UsageLedgerEntry{
 		ID:                 uuid.New(),
 		RequestID:          uuid.New().String(),
@@ -1063,6 +1157,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		OutputCost:         outCost,
 		TotalCost:          totCost,
 		Status:             statusStr,
+		ErrorCode:          errorCodePtr,
 		LatencyMS:          &latencyMs32,
 		StartedAt:          started,
 		FinishedAt:         &finished,
@@ -1077,6 +1172,8 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
 		TotalCostUSD:     totalCostUsd,
+		Success:          success,
+		ErrorCode:        bodyErrorCode,
 	}, nil
 }
 
