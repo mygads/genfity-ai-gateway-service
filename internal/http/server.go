@@ -25,7 +25,6 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	apiKeys := service.NewAPIKeyService(store, cfg.APIKeyPepper, logger)
 	models := service.NewModelService(store, logger)
 	routers := service.NewRouterService(store, logger)
-	combos := service.NewComboService(store, logger)
 	entitlements := service.NewEntitlementService(store, logger)
 	usage := service.NewUsageService(store, logger)
 	syncService := service.NewSyncService(store, entitlements, models, usage, logger)
@@ -37,11 +36,13 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 
 	cliProxyClient := router.NewCLIProxyClient(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 
-	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, combos, routers, cliProxyClient, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	// NOTE: virtual combos previously lived here — they moved to CLIProxyAPI
+	// in 2026-05 (see PRD §3.3). The gateway now forwards the request body
+	// as-is; combo resolution and fallback happen upstream.
+	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, routers, cliProxyClient, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers, usage)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-	comboHandler := handler.NewComboHandler(combos)
 	syncHandler := handler.NewSyncHandler(syncService)
 	healthHandler := handler.NewHealthHandler(syncService)
 
@@ -114,17 +115,6 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)
 		r.Get("/routers/{code}/providers", routerProxyHandler.Providers)
 		r.Get("/routers/{code}/providers/{providerID}/models", routerProxyHandler.ProviderModels)
-		r.Get("/routers/{code}/combos", comboHandler.ListCombos)
-		r.Post("/routers/{code}/combos", comboHandler.CreateCombo)
-		r.Put("/routers/{code}/combos/{comboID}", comboHandler.UpdateCombo)
-		r.Patch("/routers/{code}/combos/{comboID}", comboHandler.UpdateCombo)
-		r.Delete("/routers/{code}/combos/{comboID}", comboHandler.DeleteCombo)
-
-		r.Get("/combos", comboHandler.ListCombos)
-		r.Post("/combos", comboHandler.CreateCombo)
-		r.Put("/combos/{comboID}", comboHandler.UpdateCombo)
-		r.Patch("/combos/{comboID}", comboHandler.UpdateCombo)
-		r.Delete("/combos/{comboID}", comboHandler.DeleteCombo)
 	})
 
 	r.Route("/internal", func(r chi.Router) {

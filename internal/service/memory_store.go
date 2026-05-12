@@ -28,7 +28,6 @@ type MemoryStore struct {
 	models        map[uuid.UUID]store.AIModel
 	prices        map[uuid.UUID]store.AIModelPrice
 	routes        map[uuid.UUID]store.AIModelRoute
-	combos        map[uuid.UUID]store.VirtualCombo
 	entitlements  map[uuid.UUID]store.CustomerEntitlement
 	routers       map[string]store.RouterInstance
 	quotaReserved map[string]int64
@@ -44,7 +43,6 @@ func NewMemoryStore() *MemoryStore {
 		models:        make(map[uuid.UUID]store.AIModel),
 		prices:        make(map[uuid.UUID]store.AIModelPrice),
 		routes:        make(map[uuid.UUID]store.AIModelRoute),
-		combos:        make(map[uuid.UUID]store.VirtualCombo),
 		entitlements:  make(map[uuid.UUID]store.CustomerEntitlement),
 		routers:       make(map[string]store.RouterInstance),
 		quotaReserved: make(map[string]int64),
@@ -624,63 +622,8 @@ func (s *MemoryStore) GetRouteByModelID(_ context.Context, modelID uuid.UUID) (*
 	return nil, ErrNotFound
 }
 
-// VirtualCombo methods
-
-func (s *MemoryStore) UpsertVirtualCombo(_ context.Context, combo store.VirtualCombo) store.VirtualCombo {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now().UTC()
-	if combo.CreatedAt.IsZero() {
-		combo.CreatedAt = now
-	}
-	combo.UpdatedAt = now
-	s.combos[combo.ID] = combo
-	return combo
-}
-
-func (s *MemoryStore) ListVirtualCombos(_ context.Context) []store.VirtualCombo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	items := make([]store.VirtualCombo, 0, len(s.combos))
-	for _, item := range s.combos {
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
-	return items
-}
-
-func (s *MemoryStore) GetVirtualComboByID(_ context.Context, id uuid.UUID) (*store.VirtualCombo, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	item, ok := s.combos[id]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	copy := item
-	return &copy, nil
-}
-
-func (s *MemoryStore) DeleteVirtualCombo(_ context.Context, id uuid.UUID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.combos[id]; !ok {
-		return ErrNotFound
-	}
-	delete(s.combos, id)
-	return nil
-}
-
-func (s *MemoryStore) GetVirtualComboByModelID(_ context.Context, modelID uuid.UUID) (*store.VirtualCombo, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, item := range s.combos {
-		if item.ModelID == modelID && item.Status == "active" {
-			copy := item
-			return &copy, nil
-		}
-	}
-	return nil, ErrNotFound
-}
+// VirtualCombo methods were removed in 2026-05 (PRD §3.3). The combo system
+// now lives in CLIProxyAPI.
 
 func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID string) (*store.CustomerEntitlement, error) {
 	s.mu.RLock()

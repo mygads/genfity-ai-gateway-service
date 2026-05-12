@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -87,19 +86,22 @@ type GatewayHandler struct {
 	entitlements  *service.EntitlementService
 	usage         *service.UsageService
 	rateLimit     *service.RateLimitService
-	comboSvc      *service.ComboService
 	routers       *service.RouterService
 	cliProxy      *router.CLIProxyClient
 	routerAPIKey  string
 	routerTimeout time.Duration
 }
 
+// NewGatewayHandler builds the gateway handler.
+//
+// NOTE (2026-05, PRD §3.3): virtual combos used to live here. They now live
+// in CLIProxyAPI so the gateway can focus on API keys, quota, and usage.
+// If fallback behaviour is required, configure a combo upstream.
 func NewGatewayHandler(
 	models *service.ModelService,
 	entitlements *service.EntitlementService,
 	usage *service.UsageService,
 	rateLimit *service.RateLimitService,
-	comboSvc *service.ComboService,
 	routers *service.RouterService,
 	cliProxy *router.CLIProxyClient,
 	routerAPIKey string,
@@ -110,7 +112,6 @@ func NewGatewayHandler(
 		entitlements:  entitlements,
 		usage:         usage,
 		rateLimit:     rateLimit,
-		comboSvc:      comboSvc,
 		routers:       routers,
 		cliProxy:      cliProxy,
 		routerAPIKey:  routerAPIKey,
@@ -803,21 +804,10 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	candidates := []candidate{{routerInstanceCode: route.RouterInstanceCode, routerModel: route.RouterModel}}
 
-	if h.comboSvc != nil {
-		if combo, comboErr := h.comboSvc.GetComboForModel(ctx, model.ID); comboErr == nil {
-			entries := combo.Entries
-			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].Priority < entries[j].Priority
-			})
-			for _, e := range entries {
-				candidates = append(candidates, candidate{
-					routerInstanceCode: e.RouterInstanceCode,
-					routerModel:        e.RouterModel,
-					triggerOn:          e.TriggerOn,
-				})
-			}
-		}
-	}
+	// Combo resolution moved to CLIProxyAPI (PRD §3.3) — the gateway no
+	// longer iterates fallback entries here. The slice keeps the same shape
+	// so the downstream retry/status-code logic stays untouched; the list
+	// simply has a single candidate now.
 
 	streamRequested := isStreamingPayload(payload)
 	var lastResp *http.Response
@@ -1059,22 +1049,8 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	}
 	candidates := []candidate{primaryCandidate}
 
-	if h.comboSvc != nil {
-		if combo, comboErr := h.comboSvc.GetComboForModel(ctx, model.ID); comboErr == nil {
-			entries := combo.Entries
-			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].Priority < entries[j].Priority
-			})
-			// Append combo entries as additional fallback candidates.
-			for _, e := range entries {
-				candidates = append(candidates, candidate{
-					routerInstanceCode: e.RouterInstanceCode,
-					routerModel:        e.RouterModel,
-					triggerOn:          e.TriggerOn,
-				})
-			}
-		}
-	}
+	// Combo resolution moved to CLIProxyAPI (PRD §3.3) — see the identical
+	// note in the Messages handler above.
 
 	streamRequested := isStreamingPayload(payload)
 	var lastResp *http.Response

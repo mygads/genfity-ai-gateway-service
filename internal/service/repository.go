@@ -41,13 +41,6 @@ type Store interface {
 	ListRoutes(context.Context) []store.AIModelRoute
 	GetRouteByModelID(context.Context, uuid.UUID) (*store.AIModelRoute, error)
 
-	// VirtualCombo methods
-	UpsertVirtualCombo(context.Context, store.VirtualCombo) store.VirtualCombo
-	ListVirtualCombos(context.Context) []store.VirtualCombo
-	GetVirtualComboByID(context.Context, uuid.UUID) (*store.VirtualCombo, error)
-	DeleteVirtualCombo(context.Context, uuid.UUID) error
-	GetVirtualComboByModelID(context.Context, uuid.UUID) (*store.VirtualCombo, error)
-
 	UpsertEntitlement(context.Context, store.CustomerEntitlement) (store.CustomerEntitlement, error)
 	UpsertEntitlementByUser(context.Context, store.CustomerEntitlement) (store.CustomerEntitlement, error)
 	GetEntitlementByUser(context.Context, string) (*store.CustomerEntitlement, error)
