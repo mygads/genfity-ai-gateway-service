@@ -38,6 +38,8 @@ type MemoryStore struct {
 	// genfity-app's AiGatewayModelCreditCost table. Keyed by full
 	// model id (e.g. "mtr/claude-opus-4.7").
 	modelCreditCosts map[string]store.ModelCreditCost
+	// PAYG top-up catalog, keyed by code.
+	paygTopupRates map[string]store.PaygTopupRate
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -591,6 +593,36 @@ func (s *MemoryStore) ListModelCreditCosts(_ context.Context) []store.ModelCredi
 	defer s.mu.RUnlock()
 	out := make([]store.ModelCreditCost, 0, len(s.modelCreditCosts))
 	for _, item := range s.modelCreditCosts {
+		out = append(out, item)
+	}
+	return out
+}
+
+func (s *MemoryStore) UpsertPaygTopupRate(_ context.Context, rate store.PaygTopupRate) (store.PaygTopupRate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paygTopupRates == nil {
+		s.paygTopupRates = make(map[string]store.PaygTopupRate)
+	}
+	s.paygTopupRates[rate.Code] = rate
+	return rate, nil
+}
+
+func (s *MemoryStore) GetPaygTopupRate(_ context.Context, code string) (*store.PaygTopupRate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if item, ok := s.paygTopupRates[code]; ok {
+		clone := item
+		return &clone, nil
+	}
+	return nil, nil
+}
+
+func (s *MemoryStore) ListPaygTopupRates(_ context.Context) []store.PaygTopupRate {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]store.PaygTopupRate, 0, len(s.paygTopupRates))
+	for _, item := range s.paygTopupRates {
 		out = append(out, item)
 	}
 	return out

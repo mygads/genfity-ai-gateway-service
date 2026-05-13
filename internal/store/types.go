@@ -128,6 +128,27 @@ type ModelCreditCost struct {
 	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
+// PaygTopupRate mirrors the PAYG USD→IDR catalog row synced from
+// genfity-app's AiGatewayPaygTopupRate table. Used at checkout to
+// validate + lock the rate that was applied at purchase time.
+type PaygTopupRate struct {
+	ID          uuid.UUID       `json:"id"`
+	Code        string          `json:"code"`
+	DisplayName string          `json:"display_name"`
+	UsdAmount   string          `json:"usd_amount"`   // numeric(18,2) as string
+	PriceIdr    string          `json:"price_idr"`    // numeric(18,2)
+	RateUsdIdr  string          `json:"rate_usd_idr"` // numeric(18,4)
+	Status      string          `json:"status"`
+	SortOrder   int             `json:"sort_order"`
+	ValidFrom   *time.Time      `json:"valid_from,omitempty"`
+	ValidUntil  *time.Time      `json:"valid_until,omitempty"`
+	IsPromo     bool            `json:"is_promo"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	SyncedAt    time.Time       `json:"synced_at"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+}
+
 type RouterInstance struct {
 	ID                uuid.UUID       `json:"id"`
 	Code              string          `json:"code"`

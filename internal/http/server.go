@@ -122,6 +122,8 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Post("/sync/subscription-plans", syncHandler.SyncSubscriptionPlans)
 		r.Post("/sync/customer-entitlements", syncHandler.SyncCustomerEntitlements)
 		r.Post("/sync/customer-balance", syncHandler.SyncCustomerBalance)
+		r.Post("/sync/model-credit-costs", syncHandler.SyncModelCreditCosts)
+		r.Post("/sync/payg-topup-rates", syncHandler.SyncPaygTopupRates)
 		r.Get("/export/plans", syncHandler.ExportPlans)
 		r.Get("/export/models", syncHandler.ExportModels)
 		r.Get("/export/model-prices", syncHandler.ExportModelPrices)

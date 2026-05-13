@@ -841,6 +841,79 @@ func (s *PostgresStore) ListModelCreditCosts(ctx context.Context) []store.ModelC
 	return out
 }
 
+// PAYG top-up rate catalog — synced from genfity-app.
+
+func (s *PostgresStore) UpsertPaygTopupRate(ctx context.Context, rate store.PaygTopupRate) (store.PaygTopupRate, error) {
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO ai_gateway.payg_topup_rate (
+			code, display_name, usd_amount, price_idr, rate_usd_idr,
+			status, sort_order, valid_from, valid_until, is_promo, metadata, synced_at
+		)
+		VALUES ($1, $2, $3::numeric, $4::numeric, $5::numeric, $6, $7, $8, $9, $10, COALESCE($11, '{}'::jsonb), now())
+		ON CONFLICT (code) DO UPDATE SET
+			display_name = EXCLUDED.display_name,
+			usd_amount   = EXCLUDED.usd_amount,
+			price_idr    = EXCLUDED.price_idr,
+			rate_usd_idr = EXCLUDED.rate_usd_idr,
+			status       = EXCLUDED.status,
+			sort_order   = EXCLUDED.sort_order,
+			valid_from   = EXCLUDED.valid_from,
+			valid_until  = EXCLUDED.valid_until,
+			is_promo     = EXCLUDED.is_promo,
+			metadata     = EXCLUDED.metadata,
+			synced_at    = now(),
+			updated_at   = now()
+		RETURNING id, code, display_name, usd_amount::text, price_idr::text, rate_usd_idr::text,
+			status, sort_order, valid_from, valid_until, is_promo, metadata, synced_at, created_at, updated_at`,
+		rate.Code, rate.DisplayName, rate.UsdAmount, rate.PriceIdr, rate.RateUsdIdr,
+		rate.Status, rate.SortOrder, rate.ValidFrom, rate.ValidUntil, rate.IsPromo, rate.Metadata)
+	var out store.PaygTopupRate
+	if err := row.Scan(&out.ID, &out.Code, &out.DisplayName, &out.UsdAmount, &out.PriceIdr, &out.RateUsdIdr,
+		&out.Status, &out.SortOrder, &out.ValidFrom, &out.ValidUntil, &out.IsPromo, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		return store.PaygTopupRate{}, err
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) GetPaygTopupRate(ctx context.Context, code string) (*store.PaygTopupRate, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, code, display_name, usd_amount::text, price_idr::text, rate_usd_idr::text,
+			status, sort_order, valid_from, valid_until, is_promo, metadata, synced_at, created_at, updated_at
+		   FROM ai_gateway.payg_topup_rate
+		   WHERE code = $1`, code)
+	var out store.PaygTopupRate
+	if err := row.Scan(&out.ID, &out.Code, &out.DisplayName, &out.UsdAmount, &out.PriceIdr, &out.RateUsdIdr,
+		&out.Status, &out.SortOrder, &out.ValidFrom, &out.ValidUntil, &out.IsPromo, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (s *PostgresStore) ListPaygTopupRates(ctx context.Context) []store.PaygTopupRate {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, code, display_name, usd_amount::text, price_idr::text, rate_usd_idr::text,
+			status, sort_order, valid_from, valid_until, is_promo, metadata, synced_at, created_at, updated_at
+		   FROM ai_gateway.payg_topup_rate
+		   ORDER BY sort_order, code`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]store.PaygTopupRate, 0)
+	for rows.Next() {
+		var item store.PaygTopupRate
+		if err := rows.Scan(&item.ID, &item.Code, &item.DisplayName, &item.UsdAmount, &item.PriceIdr, &item.RateUsdIdr,
+			&item.Status, &item.SortOrder, &item.ValidFrom, &item.ValidUntil, &item.IsPromo, &item.Metadata, &item.SyncedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 func (s *PostgresStore) IncrementQuotaCounter(ctx context.Context, userID string, tenantID *string, periodStart time.Time, periodEnd time.Time, tokens int64) error {
 	if tokens <= 0 {
 		return nil

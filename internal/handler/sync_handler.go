@@ -66,6 +66,34 @@ func (h *SyncHandler) SyncCustomerBalance(w http.ResponseWriter, r *http.Request
 	respondJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
+func (h *SyncHandler) SyncModelCreditCosts(w http.ResponseWriter, r *http.Request) {
+	var payload []store.ModelCreditCost
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	count, err := h.sync.SyncModelCreditCosts(r.Context(), payload)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"synced": count})
+}
+
+func (h *SyncHandler) SyncPaygTopupRates(w http.ResponseWriter, r *http.Request) {
+	var payload []store.PaygTopupRate
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	count, err := h.sync.SyncPaygTopupRates(r.Context(), payload)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"synced": count})
+}
+
 func (h *SyncHandler) ExportPlans(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{"plans": h.sync.ExportPlans(r.Context())})
 }

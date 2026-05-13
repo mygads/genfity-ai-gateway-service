@@ -79,6 +79,13 @@ type Store interface {
 	GetModelCreditCost(ctx context.Context, fullModelID string) (*store.ModelCreditCost, error)
 	ListModelCreditCosts(ctx context.Context) []store.ModelCreditCost
 
+	// PAYG top-up rate catalog, synced from genfity-app's
+	// AiGatewayPaygTopupRate table. Used at checkout to validate the
+	// offered package and record the locked rate.
+	UpsertPaygTopupRate(ctx context.Context, rate store.PaygTopupRate) (store.PaygTopupRate, error)
+	GetPaygTopupRate(ctx context.Context, code string) (*store.PaygTopupRate, error)
+	ListPaygTopupRates(ctx context.Context) []store.PaygTopupRate
+
 	AppendUsage(context.Context, store.UsageLedgerEntry) (store.UsageLedgerEntry, error)
 	ListUsage(context.Context) []store.UsageLedgerEntry
 	ListUsageByUser(context.Context, string) []store.UsageLedgerEntry
