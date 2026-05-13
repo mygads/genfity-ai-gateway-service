@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"genfity-ai-gateway-service/internal/config"
+	"genfity-ai-gateway-service/internal/database"
 	httpserver "genfity-ai-gateway-service/internal/http"
 	"genfity-ai-gateway-service/internal/http/middleware"
 	"genfity-ai-gateway-service/internal/router"
@@ -66,6 +67,17 @@ func main() {
 	if !dbReady {
 		logger.Fatal().Msg("db unreachable after retries, giving up")
 	}
+
+	// Auto-run goose migrations on startup. Mirrors genfity-order-service's
+	// pattern (see internal/db/migrate.go there). Failures crash early so
+	// the CI/CD health check fails and the deployment is rolled back.
+	migrateCtx, cancelMigrate := context.WithTimeout(startupCtx, 60*time.Second)
+	if err := database.RunMigrations(migrateCtx, cfg.DatabaseURL); err != nil {
+		cancelMigrate()
+		logger.Fatal().Err(err).Msg("db migration failed")
+	}
+	cancelMigrate()
+	logger.Info().Msg("db migrations applied")
 
 	redisOptions, err := redis.ParseURL(cfg.RedisURL)
 	if err != nil {
