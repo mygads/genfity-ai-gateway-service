@@ -24,6 +24,22 @@ func (s *ModelService) ListModels(ctx context.Context) []store.AIModel {
 	return s.store.ListModels(ctx)
 }
 
+// PRD v3 Phase 2 — model credit cost access. Exposed through the
+// ModelService facade so the gateway handler can query per-model
+// credit costs without needing a direct Store reference.
+
+func (s *ModelService) GetModelCreditCost(ctx context.Context, fullModelID string) (*store.ModelCreditCost, error) {
+	return s.store.GetModelCreditCost(ctx, fullModelID)
+}
+
+func (s *ModelService) ListModelCreditCosts(ctx context.Context) []store.ModelCreditCost {
+	return s.store.ListModelCreditCosts(ctx)
+}
+
+func (s *ModelService) UpsertModelCreditCost(ctx context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error) {
+	return s.store.UpsertModelCreditCost(ctx, cost)
+}
+
 func (s *ModelService) CreateModel(ctx context.Context, model store.AIModel) (store.AIModel, error) {
 	if model.PublicModel == "" || model.DisplayName == "" {
 		return store.AIModel{}, fmt.Errorf("public_model and display_name are required")

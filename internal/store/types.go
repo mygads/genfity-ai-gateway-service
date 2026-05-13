@@ -89,8 +89,43 @@ type CustomerEntitlement struct {
 	QuotaTokensMonthly   *int64          `json:"quota_tokens_monthly,omitempty"`
 	BalanceSnapshot      *string         `json:"balance_snapshot,omitempty"`
 	BalanceReserved      *string         `json:"balance_reserved,omitempty"`
+	// PRD v3 Phase 2: per-user credit + PAYG USD balances. Mirrors
+	// genfity-app's User.aiGatewayCreditBalance / aiGatewayPaygUsdBalance
+	// so the gateway can enforce the 3-priority chain without a round
+	// trip. Updated via the sync worker on every entitlement sync and
+	// mutated by reserve/finalize paths during request handling.
+	//
+	// PricingGroup carries the billing schema type for the active
+	// entitlement: "unlimited", "credit_package", or "payg_topup". For
+	// users who hold multiple entitlements simultaneously, the gateway
+	// queries credit + PAYG balances regardless; PricingGroup is only
+	// used to select the "current" unlimited entitlement when one is
+	// active.
+	CreditBalance         *string         `json:"credit_balance,omitempty"`
+	CreditBalanceReserved *string         `json:"credit_balance_reserved,omitempty"`
+	CreditExpiresAt       *time.Time      `json:"credit_expires_at,omitempty"`
+	PaygUsdBalance        *string         `json:"payg_usd_balance,omitempty"`
+	PaygUsdBalanceReserved *string        `json:"payg_usd_balance_reserved,omitempty"`
+	PricingGroup          *string         `json:"pricing_group,omitempty"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
 	UpdatedFromGenfityAt time.Time       `json:"updated_from_genfity_at"`
+}
+
+// ModelCreditCost is the per-model request credit cost for the
+// credit_package billing schema (PRD v3 Phase 2). Synced from
+// genfity-app's AiGatewayModelCreditCost table. Each model request
+// debits CreditsPerReq from the caller's balance; IsFree bypasses the
+// balance check entirely.
+type ModelCreditCost struct {
+	ID            uuid.UUID       `json:"id"`
+	FullModelID   string          `json:"full_model_id"`
+	CreditsPerReq string          `json:"credits_per_req"` // stored as numeric(10,4)
+	IsFree        bool            `json:"is_free"`
+	Notes         *string         `json:"notes,omitempty"`
+	SyncedAt      time.Time       `json:"synced_at"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 type RouterInstance struct {

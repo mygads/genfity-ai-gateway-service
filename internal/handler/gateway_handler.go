@@ -452,6 +452,21 @@ type runtimeReservation struct {
 	QuotaTokens    int64
 	CreditUSD      float64
 	CreditPlanCode string
+
+	// PRD v3 Phase 2: 3-priority chain reservation bookkeeping.
+	//
+	// BillingMode records which schema paid for the request so the
+	// finalize path knows which Finalize* helper to call. Empty when
+	// the request is covered by an unlimited entitlement (no debit).
+	//
+	// RequestCredits is the reserved credit amount for the
+	// credit_package schema (integer/fractional per model).
+	// PaygUSD is the reserved USD amount for the payg_topup schema
+	// (actual-cost per-1M pricing). Exactly one of these is non-zero
+	// when BillingMode != "unlimited".
+	BillingMode    string  // "unlimited" | "credit_package" | "payg_topup" | ""
+	RequestCredits float64
+	PaygUSD        float64
 }
 
 type usageSettlement struct {
@@ -484,6 +499,127 @@ func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenRe
 	return tokenReservationEstimate{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total, Bounded: bounded}
 }
 
+// tryPriorityBilling implements the PRD v3 3-priority reservation chain.
+// Returns a reservation with BillingMode populated when a priority
+// matched; returns zero reservation + zero status when no priority
+// matches (caller falls through to legacy quota/credit path).
+// Non-zero status means the priority matched but reservation failed
+// (e.g. insufficient credits) — caller should surface the HTTP code.
+//
+// Priority 1 — Unlimited: skipped when the subscription is not
+// explicitly unlimited or the model isn't in allowedModels. No balance
+// check, just rate limits (handled by caller).
+//
+// Priority 2 — Request credits: checks model_credit_cost for the
+// model's full id (prefix/model). isFree models bypass the balance
+// check. Reserve creditsPerReq from the user's credit balance.
+//
+// Priority 3 — PAYG USD: uses the model's per-1M-token price from
+// ai_model_prices. Reserves an upper-bound estimate (prompt + max
+// completion tokens) in USD; finalize settles to actual.
+func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, payload map[string]any, model *store.AIModel, estimate tokenReservationEstimate) (runtimeReservation, int, string) {
+	if model == nil || subscription == nil || subscription.Entitlement == nil {
+		return runtimeReservation{}, 0, ""
+	}
+	entitlement := subscription.Entitlement
+	group := ""
+	if entitlement.PricingGroup != nil {
+		group = *entitlement.PricingGroup
+	}
+	if group == "" {
+		group = pricingGroup(subscription)
+	}
+
+	// Priority 1: Unlimited coverage. The subscription must be an
+	// "unlimited" plan AND the model must appear in allowedModels
+	// metadata. allowedModels may be empty on legacy plans — in that
+	// case we fall through (not covered).
+	if group == "unlimited" {
+		if modelCoveredByUnlimited(subscription, model) {
+			return runtimeReservation{BillingMode: "unlimited"}, 0, ""
+		}
+		// Unlimited user whose model isn't whitelisted — fall through
+		// to credit/PAYG. This lets operators sell unlimited-for-X and
+		// pay-per-use for everything else.
+	}
+
+	// Priority 2: request credits. Look up the per-model credit cost.
+	// We use the model's PublicModel (e.g. "mtr/claude-opus-4.7") as
+	// the lookup key — this is what sync pushes from genfity-app.
+	fullModelID := model.PublicModel
+	if fullModelID != "" {
+		if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil {
+			if cost.IsFree {
+				return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
+			}
+			credits := parseFloatPtr(&cost.CreditsPerReq)
+			if credits > 0 {
+				if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
+					if errors.Is(err, service.ErrInsufficientBalance) {
+						// Fall through to PAYG — user may have credits
+						// exhausted but still carry a PAYG balance.
+					} else {
+						return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
+					}
+				} else {
+					return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+				}
+			}
+		}
+	}
+
+	// Priority 3: PAYG USD balance.
+	prices := h.models.ListPrices(ctx)
+	price := modelPrice(prices, model.ID)
+	if price == nil {
+		// No PAYG price configured — nothing more we can do at the
+		// priority chain level. Return "no match" so caller falls
+		// back to legacy quota/credit paths.
+		return runtimeReservation{}, 0, ""
+	}
+	if !estimate.Bounded && parseFloatPtr(&price.OutputPricePer1M) > 0 {
+		return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
+	}
+	reserveUSD := float64(estimate.PromptTokens)/1_000_000*parseFloatPtr(&price.InputPricePer1M) +
+		float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
+	if reserveUSD <= 0 {
+		// Free model under PAYG schema — allow through without a
+		// balance check.
+		return runtimeReservation{BillingMode: "payg_topup", PaygUSD: 0}, 0, ""
+	}
+	if err := h.usage.ReservePaygUsdBalance(ctx, apiKey.GenfityUserID, reserveUSD); err != nil {
+		if errors.Is(err, service.ErrInsufficientBalance) {
+			return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_balance"
+		}
+		return runtimeReservation{}, http.StatusInternalServerError, "payg_reservation_failed"
+	}
+	return runtimeReservation{BillingMode: "payg_topup", PaygUSD: reserveUSD}, 0, ""
+}
+
+// modelCoveredByUnlimited returns true when the model's public id is
+// listed in the subscription's allowedModels metadata. An unlimited
+// plan with empty allowedModels covers ONLY the legacy behaviour of
+// any-model-allowed; we keep that permissive default so existing
+// "unlimited everything" plans don't break.
+func modelCoveredByUnlimited(subscription *service.ActiveSubscription, model *store.AIModel) bool {
+	if subscription == nil || model == nil || subscription.Entitlement == nil {
+		return false
+	}
+	meta := map[string]any{}
+	_ = json.Unmarshal(subscription.Entitlement.Metadata, &meta)
+	allowed, ok := meta["allowedModels"].([]any)
+	if !ok || len(allowed) == 0 {
+		// Permissive default for legacy unlimited plans.
+		return true
+	}
+	for _, v := range allowed {
+		if s, ok := v.(string); ok && s == model.PublicModel {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, limits service.PlanLimits, payload map[string]any, model *store.AIModel) (runtimeReservation, int, string) {
 	estimate := estimateRequestTokens(payload, model)
 	if h.rateLimit != nil && limits.HasTPM() {
@@ -491,6 +627,25 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 			return runtimeReservation{}, http.StatusTooManyRequests, "rate_limit_exceeded"
 		}
 	}
+
+	// PRD v3 Phase 2: 3-priority billing chain. Before the legacy
+	// quota/credit path runs, try the new schemas in priority order.
+	// The legacy path stays as a fallback for existing
+	// subscription-with-token-quota users and legacy credit_package
+	// entitlements that haven't been migrated to the new columns.
+	//
+	//   1. Unlimited — model in subscription's allowedModels → no debit.
+	//   2. Request credits — per-model fixed credit cost from
+	//      model_credit_cost table → debit credits.
+	//   3. PAYG USD — per-1M-token pricing → debit USD.
+	//
+	// The chain short-circuits: as soon as priority N succeeds,
+	// priorities N+1 and below are skipped. This keeps unlimited
+	// users from accidentally burning credits or PAYG balance.
+	if pri, status, code := h.tryPriorityBilling(ctx, apiKey, subscription, payload, model, estimate); status != 0 || pri.BillingMode != "" {
+		return pri, status, code
+	}
+
 	var reservation runtimeReservation
 	limit := quotaLimit(subscription)
 	if limit > 0 && subscription != nil && subscription.Entitlement != nil {
@@ -557,6 +712,33 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 	}
 	if reservation.CreditUSD > 0 {
 		if err := h.usage.FinalizeCreditBalance(ctx, apiKey.GenfityUserID, reservation.CreditPlanCode, reservation.CreditUSD, actualUSD); err != nil {
+			return err
+		}
+	}
+	// PRD v3 Phase 2 — request-credit finalize. Request-credit pricing
+	// is a fixed cost per request (not per-token), so actualAmount ==
+	// reservedAmount when the request succeeded; on failure we release
+	// the full reservation back to the balance.
+	if reservation.RequestCredits > 0 {
+		actual := 0.0
+		if success {
+			actual = reservation.RequestCredits
+		}
+		if err := h.usage.FinalizeRequestCredits(ctx, apiKey.GenfityUserID, reservation.RequestCredits, actual); err != nil {
+			return err
+		}
+	}
+	// PRD v3 Phase 2 — PAYG USD finalize. actualUSD comes from
+	// recordUsage's per-1M-token price calculation; if actualUSD >
+	// reservation the extra is absorbed (balance capped at 0 by the
+	// store layer). Over-reservation (common case) releases the delta
+	// back to the user's balance.
+	if reservation.PaygUSD > 0 {
+		actual := 0.0
+		if success {
+			actual = actualUSD
+		}
+		if err := h.usage.FinalizePaygUsdBalance(ctx, apiKey.GenfityUserID, reservation.PaygUSD, actual); err != nil {
 			return err
 		}
 	}

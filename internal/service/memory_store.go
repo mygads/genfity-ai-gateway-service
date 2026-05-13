@@ -34,21 +34,26 @@ type MemoryStore struct {
 	quotaUsed     map[string]int64
 	quotaRequests map[string]int64
 	usage         []store.UsageLedgerEntry
+	// PRD v3 Phase 2: per-model credit cost catalog, synced from
+	// genfity-app's AiGatewayModelCreditCost table. Keyed by full
+	// model id (e.g. "mtr/claude-opus-4.7").
+	modelCreditCosts map[string]store.ModelCreditCost
 }
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		plans:         make(map[string]store.SubscriptionPlanSnapshot),
-		apiKeys:       make(map[uuid.UUID]store.APIKey),
-		models:        make(map[uuid.UUID]store.AIModel),
-		prices:        make(map[uuid.UUID]store.AIModelPrice),
-		routes:        make(map[uuid.UUID]store.AIModelRoute),
-		entitlements:  make(map[uuid.UUID]store.CustomerEntitlement),
-		routers:       make(map[string]store.RouterInstance),
-		quotaReserved: make(map[string]int64),
-		quotaUsed:     make(map[string]int64),
-		quotaRequests: make(map[string]int64),
-		usage:         make([]store.UsageLedgerEntry, 0),
+		plans:            make(map[string]store.SubscriptionPlanSnapshot),
+		apiKeys:          make(map[uuid.UUID]store.APIKey),
+		models:           make(map[uuid.UUID]store.AIModel),
+		prices:           make(map[uuid.UUID]store.AIModelPrice),
+		routes:           make(map[uuid.UUID]store.AIModelRoute),
+		entitlements:     make(map[uuid.UUID]store.CustomerEntitlement),
+		routers:          make(map[string]store.RouterInstance),
+		quotaReserved:    make(map[string]int64),
+		quotaUsed:        make(map[string]int64),
+		quotaRequests:    make(map[string]int64),
+		usage:            make([]store.UsageLedgerEntry, 0),
+		modelCreditCosts: make(map[string]store.ModelCreditCost),
 	}
 }
 
@@ -366,6 +371,229 @@ func (s *MemoryStore) FinalizeCreditBalance(_ context.Context, userID string, pl
 		return nil
 	}
 	return nil
+}
+
+// PRD v3 Phase 2 — request-credit and PAYG USD balance reserve/finalize.
+//
+// Memory-store semantics:
+//   - Each entitlement row gets its own CreditBalance / PaygUsdBalance
+//     fields (mirrors the SQL columns). We pick the FIRST entitlement
+//     belonging to the user whose pricing_group matches the operation,
+//     because stackable schemas (credit_package + payg_topup) allow a
+//     user to hold multiple rows and the billing ledger keeps the
+//     authoritative running total anyway.
+//   - Non-negative invariant is enforced here (ErrInsufficientBalance)
+//     so the handler gets a clean 402 instead of a half-charged state.
+//   - Over-reservation releases back on finalize: if reservedAmount >
+//     actualAmount, the delta returns to the available balance.
+
+func (s *MemoryStore) ReserveRequestCredits(_ context.Context, userID string, amount float64) error {
+	if amount <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID {
+			continue
+		}
+		if item.CreditBalance == nil {
+			continue
+		}
+		balance, err := strconv.ParseFloat(*item.CreditBalance, 64)
+		if err != nil {
+			return err
+		}
+		var reserved float64
+		if item.CreditBalanceReserved != nil {
+			reserved, err = strconv.ParseFloat(*item.CreditBalanceReserved, 64)
+			if err != nil {
+				return err
+			}
+		}
+		if balance-reserved < amount {
+			continue
+		}
+		next := reserved + amount
+		value := fmt.Sprintf("%.4f", next)
+		item.CreditBalanceReserved = &value
+		s.entitlements[id] = item
+		return nil
+	}
+	return ErrInsufficientBalance
+}
+
+func (s *MemoryStore) FinalizeRequestCredits(_ context.Context, userID string, reservedAmount, actualAmount float64) error {
+	if reservedAmount <= 0 && actualAmount <= 0 {
+		return nil
+	}
+	if reservedAmount < 0 {
+		reservedAmount = 0
+	}
+	if actualAmount < 0 {
+		actualAmount = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID {
+			continue
+		}
+		if item.CreditBalance == nil {
+			continue
+		}
+		balance, err := strconv.ParseFloat(*item.CreditBalance, 64)
+		if err != nil {
+			return err
+		}
+		var reserved float64
+		if item.CreditBalanceReserved != nil {
+			reserved, err = strconv.ParseFloat(*item.CreditBalanceReserved, 64)
+			if err != nil {
+				return err
+			}
+		}
+		nextReserved := reserved - reservedAmount
+		if nextReserved < 0 {
+			nextReserved = 0
+		}
+		debit := actualAmount
+		if debit > balance {
+			debit = balance
+		}
+		nextBalance := balance - debit
+		if nextBalance < 0 {
+			nextBalance = 0
+		}
+		balanceValue := fmt.Sprintf("%.4f", nextBalance)
+		reservedValue := fmt.Sprintf("%.4f", nextReserved)
+		item.CreditBalance = &balanceValue
+		item.CreditBalanceReserved = &reservedValue
+		s.entitlements[id] = item
+		return nil
+	}
+	return nil
+}
+
+func (s *MemoryStore) ReservePaygUsdBalance(_ context.Context, userID string, amount float64) error {
+	if amount <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID {
+			continue
+		}
+		if item.PaygUsdBalance == nil {
+			continue
+		}
+		balance, err := strconv.ParseFloat(*item.PaygUsdBalance, 64)
+		if err != nil {
+			return err
+		}
+		var reserved float64
+		if item.PaygUsdBalanceReserved != nil {
+			reserved, err = strconv.ParseFloat(*item.PaygUsdBalanceReserved, 64)
+			if err != nil {
+				return err
+			}
+		}
+		if balance-reserved < amount {
+			continue
+		}
+		next := reserved + amount
+		value := fmt.Sprintf("%.6f", next)
+		item.PaygUsdBalanceReserved = &value
+		s.entitlements[id] = item
+		return nil
+	}
+	return ErrInsufficientBalance
+}
+
+func (s *MemoryStore) FinalizePaygUsdBalance(_ context.Context, userID string, reservedAmount, actualAmount float64) error {
+	if reservedAmount <= 0 && actualAmount <= 0 {
+		return nil
+	}
+	if reservedAmount < 0 {
+		reservedAmount = 0
+	}
+	if actualAmount < 0 {
+		actualAmount = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		if item.GenfityUserID != userID {
+			continue
+		}
+		if item.PaygUsdBalance == nil {
+			continue
+		}
+		balance, err := strconv.ParseFloat(*item.PaygUsdBalance, 64)
+		if err != nil {
+			return err
+		}
+		var reserved float64
+		if item.PaygUsdBalanceReserved != nil {
+			reserved, err = strconv.ParseFloat(*item.PaygUsdBalanceReserved, 64)
+			if err != nil {
+				return err
+			}
+		}
+		nextReserved := reserved - reservedAmount
+		if nextReserved < 0 {
+			nextReserved = 0
+		}
+		debit := actualAmount
+		if debit > balance {
+			debit = balance
+		}
+		nextBalance := balance - debit
+		if nextBalance < 0 {
+			nextBalance = 0
+		}
+		balanceValue := fmt.Sprintf("%.6f", nextBalance)
+		reservedValue := fmt.Sprintf("%.6f", nextReserved)
+		item.PaygUsdBalance = &balanceValue
+		item.PaygUsdBalanceReserved = &reservedValue
+		s.entitlements[id] = item
+		return nil
+	}
+	return nil
+}
+
+// Model credit cost — synced catalog from genfity-app. MemoryStore
+// holds a simple map keyed by fullModelID.
+
+func (s *MemoryStore) UpsertModelCreditCost(_ context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.modelCreditCosts == nil {
+		s.modelCreditCosts = make(map[string]store.ModelCreditCost)
+	}
+	s.modelCreditCosts[cost.FullModelID] = cost
+	return cost, nil
+}
+
+func (s *MemoryStore) GetModelCreditCost(_ context.Context, fullModelID string) (*store.ModelCreditCost, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if item, ok := s.modelCreditCosts[fullModelID]; ok {
+		clone := item
+		return &clone, nil
+	}
+	return nil, nil
+}
+
+func (s *MemoryStore) ListModelCreditCosts(_ context.Context) []store.ModelCreditCost {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]store.ModelCreditCost, 0, len(s.modelCreditCosts))
+	for _, item := range s.modelCreditCosts {
+		out = append(out, item)
+	}
+	return out
 }
 
 func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID string) []store.UsageLedgerEntry {

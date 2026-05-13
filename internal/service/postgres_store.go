@@ -405,13 +405,49 @@ func (s *PostgresStore) UpsertEntitlementByUser(ctx context.Context, item store.
 
 func (s *PostgresStore) upsertEntitlement(ctx context.Context, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
 	var metadata json.RawMessage
+	// PRD v3 Phase 2C — upsert now includes credit_balance,
+	// credit_expires_at, payg_usd_balance, pricing_group. Gateway's
+	// local snapshot tracks the user's real-time balance without a
+	// round-trip to genfity-app on every request. Reserved fields
+	// (credit_balance_reserved, payg_usd_balance_reserved) are NOT
+	// touched by sync — they belong to in-flight requests on the
+	// gateway side.
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO ai_gateway.customer_entitlements (id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot, metadata, updated_from_genfity_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET genfity_tenant_id = EXCLUDED.genfity_tenant_id, status = EXCLUDED.status, period_start = EXCLUDED.period_start, period_end = EXCLUDED.period_end, quota_tokens_monthly = EXCLUDED.quota_tokens_monthly, balance_snapshot = EXCLUDED.balance_snapshot, metadata = EXCLUDED.metadata, updated_from_genfity_at = EXCLUDED.updated_from_genfity_at, updated_at = now()
-		RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`,
-		nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.PlanCode, defaultString(item.Status, "active"), item.PeriodStart, item.PeriodEnd, item.QuotaTokensMonthly, item.BalanceSnapshot, rawJSON(item.Metadata), defaultTime(item.UpdatedFromGenfityAt),
-	).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
+		INSERT INTO ai_gateway.customer_entitlements (
+			id, genfity_user_id, genfity_tenant_id, plan_code, status,
+			period_start, period_end, quota_tokens_monthly, balance_snapshot,
+			credit_balance, credit_expires_at, payg_usd_balance, pricing_group,
+			metadata, updated_from_genfity_at
+		)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,0),$11,COALESCE($12,0),$13,$14,$15)
+		ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
+			genfity_tenant_id = EXCLUDED.genfity_tenant_id,
+			status = EXCLUDED.status,
+			period_start = EXCLUDED.period_start,
+			period_end = EXCLUDED.period_end,
+			quota_tokens_monthly = EXCLUDED.quota_tokens_monthly,
+			balance_snapshot = EXCLUDED.balance_snapshot,
+			credit_balance = EXCLUDED.credit_balance,
+			credit_expires_at = EXCLUDED.credit_expires_at,
+			payg_usd_balance = EXCLUDED.payg_usd_balance,
+			pricing_group = EXCLUDED.pricing_group,
+			metadata = EXCLUDED.metadata,
+			updated_from_genfity_at = EXCLUDED.updated_from_genfity_at,
+			updated_at = now()
+		RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status,
+			period_start, period_end, quota_tokens_monthly, balance_snapshot::text,
+			credit_balance::text, credit_expires_at, payg_usd_balance::text,
+			pricing_group, metadata, updated_from_genfity_at`,
+		nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.PlanCode, defaultString(item.Status, "active"),
+		item.PeriodStart, item.PeriodEnd, item.QuotaTokensMonthly, item.BalanceSnapshot,
+		item.CreditBalance, item.CreditExpiresAt, item.PaygUsdBalance, item.PricingGroup,
+		rawJSON(item.Metadata), defaultTime(item.UpdatedFromGenfityAt),
+	).Scan(
+		&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
+		&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot,
+		&item.CreditBalance, &item.CreditExpiresAt, &item.PaygUsdBalance, &item.PricingGroup,
+		&metadata, &item.UpdatedFromGenfityAt,
+	)
 	if err != nil {
 		return store.CustomerEntitlement{}, err
 	}
@@ -620,6 +656,189 @@ func (s *PostgresStore) FinalizeCreditBalance(ctx context.Context, userID string
 			   AND status = 'active'`,
 		userID, planCode, reservedUsd, actualUsd)
 	return err
+}
+
+// PRD v3 Phase 2 — request-credit + PAYG USD balance reserve/finalize.
+//
+// These operate on the new columns added in migration 00005:
+//   credit_balance / credit_balance_reserved  — integer-credit schema
+//   payg_usd_balance / payg_usd_balance_reserved — USD-balance schema
+//
+// Reservation uses a guarded UPDATE (non-negative invariant checked in
+// WHERE clause) so if the SQL returns 0 rows, the caller knows the
+// reservation was rejected for insufficient funds rather than a
+// not-found condition. The CHECK constraints on the columns catch any
+// concurrency bug that gets past the WHERE.
+//
+// The UPDATE picks ANY active entitlement belonging to the user — we
+// don't require a planCode because stackable schemas (credit_package,
+// payg_topup) mean a user can hold multiple entitlements and the
+// billing ledger is the source of truth for the aggregate balance.
+// Picking by sort_order ASC (oldest entitlement first) gives FIFO-ish
+// consumption which is what the PRD requires.
+
+func (s *PostgresStore) ReserveRequestCredits(ctx context.Context, userID string, amount float64) error {
+	if amount <= 0 {
+		return nil
+	}
+	cmd, err := s.pool.Exec(ctx,
+		`UPDATE ai_gateway.customer_entitlements
+			 SET credit_balance_reserved = credit_balance_reserved + $2,
+			     updated_at = now()
+			 WHERE id = (
+			     SELECT id FROM ai_gateway.customer_entitlements
+			     WHERE genfity_user_id = $1
+			       AND status = 'active'
+			       AND credit_balance - credit_balance_reserved >= $2
+			     ORDER BY created_at ASC
+			     LIMIT 1
+			 )`,
+		userID, amount)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrInsufficientBalance
+	}
+	return nil
+}
+
+func (s *PostgresStore) FinalizeRequestCredits(ctx context.Context, userID string, reservedAmount, actualAmount float64) error {
+	if reservedAmount <= 0 && actualAmount <= 0 {
+		return nil
+	}
+	if reservedAmount < 0 {
+		reservedAmount = 0
+	}
+	if actualAmount < 0 {
+		actualAmount = 0
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE ai_gateway.customer_entitlements
+			 SET credit_balance_reserved = GREATEST(credit_balance_reserved - $2, 0),
+			     credit_balance = GREATEST(credit_balance - LEAST($3, credit_balance), 0),
+			     updated_at = now()
+			 WHERE id = (
+			     SELECT id FROM ai_gateway.customer_entitlements
+			     WHERE genfity_user_id = $1
+			       AND status = 'active'
+			       AND credit_balance_reserved > 0
+			     ORDER BY created_at ASC
+			     LIMIT 1
+			 )`,
+		userID, reservedAmount, actualAmount)
+	return err
+}
+
+func (s *PostgresStore) ReservePaygUsdBalance(ctx context.Context, userID string, amount float64) error {
+	if amount <= 0 {
+		return nil
+	}
+	cmd, err := s.pool.Exec(ctx,
+		`UPDATE ai_gateway.customer_entitlements
+			 SET payg_usd_balance_reserved = payg_usd_balance_reserved + $2,
+			     updated_at = now()
+			 WHERE id = (
+			     SELECT id FROM ai_gateway.customer_entitlements
+			     WHERE genfity_user_id = $1
+			       AND status = 'active'
+			       AND payg_usd_balance - payg_usd_balance_reserved >= $2
+			     ORDER BY created_at ASC
+			     LIMIT 1
+			 )`,
+		userID, amount)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrInsufficientBalance
+	}
+	return nil
+}
+
+func (s *PostgresStore) FinalizePaygUsdBalance(ctx context.Context, userID string, reservedAmount, actualAmount float64) error {
+	if reservedAmount <= 0 && actualAmount <= 0 {
+		return nil
+	}
+	if reservedAmount < 0 {
+		reservedAmount = 0
+	}
+	if actualAmount < 0 {
+		actualAmount = 0
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE ai_gateway.customer_entitlements
+			 SET payg_usd_balance_reserved = GREATEST(payg_usd_balance_reserved - $2, 0),
+			     payg_usd_balance = GREATEST(payg_usd_balance - LEAST($3, payg_usd_balance), 0),
+			     updated_at = now()
+			 WHERE id = (
+			     SELECT id FROM ai_gateway.customer_entitlements
+			     WHERE genfity_user_id = $1
+			       AND status = 'active'
+			       AND payg_usd_balance_reserved > 0
+			     ORDER BY created_at ASC
+			     LIMIT 1
+			 )`,
+		userID, reservedAmount, actualAmount)
+	return err
+}
+
+// Model credit cost: synced catalog. Upsert key is full_model_id.
+
+func (s *PostgresStore) UpsertModelCreditCost(ctx context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error) {
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO ai_gateway.model_credit_cost (full_model_id, credits_per_req, is_free, notes, metadata, synced_at)
+		VALUES ($1, $2::numeric, $3, $4, COALESCE($5, '{}'::jsonb), now())
+		ON CONFLICT (full_model_id) DO UPDATE SET
+			credits_per_req = EXCLUDED.credits_per_req,
+			is_free = EXCLUDED.is_free,
+			notes = EXCLUDED.notes,
+			metadata = EXCLUDED.metadata,
+			synced_at = now(),
+			updated_at = now()
+		RETURNING id, full_model_id, credits_per_req::text, is_free, notes, metadata, synced_at, created_at, updated_at`,
+		cost.FullModelID, cost.CreditsPerReq, cost.IsFree, cost.Notes, cost.Metadata)
+	var out store.ModelCreditCost
+	if err := row.Scan(&out.ID, &out.FullModelID, &out.CreditsPerReq, &out.IsFree, &out.Notes, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		return store.ModelCreditCost{}, err
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) GetModelCreditCost(ctx context.Context, fullModelID string) (*store.ModelCreditCost, error) {
+	row := s.pool.QueryRow(ctx,
+		`SELECT id, full_model_id, credits_per_req::text, is_free, notes, metadata, synced_at, created_at, updated_at
+		   FROM ai_gateway.model_credit_cost
+		   WHERE full_model_id = $1`,
+		fullModelID)
+	var out store.ModelCreditCost
+	if err := row.Scan(&out.ID, &out.FullModelID, &out.CreditsPerReq, &out.IsFree, &out.Notes, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+		if err.Error() == "no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (s *PostgresStore) ListModelCreditCosts(ctx context.Context) []store.ModelCreditCost {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, full_model_id, credits_per_req::text, is_free, notes, metadata, synced_at, created_at, updated_at
+		   FROM ai_gateway.model_credit_cost
+		   ORDER BY full_model_id`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	out := make([]store.ModelCreditCost, 0)
+	for rows.Next() {
+		var item store.ModelCreditCost
+		if err := rows.Scan(&item.ID, &item.FullModelID, &item.CreditsPerReq, &item.IsFree, &item.Notes, &item.Metadata, &item.SyncedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (s *PostgresStore) IncrementQuotaCounter(ctx context.Context, userID string, tenantID *string, periodStart time.Time, periodEnd time.Time, tokens int64) error {

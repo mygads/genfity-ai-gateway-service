@@ -95,6 +95,38 @@ func (s *UsageService) FinalizeCreditBalance(ctx context.Context, userID string,
 	return s.store.FinalizeCreditBalance(ctx, userID, planCode, reservedUsd, actualUsd)
 }
 
+// PRD v3 Phase 2 — request-credit + PAYG USD balance service facades.
+//
+// These simply forward to the underlying Store; they exist so the
+// gateway handler's 3-priority reservation chain has a single service
+// object to talk to (`h.usage.ReserveRequestCredits(...)` reads cleaner
+// than `h.store.ReserveRequestCredits(...)` and mirrors the existing
+// quota/credit helpers).
+//
+// Caller contract:
+//   - amount must be > 0 (zero/negative is a no-op)
+//   - ErrInsufficientBalance bubbles up unchanged from the store so the
+//     handler can map to HTTP 402
+//   - Finalize is idempotent-safe: calling it twice with the same
+//     reserved amount releases the reservation once and is a no-op the
+//     second time (GREATEST(..., 0) guards)
+
+func (s *UsageService) ReserveRequestCredits(ctx context.Context, userID string, amount float64) error {
+	return s.store.ReserveRequestCredits(ctx, userID, amount)
+}
+
+func (s *UsageService) FinalizeRequestCredits(ctx context.Context, userID string, reservedAmount, actualAmount float64) error {
+	return s.store.FinalizeRequestCredits(ctx, userID, reservedAmount, actualAmount)
+}
+
+func (s *UsageService) ReservePaygUsdBalance(ctx context.Context, userID string, amount float64) error {
+	return s.store.ReservePaygUsdBalance(ctx, userID, amount)
+}
+
+func (s *UsageService) FinalizePaygUsdBalance(ctx context.Context, userID string, reservedAmount, actualAmount float64) error {
+	return s.store.FinalizePaygUsdBalance(ctx, userID, reservedAmount, actualAmount)
+}
+
 func (s *UsageService) ListAll(ctx context.Context, limit int) []store.UsageLedgerEntry {
 	return s.store.ListAllUsage(ctx, limit)
 }

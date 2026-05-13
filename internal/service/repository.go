@@ -58,6 +58,27 @@ type Store interface {
 	ReserveCreditBalance(context.Context, string, string, float64) error
 	FinalizeCreditBalance(context.Context, string, string, float64, float64) error
 
+	// PRD v3 Phase 2: request-credit balance (integer/fractional credits
+	// per request) and PAYG USD balance (actual-cost debit on per-1M
+	// token pricing). Both use the reservation pattern:
+	//   - Reserve on request start, subject to the `pricing_group` of
+	//     the active entitlement and the user's cached balance.
+	//   - Finalize on request completion with the actual amount spent;
+	//     over-reservation releases back to the balance.
+	// Idempotency belongs to the caller — these helpers assume each
+	// call is unique per requestID.
+	ReserveRequestCredits(ctx context.Context, userID string, amount float64) error
+	FinalizeRequestCredits(ctx context.Context, userID string, reservedAmount, actualAmount float64) error
+	ReservePaygUsdBalance(ctx context.Context, userID string, amount float64) error
+	FinalizePaygUsdBalance(ctx context.Context, userID string, reservedAmount, actualAmount float64) error
+
+	// UpsertModelCreditCost installs/refreshes the per-model credit
+	// cost row. Called by the sync worker when genfity-app publishes a
+	// new pricing decision.
+	UpsertModelCreditCost(ctx context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error)
+	GetModelCreditCost(ctx context.Context, fullModelID string) (*store.ModelCreditCost, error)
+	ListModelCreditCosts(ctx context.Context) []store.ModelCreditCost
+
 	AppendUsage(context.Context, store.UsageLedgerEntry) (store.UsageLedgerEntry, error)
 	ListUsage(context.Context) []store.UsageLedgerEntry
 	ListUsageByUser(context.Context, string) []store.UsageLedgerEntry
