@@ -128,6 +128,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Get("/export/models", syncHandler.ExportModels)
 		r.Get("/export/model-prices", syncHandler.ExportModelPrices)
 		r.Get("/export/usage-summary", syncHandler.ExportUsageSummary)
+		r.Get("/routers/{code}/models", routerProxyHandler.Models)
 	})
 
 	return &Server{
