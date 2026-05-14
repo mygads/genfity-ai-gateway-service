@@ -102,6 +102,9 @@ func (s *MemoryStore) UpsertAPIKey(_ context.Context, key store.APIKey) (store.A
 	if key.CreatedAt.IsZero() {
 		key.CreatedAt = time.Now().UTC()
 	}
+	if key.BillingSource == "" {
+		key.BillingSource = "auto"
+	}
 	s.apiKeys[key.ID] = key
 	return key, nil
 }
@@ -152,6 +155,18 @@ func (s *MemoryStore) UpdateAPIKeyStatus(_ context.Context, id uuid.UUID, status
 		return ErrNotFound
 	}
 	item.Status = status
+	s.apiKeys[id] = item
+	return nil
+}
+
+func (s *MemoryStore) UpdateAPIKeyBillingSource(_ context.Context, id uuid.UUID, source string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.apiKeys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	item.BillingSource = source
 	s.apiKeys[id] = item
 	return nil
 }

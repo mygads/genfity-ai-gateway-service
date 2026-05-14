@@ -499,82 +499,111 @@ func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenRe
 	return tokenReservationEstimate{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total, Bounded: bounded}
 }
 
-// tryPriorityBilling implements the PRD v3 3-priority reservation chain.
+// tryPriorityBilling implements the PRD v3 3-priority reservation chain,
+// constrained by the API key's billing_source pin.
+//
+// API key billing_source values:
+//   "auto"         → original 3-priority chain (subscription → credit → payg)
+//   "subscription" → only Priority 1 (unlimited); error if not covered
+//   "credit"       → only Priority 2 (credit_package); error if not configured/insufficient
+//   "payg"         → only Priority 3 (payg_topup USD balance)
+//
 // Returns a reservation with BillingMode populated when a priority
 // matched; returns zero reservation + zero status when no priority
 // matches (caller falls through to legacy quota/credit path).
 // Non-zero status means the priority matched but reservation failed
 // (e.g. insufficient credits) — caller should surface the HTTP code.
-//
-// Priority 1 — Unlimited: skipped when the subscription is not
-// explicitly unlimited or the model isn't in allowedModels. No balance
-// check, just rate limits (handled by caller).
-//
-// Priority 2 — Request credits: checks model_credit_cost for the
-// model's full id (prefix/model). isFree models bypass the balance
-// check. Reserve creditsPerReq from the user's credit balance.
-//
-// Priority 3 — PAYG USD: uses the model's per-1M-token price from
-// ai_model_prices. Reserves an upper-bound estimate (prompt + max
-// completion tokens) in USD; finalize settles to actual.
 func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, payload map[string]any, model *store.AIModel, estimate tokenReservationEstimate) (runtimeReservation, int, string) {
-	if model == nil || subscription == nil || subscription.Entitlement == nil {
+	if model == nil {
 		return runtimeReservation{}, 0, ""
 	}
-	entitlement := subscription.Entitlement
-	group := ""
-	if entitlement.PricingGroup != nil {
-		group = *entitlement.PricingGroup
+
+	source := apiKey.BillingSource
+	if source == "" {
+		source = "auto"
 	}
-	if group == "" {
-		group = pricingGroup(subscription)
-	}
+
+	allowSubscription := source == "auto" || source == "subscription"
+	allowCredit := source == "auto" || source == "credit"
+	allowPayg := source == "auto" || source == "payg"
 
 	// Priority 1: Unlimited coverage. The subscription must be an
 	// "unlimited" plan AND the model must appear in allowedModels
 	// metadata. allowedModels may be empty on legacy plans — in that
 	// case we fall through (not covered).
-	if group == "unlimited" {
-		if modelCoveredByUnlimited(subscription, model) {
+	if allowSubscription && subscription != nil && subscription.Entitlement != nil {
+		entitlement := subscription.Entitlement
+		group := ""
+		if entitlement.PricingGroup != nil {
+			group = *entitlement.PricingGroup
+		}
+		if group == "" {
+			group = pricingGroup(subscription)
+		}
+		if group == "unlimited" && modelCoveredByUnlimited(subscription, model) {
 			return runtimeReservation{BillingMode: "unlimited"}, 0, ""
 		}
-		// Unlimited user whose model isn't whitelisted — fall through
-		// to credit/PAYG. This lets operators sell unlimited-for-X and
-		// pay-per-use for everything else.
+		// If key is pinned to subscription only, fail closed when
+		// unlimited isn't applicable to this request.
+		if source == "subscription" {
+			return runtimeReservation{}, http.StatusPaymentRequired, "subscription_not_covering_model"
+		}
+	} else if source == "subscription" {
+		// Pinned to subscription but no active entitlement.
+		return runtimeReservation{}, http.StatusPaymentRequired, "no_active_subscription"
 	}
 
 	// Priority 2: request credits. Look up the per-model credit cost.
 	// We use the model's PublicModel (e.g. "mtr/claude-opus-4.7") as
 	// the lookup key — this is what sync pushes from genfity-app.
-	fullModelID := model.PublicModel
-	if fullModelID != "" {
-		if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil {
-			if cost.IsFree {
-				return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
-			}
-			credits := parseFloatPtr(&cost.CreditsPerReq)
-			if credits > 0 {
-				if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
-					if errors.Is(err, service.ErrInsufficientBalance) {
-						// Fall through to PAYG — user may have credits
-						// exhausted but still carry a PAYG balance.
-					} else {
-						return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
-					}
-				} else {
-					return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+	if allowCredit {
+		fullModelID := model.PublicModel
+		if fullModelID != "" {
+			if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil {
+				if cost.IsFree {
+					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
 				}
+				credits := parseFloatPtr(&cost.CreditsPerReq)
+				if credits > 0 {
+					if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
+						if errors.Is(err, service.ErrInsufficientBalance) {
+							if source == "credit" {
+								return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
+							}
+							// Fall through to PAYG — user may have credits
+							// exhausted but still carry a PAYG balance.
+						} else {
+							return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
+						}
+					} else {
+						return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+					}
+				} else if source == "credit" {
+					// Pinned to credit but no credit cost configured.
+					return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
+				}
+			} else if source == "credit" {
+				return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
 			}
+		} else if source == "credit" {
+			return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
 		}
 	}
 
 	// Priority 3: PAYG USD balance.
+	if !allowPayg {
+		// Key is pinned to a higher-priority schema that didn't match.
+		return runtimeReservation{}, http.StatusPaymentRequired, "billing_source_not_applicable"
+	}
 	prices := h.models.ListPrices(ctx)
 	price := modelPrice(prices, model.ID)
 	if price == nil {
-		// No PAYG price configured — nothing more we can do at the
-		// priority chain level. Return "no match" so caller falls
-		// back to legacy quota/credit paths.
+		// No PAYG price configured.
+		if source == "payg" {
+			return runtimeReservation{}, http.StatusPaymentRequired, "payg_price_not_configured"
+		}
+		// Auto mode: nothing more we can do at the priority chain level.
+		// Return "no match" so caller falls back to legacy paths.
 		return runtimeReservation{}, 0, ""
 	}
 	if !estimate.Bounded && parseFloatPtr(&price.OutputPricePer1M) > 0 {

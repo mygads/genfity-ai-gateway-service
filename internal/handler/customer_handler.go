@@ -53,8 +53,9 @@ func (h *CustomerHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
 
 	var payload struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		Name          string `json:"name"`
+		Status        string `json:"status"`
+		BillingSource string `json:"billing_source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
@@ -62,10 +63,11 @@ func (h *CustomerHandler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	created, err := h.apiKeys.Create(r.Context(), service.CreateAPIKeyInput{
-		UserID:   user.ID,
-		TenantID: user.TenantID,
-		Name:     payload.Name,
-		Status:   payload.Status,
+		UserID:        user.ID,
+		TenantID:      user.TenantID,
+		Name:          payload.Name,
+		Status:        payload.Status,
+		BillingSource: payload.BillingSource,
 	})
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed_to_create_api_key")
@@ -129,15 +131,24 @@ func (h *CustomerHandler) UpdateAPIKeyStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var payload struct {
-		Status string `json:"status"`
+		Status        *string `json:"status"`
+		BillingSource *string `json:"billing_source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	if err := h.apiKeys.UpdateStatus(r.Context(), id, payload.Status); err != nil {
-		respondError(w, http.StatusBadRequest, err.Error())
-		return
+	if payload.Status != nil {
+		if err := h.apiKeys.UpdateStatus(r.Context(), id, *payload.Status); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if payload.BillingSource != nil {
+		if err := h.apiKeys.UpdateBillingSource(r.Context(), id, *payload.BillingSource); err != nil {
+			respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"success": true})
 }

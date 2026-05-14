@@ -24,11 +24,12 @@ type APIKeyService struct {
 }
 
 type CreateAPIKeyInput struct {
-	UserID    string
-	TenantID  *string
-	Name      string
-	Status    string
-	ExpiresAt *time.Time
+	UserID        string
+	TenantID      *string
+	Name          string
+	Status        string
+	BillingSource string
+	ExpiresAt     *time.Time
 }
 
 type CreatedAPIKey struct {
@@ -56,6 +57,7 @@ func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*C
 		KeyPrefix:       prefix,
 		KeyHash:         hash,
 		Status:          defaultStatus(input.Status),
+		BillingSource:   defaultBillingSource(input.BillingSource),
 		ExpiresAt:       input.ExpiresAt,
 		CreatedAt:       now,
 	}
@@ -64,7 +66,7 @@ func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*C
 		return nil, err
 	}
 
-	s.log.Info().Str("user_id", input.UserID).Str("api_key_id", record.ID.String()).Msg("created api key")
+	s.log.Info().Str("user_id", input.UserID).Str("api_key_id", record.ID.String()).Str("billing_source", record.BillingSource).Msg("created api key")
 
 	return &CreatedAPIKey{Record: record, RawKey: raw}, nil
 }
@@ -112,6 +114,14 @@ func (s *APIKeyService) UpdateStatus(ctx context.Context, id uuid.UUID, status s
 	return s.store.UpdateAPIKeyStatus(ctx, id, status)
 }
 
+func (s *APIKeyService) UpdateBillingSource(ctx context.Context, id uuid.UUID, source string) error {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if !validBillingSource(source) {
+		return fmt.Errorf("invalid_billing_source")
+	}
+	return s.store.UpdateAPIKeyBillingSource(ctx, id, source)
+}
+
 func (s *APIKeyService) ListByUser(ctx context.Context, userID string) []store.APIKey {
 	return s.store.ListAPIKeysByUser(ctx, userID)
 }
@@ -139,6 +149,22 @@ func defaultStatus(status string) string {
 		return status
 	}
 	return "active"
+}
+
+func defaultBillingSource(source string) string {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if validBillingSource(source) {
+		return source
+	}
+	return "auto"
+}
+
+func validBillingSource(source string) bool {
+	switch source {
+	case "auto", "subscription", "credit", "payg":
+		return true
+	}
+	return false
 }
 
 func extractPrefix(raw string) string {

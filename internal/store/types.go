@@ -32,6 +32,12 @@ type APIKey struct {
 	KeyPrefix       string     `json:"key_prefix"`
 	KeyHash         string     `json:"-"`
 	Status          string     `json:"status"`
+	// BillingSource constrains which billing schema the key may consume.
+	// Values: "auto" (default, original 3-priority chain),
+	// "subscription" (unlimited plan only),
+	// "credit" (credit_package balance only),
+	// "payg" (payg_topup USD balance only).
+	BillingSource   string     `json:"billing_source"`
 	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
