@@ -800,19 +800,20 @@ func (s *PostgresStore) FinalizePaygUsdBalance(ctx context.Context, userID strin
 
 func (s *PostgresStore) UpsertModelCreditCost(ctx context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error) {
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO ai_gateway.model_credit_cost (full_model_id, credits_per_req, is_free, notes, metadata, synced_at)
-		VALUES ($1, $2::numeric, $3, $4, COALESCE($5, '{}'::jsonb), now())
+		INSERT INTO ai_gateway.model_credit_cost (full_model_id, credits_per_req, is_free, is_active, notes, metadata, synced_at)
+		VALUES ($1, $2::numeric, $3, $4, $5, COALESCE($6, '{}'::jsonb), now())
 		ON CONFLICT (full_model_id) DO UPDATE SET
 			credits_per_req = EXCLUDED.credits_per_req,
 			is_free = EXCLUDED.is_free,
+			is_active = EXCLUDED.is_active,
 			notes = EXCLUDED.notes,
 			metadata = EXCLUDED.metadata,
 			synced_at = now(),
 			updated_at = now()
-		RETURNING id, full_model_id, credits_per_req::text, is_free, notes, metadata, synced_at, created_at, updated_at`,
-		cost.FullModelID, cost.CreditsPerReq, cost.IsFree, cost.Notes, cost.Metadata)
+		RETURNING id, full_model_id, credits_per_req::text, is_free, is_active, notes, metadata, synced_at, created_at, updated_at`,
+		cost.FullModelID, cost.CreditsPerReq, cost.IsFree, cost.IsActive, cost.Notes, cost.Metadata)
 	var out store.ModelCreditCost
-	if err := row.Scan(&out.ID, &out.FullModelID, &out.CreditsPerReq, &out.IsFree, &out.Notes, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+	if err := row.Scan(&out.ID, &out.FullModelID, &out.CreditsPerReq, &out.IsFree, &out.IsActive, &out.Notes, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
 		return store.ModelCreditCost{}, err
 	}
 	return out, nil
@@ -820,12 +821,12 @@ func (s *PostgresStore) UpsertModelCreditCost(ctx context.Context, cost store.Mo
 
 func (s *PostgresStore) GetModelCreditCost(ctx context.Context, fullModelID string) (*store.ModelCreditCost, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, full_model_id, credits_per_req::text, is_free, notes, metadata, synced_at, created_at, updated_at
+		`SELECT id, full_model_id, credits_per_req::text, is_free, is_active, notes, metadata, synced_at, created_at, updated_at
 		   FROM ai_gateway.model_credit_cost
 		   WHERE full_model_id = $1`,
 		fullModelID)
 	var out store.ModelCreditCost
-	if err := row.Scan(&out.ID, &out.FullModelID, &out.CreditsPerReq, &out.IsFree, &out.Notes, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
+	if err := row.Scan(&out.ID, &out.FullModelID, &out.CreditsPerReq, &out.IsFree, &out.IsActive, &out.Notes, &out.Metadata, &out.SyncedAt, &out.CreatedAt, &out.UpdatedAt); err != nil {
 		if err.Error() == "no rows in result set" {
 			return nil, nil
 		}
@@ -836,7 +837,7 @@ func (s *PostgresStore) GetModelCreditCost(ctx context.Context, fullModelID stri
 
 func (s *PostgresStore) ListModelCreditCosts(ctx context.Context) []store.ModelCreditCost {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, full_model_id, credits_per_req::text, is_free, notes, metadata, synced_at, created_at, updated_at
+		`SELECT id, full_model_id, credits_per_req::text, is_free, is_active, notes, metadata, synced_at, created_at, updated_at
 		   FROM ai_gateway.model_credit_cost
 		   ORDER BY full_model_id`)
 	if err != nil {
@@ -846,7 +847,7 @@ func (s *PostgresStore) ListModelCreditCosts(ctx context.Context) []store.ModelC
 	out := make([]store.ModelCreditCost, 0)
 	for rows.Next() {
 		var item store.ModelCreditCost
-		if err := rows.Scan(&item.ID, &item.FullModelID, &item.CreditsPerReq, &item.IsFree, &item.Notes, &item.Metadata, &item.SyncedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.FullModelID, &item.CreditsPerReq, &item.IsFree, &item.IsActive, &item.Notes, &item.Metadata, &item.SyncedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			continue
 		}
 		out = append(out, item)
@@ -963,38 +964,77 @@ func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, p
 
 func (s *PostgresStore) AppendUsage(ctx context.Context, item store.UsageLedgerEntry) (store.UsageLedgerEntry, error) {
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO ai_gateway.usage_ledger (id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost, output_cost, total_cost, status, error_code, latency_ms, started_at, finished_at, metadata)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
-		RETURNING id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata`,
-		nilUUID(item.ID), item.RequestID, item.GenfityUserID, item.GenfityTenantID, item.APIKeyID, item.PublicModel, item.RouterModel, item.RouterInstanceCode, item.PromptTokens, item.CompletionTokens, item.TotalTokens, item.CachedTokens, item.ReasoningTokens, item.InputCost, item.OutputCost, item.TotalCost, item.Status, item.ErrorCode, item.LatencyMS, defaultTime(item.StartedAt), item.FinishedAt, rawJSON(item.Metadata),
-	).Scan(&item.ID, &item.RequestID, &item.GenfityUserID, &item.GenfityTenantID, &item.APIKeyID, &item.PublicModel, &item.RouterModel, &item.RouterInstanceCode, &item.PromptTokens, &item.CompletionTokens, &item.TotalTokens, &item.CachedTokens, &item.ReasoningTokens, &item.InputCost, &item.OutputCost, &item.TotalCost, &item.Status, &item.ErrorCode, &item.LatencyMS, &item.StartedAt, &item.FinishedAt, &item.Metadata)
+		INSERT INTO ai_gateway.usage_ledger (id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost, output_cost, total_cost, billing_mode, amount_credits, balance_after_credits, balance_after_usd, status, error_code, latency_ms, started_at, finished_at, metadata)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+		RETURNING id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, billing_mode, amount_credits::text, balance_after_credits::text, balance_after_usd::text, status, error_code, latency_ms, started_at, finished_at, metadata`,
+		nilUUID(item.ID), item.RequestID, item.GenfityUserID, item.GenfityTenantID, item.APIKeyID, item.PublicModel, item.RouterModel, item.RouterInstanceCode, item.PromptTokens, item.CompletionTokens, item.TotalTokens, item.CachedTokens, item.ReasoningTokens, item.InputCost, item.OutputCost, item.TotalCost, item.BillingMode, item.AmountCredits, item.BalanceAfterCredits, item.BalanceAfterUsd, item.Status, item.ErrorCode, item.LatencyMS, defaultTime(item.StartedAt), item.FinishedAt, rawJSON(item.Metadata),
+	).Scan(&item.ID, &item.RequestID, &item.GenfityUserID, &item.GenfityTenantID, &item.APIKeyID, &item.PublicModel, &item.RouterModel, &item.RouterInstanceCode, &item.PromptTokens, &item.CompletionTokens, &item.TotalTokens, &item.CachedTokens, &item.ReasoningTokens, &item.InputCost, &item.OutputCost, &item.TotalCost, &item.BillingMode, &item.AmountCredits, &item.BalanceAfterCredits, &item.BalanceAfterUsd, &item.Status, &item.ErrorCode, &item.LatencyMS, &item.StartedAt, &item.FinishedAt, &item.Metadata)
 	if err != nil {
 		return store.UsageLedgerEntry{}, err
 	}
 	return item, nil
 }
 
+const usageLedgerSelectColumns = `id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, billing_mode, amount_credits::text, balance_after_credits::text, balance_after_usd::text, status, error_code, latency_ms, started_at, finished_at, metadata`
+
 func (s *PostgresStore) ListUsage(ctx context.Context) []store.UsageLedgerEntry {
-	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC`)
+	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger ORDER BY started_at DESC`)
 }
 
 func (s *PostgresStore) ListAllUsage(ctx context.Context, limit int) []store.UsageLedgerEntry {
 	if limit <= 0 {
 		limit = 100
 	}
-	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger ORDER BY started_at DESC LIMIT $1`, limit)
+	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger ORDER BY started_at DESC LIMIT $1`, limit)
+}
+
+func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow {
+	query := `
+		SELECT
+			COALESCE(NULLIF(metadata->>'pricing_group', ''), 'unknown') AS pricing_group,
+			genfity_user_id,
+			COUNT(*)::int AS request_count,
+			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
+			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
+			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+			COALESCE(SUM(total_cost), 0)::text AS total_cost,
+			MAX(started_at) AS last_active
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		GROUP BY pricing_group, genfity_user_id
+		ORDER BY COALESCE(SUM(total_cost), 0) DESC`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+
+	rows, err := s.pool.Query(ctx, query, sinceArg)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []store.UsageSummaryRow{}
+	for rows.Next() {
+		var item store.UsageSummaryRow
+		if rows.Scan(&item.PricingGroup, &item.GenfityUserID, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalTokens, &item.TotalCost, &item.LastActive) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {
-	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 ORDER BY started_at DESC`, userID)
+	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 ORDER BY started_at DESC`, userID)
 }
 
 func (s *PostgresStore) ListUsageByUserSince(ctx context.Context, userID string, since time.Time) []store.UsageLedgerEntry {
-	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 AND started_at >= $2 ORDER BY started_at DESC`, userID, since)
+	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 AND started_at >= $2 ORDER BY started_at DESC`, userID, since)
 }
 
 func (s *PostgresStore) ListUsageByTenant(ctx context.Context, tenantID string) []store.UsageLedgerEntry {
-	return s.listUsage(ctx, `SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost::text, output_cost::text, total_cost::text, status, error_code, latency_ms, started_at, finished_at, metadata FROM ai_gateway.usage_ledger WHERE genfity_tenant_id = $1 ORDER BY started_at DESC`, tenantID)
+	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger WHERE genfity_tenant_id = $1 ORDER BY started_at DESC`, tenantID)
 }
 
 func (s *PostgresStore) listUsage(ctx context.Context, sql string, args ...any) []store.UsageLedgerEntry {
@@ -1006,7 +1046,7 @@ func (s *PostgresStore) listUsage(ctx context.Context, sql string, args ...any) 
 	items := []store.UsageLedgerEntry{}
 	for rows.Next() {
 		var item store.UsageLedgerEntry
-		if rows.Scan(&item.ID, &item.RequestID, &item.GenfityUserID, &item.GenfityTenantID, &item.APIKeyID, &item.PublicModel, &item.RouterModel, &item.RouterInstanceCode, &item.PromptTokens, &item.CompletionTokens, &item.TotalTokens, &item.CachedTokens, &item.ReasoningTokens, &item.InputCost, &item.OutputCost, &item.TotalCost, &item.Status, &item.ErrorCode, &item.LatencyMS, &item.StartedAt, &item.FinishedAt, &item.Metadata) == nil {
+		if rows.Scan(&item.ID, &item.RequestID, &item.GenfityUserID, &item.GenfityTenantID, &item.APIKeyID, &item.PublicModel, &item.RouterModel, &item.RouterInstanceCode, &item.PromptTokens, &item.CompletionTokens, &item.TotalTokens, &item.CachedTokens, &item.ReasoningTokens, &item.InputCost, &item.OutputCost, &item.TotalCost, &item.BillingMode, &item.AmountCredits, &item.BalanceAfterCredits, &item.BalanceAfterUsd, &item.Status, &item.ErrorCode, &item.LatencyMS, &item.StartedAt, &item.FinishedAt, &item.Metadata) == nil {
 			items = append(items, item)
 		}
 	}

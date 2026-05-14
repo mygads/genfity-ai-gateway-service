@@ -127,6 +127,7 @@ type ModelCreditCost struct {
 	FullModelID   string          `json:"full_model_id"`
 	CreditsPerReq string          `json:"credits_per_req"` // stored as numeric(10,4)
 	IsFree        bool            `json:"is_free"`
+	IsActive      bool            `json:"is_active"`
 	Notes         *string         `json:"notes,omitempty"`
 	SyncedAt      time.Time       `json:"synced_at"`
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
@@ -169,28 +170,43 @@ type RouterInstance struct {
 }
 
 type UsageLedgerEntry struct {
-	ID                 uuid.UUID       `json:"id"`
-	RequestID          string          `json:"request_id"`
-	GenfityUserID      string          `json:"genfity_user_id"`
-	GenfityTenantID    *string         `json:"genfity_tenant_id,omitempty"`
-	APIKeyID           *uuid.UUID      `json:"api_key_id,omitempty"`
-	PublicModel        string          `json:"public_model"`
-	RouterModel        *string         `json:"router_model,omitempty"`
-	RouterInstanceCode *string         `json:"router_instance_code,omitempty"`
-	PromptTokens       int64           `json:"prompt_tokens"`
-	CompletionTokens   int64           `json:"completion_tokens"`
-	TotalTokens        int64           `json:"total_tokens"`
-	CachedTokens       int64           `json:"cached_tokens"`
+	ID                  uuid.UUID       `json:"id"`
+	RequestID           string          `json:"request_id"`
+	GenfityUserID       string          `json:"genfity_user_id"`
+	GenfityTenantID     *string         `json:"genfity_tenant_id,omitempty"`
+	APIKeyID            *uuid.UUID      `json:"api_key_id,omitempty"`
+	PublicModel         string          `json:"public_model"`
+	RouterModel         *string         `json:"router_model,omitempty"`
+	RouterInstanceCode  *string         `json:"router_instance_code,omitempty"`
+	PromptTokens        int64           `json:"prompt_tokens"`
+	CompletionTokens    int64           `json:"completion_tokens"`
+	TotalTokens         int64           `json:"total_tokens"`
+	CachedTokens        int64           `json:"cached_tokens"`
 	ReasoningTokens    int64           `json:"reasoning_tokens"`
-	InputCost          string          `json:"input_cost"`
-	OutputCost         string          `json:"output_cost"`
-	TotalCost          string          `json:"total_cost"`
-	Status             string          `json:"status"`
-	ErrorCode          *string         `json:"error_code,omitempty"`
-	LatencyMS          *int32          `json:"latency_ms,omitempty"`
-	StartedAt          time.Time       `json:"started_at"`
-	FinishedAt         *time.Time      `json:"finished_at,omitempty"`
-	Metadata           json.RawMessage `json:"metadata,omitempty"`
+	InputCost           string          `json:"input_cost"`
+	OutputCost          string          `json:"output_cost"`
+	TotalCost           string          `json:"total_cost"`
+	BillingMode         *string         `json:"billing_mode,omitempty"`
+	AmountCredits       *string         `json:"amount_credits,omitempty"`
+	BalanceAfterCredits *string         `json:"balance_after_credits,omitempty"`
+	BalanceAfterUsd     *string         `json:"balance_after_usd,omitempty"`
+	Status              string          `json:"status"`
+	ErrorCode           *string         `json:"error_code,omitempty"`
+	LatencyMS           *int32          `json:"latency_ms,omitempty"`
+	StartedAt           time.Time       `json:"started_at"`
+	FinishedAt          *time.Time      `json:"finished_at,omitempty"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+}
+
+type UsageSummaryRow struct {
+	PricingGroup  string    `json:"pricing_group"`
+	GenfityUserID string    `json:"genfity_user_id"`
+	RequestCount  int       `json:"request_count"`
+	InputTokens   int64     `json:"input_tokens"`
+	OutputTokens  int64     `json:"output_tokens"`
+	TotalTokens   int64     `json:"total_tokens"`
+	TotalCost     string    `json:"total_cost"`
+	LastActive    time.Time `json:"last_active"`
 }
 
 type AuthUser struct {

@@ -1031,6 +1031,10 @@ func (s *MemoryStore) ListAllUsage(_ context.Context, limit int) []store.UsageLe
 	return items
 }
 
+func (s *MemoryStore) ListUsageSummaryGrouped(_ context.Context, _ time.Time) []store.UsageSummaryRow {
+	return nil
+}
+
 func (s *MemoryStore) ListUsageByUser(_ context.Context, userID string) []store.UsageLedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

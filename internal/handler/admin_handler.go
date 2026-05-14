@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -458,6 +459,111 @@ func (h *AdminHandler) DeleteRouterInstance(w http.ResponseWriter, r *http.Reque
 
 func (h *AdminHandler) ListAllUsage(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{"usage": h.usage.ListAll(r.Context(), 200)})
+}
+
+func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request) {
+	rangeParam := r.URL.Query().Get("range")
+	var since time.Time
+	switch rangeParam {
+	case "7d":
+		since = time.Now().UTC().Add(-7 * 24 * time.Hour)
+	case "90d":
+		since = time.Now().UTC().Add(-90 * 24 * time.Hour)
+	case "all":
+		// zero time = no filter
+	default:
+		since = time.Now().UTC().Add(-30 * 24 * time.Hour)
+	}
+
+	rows := h.usage.SummaryGrouped(r.Context(), since)
+
+	type groupTotals struct {
+		RequestCount int    `json:"request_count"`
+		InputTokens  int64  `json:"input_tokens"`
+		OutputTokens int64  `json:"output_tokens"`
+		TotalTokens  int64  `json:"total_tokens"`
+		TotalCost    string `json:"total_cost"`
+	}
+	type groupPayload struct {
+		PricingGroup string              `json:"pricing_group"`
+		Label        string              `json:"label"`
+		Totals       groupTotals         `json:"totals"`
+		Users        []store.UsageSummaryRow `json:"users"`
+	}
+
+	groupMap := map[string]*groupPayload{
+		"unlimited":      {PricingGroup: "unlimited", Label: "Subscription", Users: []store.UsageSummaryRow{}},
+		"unlimited_plan": {PricingGroup: "unlimited_plan", Label: "Subscription", Users: []store.UsageSummaryRow{}},
+		"credit_package": {PricingGroup: "credit_package", Label: "Credit", Users: []store.UsageSummaryRow{}},
+		"payg_topup":     {PricingGroup: "payg_topup", Label: "Pay-as-you-go", Users: []store.UsageSummaryRow{}},
+	}
+
+	var grandRequests int
+	var grandInput, grandOutput, grandTotal int64
+	grandCost := 0.0
+
+	for _, row := range rows {
+		g, ok := groupMap[row.PricingGroup]
+		if !ok {
+			g = groupMap["credit_package"]
+		}
+		g.Users = append(g.Users, row)
+
+		cost := 0.0
+		if v, err := strconv.ParseFloat(row.TotalCost, 64); err == nil {
+			cost = v
+		}
+
+		grandRequests += row.RequestCount
+		grandInput += row.InputTokens
+		grandOutput += row.OutputTokens
+		grandTotal += row.TotalTokens
+		grandCost += cost
+	}
+
+	// Merge unlimited + unlimited_plan into one group
+	sub := groupMap["unlimited_plan"]
+	if u := groupMap["unlimited"]; len(u.Users) > 0 {
+		sub.Users = append(sub.Users, u.Users...)
+	}
+
+	// Compute per-group totals
+	for _, g := range []*groupPayload{sub, groupMap["credit_package"], groupMap["payg_topup"]} {
+		var rc int
+		var it, ot, tt int64
+		tc := 0.0
+		for _, u := range g.Users {
+			rc += u.RequestCount
+			it += u.InputTokens
+			ot += u.OutputTokens
+			tt += u.TotalTokens
+			if v, err := strconv.ParseFloat(u.TotalCost, 64); err == nil {
+				tc += v
+			}
+		}
+		g.Totals = groupTotals{
+			RequestCount: rc,
+			InputTokens:  it,
+			OutputTokens: ot,
+			TotalTokens:  tt,
+			TotalCost:    strconv.FormatFloat(tc, 'f', 6, 64),
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"grand_totals": groupTotals{
+			RequestCount: grandRequests,
+			InputTokens:  grandInput,
+			OutputTokens: grandOutput,
+			TotalTokens:  grandTotal,
+			TotalCost:    strconv.FormatFloat(grandCost, 'f', 6, 64),
+		},
+		"groups": []groupPayload{
+			*sub,
+			*groupMap["credit_package"],
+			*groupMap["payg_topup"],
+		},
+	})
 }
 
 func (h *AdminHandler) DeleteModel(w http.ResponseWriter, r *http.Request) {

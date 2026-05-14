@@ -130,3 +130,7 @@ func (s *UsageService) FinalizePaygUsdBalance(ctx context.Context, userID string
 func (s *UsageService) ListAll(ctx context.Context, limit int) []store.UsageLedgerEntry {
 	return s.store.ListAllUsage(ctx, limit)
 }
+
+func (s *UsageService) SummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow {
+	return s.store.ListUsageSummaryGrouped(ctx, since)
+}

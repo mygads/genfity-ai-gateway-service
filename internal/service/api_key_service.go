@@ -106,6 +106,49 @@ func (s *APIKeyService) Revoke(ctx context.Context, id uuid.UUID) error {
 	return s.store.RevokeAPIKey(ctx, id, time.Now().UTC())
 }
 
+// Regenerate replaces an existing key with a new raw secret while
+// preserving its name, status, billing_source, and expiry. The old
+// hash is overwritten so the previous raw key stops working
+// immediately. The returned CreatedAPIKey carries the new raw key
+// which the caller should display once and never persist server-side.
+func (s *APIKeyService) Regenerate(ctx context.Context, id uuid.UUID, userID string) (*CreatedAPIKey, error) {
+	keys := s.store.ListAPIKeysByUser(ctx, userID)
+	var existing *store.APIKey
+	for i := range keys {
+		if keys[i].ID == id {
+			existing = &keys[i]
+			break
+		}
+	}
+	if existing == nil {
+		return nil, ErrNotFound
+	}
+
+	raw, prefix, err := generateRawAPIKey()
+	if err != nil {
+		return nil, fmt.Errorf("generate api key: %w", err)
+	}
+	hash := s.hash(raw)
+	updated := store.APIKey{
+		ID:              existing.ID,
+		GenfityUserID:   existing.GenfityUserID,
+		GenfityTenantID: existing.GenfityTenantID,
+		Name:            existing.Name,
+		KeyPrefix:       prefix,
+		KeyHash:         hash,
+		Status:          existing.Status,
+		BillingSource:   existing.BillingSource,
+		ExpiresAt:       existing.ExpiresAt,
+		CreatedAt:       existing.CreatedAt,
+	}
+	saved, err := s.store.UpsertAPIKey(ctx, updated)
+	if err != nil {
+		return nil, err
+	}
+	s.log.Info().Str("user_id", userID).Str("api_key_id", id.String()).Msg("regenerated api key")
+	return &CreatedAPIKey{Record: saved, RawKey: raw}, nil
+}
+
 func (s *APIKeyService) UpdateStatus(ctx context.Context, id uuid.UUID, status string) error {
 	status = strings.ToLower(strings.TrimSpace(status))
 	if status != "active" && status != "inactive" && status != "revoked" {
@@ -132,14 +175,18 @@ func (s *APIKeyService) hash(raw string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// API key format: "genfity_" + 40 hex chars (20 random bytes).
+// Prefix exposed to admins is the first 16 chars (genfity_ + 8 hex).
+const apiKeyPrefixLen = 16
+
 func generateRawAPIKey() (raw string, prefix string, err error) {
 	buf := make([]byte, 20)
 	if _, err = rand.Read(buf); err != nil {
 		return "", "", err
 	}
 	payload := hex.EncodeToString(buf)
-	raw = fmt.Sprintf("sk_genfity_live_%s", payload)
-	prefix = raw[:20]
+	raw = fmt.Sprintf("genfity_%s", payload)
+	prefix = raw[:apiKeyPrefixLen]
 	return raw, prefix, nil
 }
 
@@ -168,8 +215,13 @@ func validBillingSource(source string) bool {
 }
 
 func extractPrefix(raw string) string {
-	if len(raw) < 20 || !strings.HasPrefix(raw, "sk_genfity_live_") {
-		return ""
+	// New format: genfity_ + hex. Old format kept for backwards
+	// compatibility with keys created before 2026-05.
+	if strings.HasPrefix(raw, "genfity_") && len(raw) > apiKeyPrefixLen {
+		return raw[:apiKeyPrefixLen]
 	}
-	return raw[:20]
+	if strings.HasPrefix(raw, "sk_genfity_live_") && len(raw) > 20 {
+		return raw[:20]
+	}
+	return ""
 }

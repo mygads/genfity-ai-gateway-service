@@ -84,6 +84,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Post("/api-keys", customerHandler.CreateAPIKey)
 		r.Delete("/api-keys/{id}", customerHandler.RevokeAPIKey)
 		r.Patch("/api-keys/{id}", customerHandler.UpdateAPIKeyStatus)
+		r.Post("/api-keys/{id}/regenerate", customerHandler.RegenerateAPIKey)
 		r.Get("/models", customerHandler.ListModels)
 		r.Get("/usage", customerHandler.Usage)
 		r.Get("/usage/summary", customerHandler.UsageSummary)
@@ -110,6 +111,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Patch("/router-instances/{id}", adminHandler.UpdateRouterInstance)
 		r.Delete("/router-instances/{id}", adminHandler.DeleteRouterInstance)
 		r.Get("/usage", adminHandler.ListAllUsage)
+		r.Get("/usage/dashboard", adminHandler.ListUsageDashboard)
 
 		r.Get("/routers/{code}/health", routerProxyHandler.Health)
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)

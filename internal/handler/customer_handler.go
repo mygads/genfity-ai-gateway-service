@@ -165,3 +165,25 @@ func (h *CustomerHandler) RevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"success": true})
 }
+
+// RegenerateAPIKey rotates the secret of an existing key. Same id,
+// same name/billing_source/status — but a new raw key is returned
+// once. Caller can show the new raw key to the user; the old raw
+// key stops working immediately.
+func (h *CustomerHandler) RegenerateAPIKey(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_api_key_id")
+		return
+	}
+	user := middleware.GetAuthUser(r.Context())
+	created, err := h.apiKeys.Regenerate(r.Context(), id, user.ID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "api_key_not_found")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"api_key": created.Record,
+		"raw_key": created.RawKey,
+	})
+}

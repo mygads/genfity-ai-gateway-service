@@ -559,7 +559,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 	if allowCredit {
 		fullModelID := model.PublicModel
 		if fullModelID != "" {
-			if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil {
+			if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil && cost.IsActive {
 				if cost.IsFree {
 					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
 				}
@@ -775,7 +775,7 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 }
 
 func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) error {
-	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, started, statusCode, body, publicModel)
+	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusCode, body, publicModel)
 	if err != nil {
 		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true)
 		return err
@@ -861,19 +861,108 @@ func isRetriableTrigger(body []byte, triggers []string) bool {
 }
 
 // --- ListModels ---
+//
+// Returns the model list visible to the caller, filtered by their API
+// key's billing_source pin:
+//
+//   - "credit"       → only models with an ACTIVE credit cost row.
+//   - "subscription" → only models in the user's active entitlement
+//                      allowedModels (empty allowedModels = all models).
+//   - "payg"         → only models with a configured PAYG price.
+//   - "auto"         → union of all three (any model the user could pay
+//                      for via any priority).
+//
+// A model that doesn't pass the filter is hidden so customers don't
+// see options they can't actually use with this key.
 
 func (h *GatewayHandler) ListModels(w http.ResponseWriter, r *http.Request) {
-	models := h.models.ListModels(r.Context())
-	var list []map[string]any
-	for _, m := range models {
-		if m.Status == "active" {
-			list = append(list, map[string]any{
-				"id":       m.PublicModel,
-				"object":   "model",
-				"created":  m.CreatedAt.Unix(),
-				"owned_by": "genfity",
-			})
+	ctx := r.Context()
+	apiKey := middleware.GetAPIKey(ctx)
+
+	source := apiKey.BillingSource
+	if source == "" {
+		source = "auto"
+	}
+
+	allModels := h.models.ListModels(ctx)
+	prices := h.models.ListPrices(ctx)
+
+	// Lookup user's entitlement once for "subscription" and "auto".
+	var entitlement *store.CustomerEntitlement
+	if source == "subscription" || source == "auto" {
+		if ent, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil {
+			entitlement = ent
 		}
+	}
+
+	allowsViaSubscription := func(m store.AIModel) bool {
+		if entitlement == nil {
+			return false
+		}
+		// Plan must be unlimited group; otherwise subscription doesn't apply.
+		group := ""
+		if entitlement.PricingGroup != nil {
+			group = *entitlement.PricingGroup
+		}
+		if group != "unlimited" && group != "unlimited_plan" {
+			return false
+		}
+		// Check allowedModels metadata; empty = all models allowed (legacy).
+		meta := map[string]any{}
+		_ = json.Unmarshal(entitlement.Metadata, &meta)
+		allowed, ok := meta["allowedModels"].([]any)
+		if !ok || len(allowed) == 0 {
+			return true
+		}
+		for _, v := range allowed {
+			if s, ok := v.(string); ok && s == m.PublicModel {
+				return true
+			}
+		}
+		return false
+	}
+
+	allowsViaCredit := func(m store.AIModel) bool {
+		cost, err := h.models.GetModelCreditCost(ctx, m.PublicModel)
+		if err != nil || cost == nil {
+			return false
+		}
+		return cost.IsActive
+	}
+
+	allowsViaPayg := func(m store.AIModel) bool {
+		price := modelPrice(prices, m.ID)
+		return price != nil
+	}
+
+	var list []map[string]any
+	for _, m := range allModels {
+		if m.Status != "active" {
+			continue
+		}
+
+		var visible bool
+		switch source {
+		case "subscription":
+			visible = allowsViaSubscription(m)
+		case "credit":
+			visible = allowsViaCredit(m)
+		case "payg":
+			visible = allowsViaPayg(m)
+		default: // "auto"
+			visible = allowsViaSubscription(m) || allowsViaCredit(m) || allowsViaPayg(m)
+		}
+
+		if !visible {
+			continue
+		}
+
+		list = append(list, map[string]any{
+			"id":       m.PublicModel,
+			"object":   "model",
+			"created":  m.CreatedAt.Unix(),
+			"owned_by": "genfity",
+		})
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"object": "list", "data": list})
 }
@@ -1385,7 +1474,7 @@ func clonePayload(original map[string]any) (map[string]any, error) {
 
 // --- usage recording ---
 
-func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, body []byte, publicModel string) (usageSettlement, error) {
+func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation *runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) (usageSettlement, error) {
 	finished := time.Now().UTC()
 	latencyMs := finished.Sub(started).Milliseconds()
 
@@ -1454,27 +1543,82 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		errorCodePtr = &ec
 	}
 
+	// PRD v3 Phase 2 — populate billing-mode and per-row charge so the
+	// customer-facing usage page can render "1.5 credits, 8.5 left"
+	// instead of converting back from USD. We compute amount + post-balance
+	// here (before finalize) since recordUsage runs before the debit.
+	var billingModePtr *string
+	var amountCreditsPtr *string
+	var balanceAfterCreditsPtr *string
+	var balanceAfterUsdPtr *string
+	if reservation != nil {
+		bm := reservation.BillingMode
+		if bm != "" {
+			billingModePtr = &bm
+		}
+		if success {
+			if reservation.RequestCredits > 0 {
+				amt := fmt.Sprintf("%.4f", reservation.RequestCredits)
+				amountCreditsPtr = &amt
+			}
+			// Read current balance, subtract this debit to compute the
+			// balanceAfter snapshot. Read failures are non-fatal — leave
+			// the field null and the FE will fall back to the running
+			// snapshot from /api/user/ai-gateway/billing.
+			if reservation.RequestCredits > 0 || reservation.PaygUSD > 0 {
+				if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil {
+					if reservation.RequestCredits > 0 && entitlement.CreditBalance != nil {
+						current := parseFloatPtr(entitlement.CreditBalance)
+						after := current - reservation.RequestCredits
+						if after < 0 {
+							after = 0
+						}
+						a := fmt.Sprintf("%.4f", after)
+						balanceAfterCreditsPtr = &a
+					}
+					if reservation.PaygUSD > 0 && entitlement.PaygUsdBalance != nil {
+						current := parseFloatPtr(entitlement.PaygUsdBalance)
+						actual := totalCostUsd
+						if actual <= 0 {
+							actual = reservation.PaygUSD
+						}
+						after := current - actual
+						if after < 0 {
+							after = 0
+						}
+						a := formatAmount(after)
+						balanceAfterUsdPtr = &a
+					}
+				}
+			}
+		}
+	}
+
 	entry := store.UsageLedgerEntry{
-		ID:                 uuid.New(),
-		RequestID:          uuid.New().String(),
-		GenfityUserID:      apiKey.GenfityUserID,
-		GenfityTenantID:    apiKey.GenfityTenantID,
-		APIKeyID:           &apiKeyID,
-		PublicModel:        publicModel,
-		RouterModel:        &routerModel,
-		RouterInstanceCode: &routerCode,
-		PromptTokens:       promptTokens,
-		CompletionTokens:   completionTokens,
-		TotalTokens:        totalTokens,
-		InputCost:          inCost,
-		OutputCost:         outCost,
-		TotalCost:          totCost,
-		Status:             statusStr,
-		ErrorCode:          errorCodePtr,
-		LatencyMS:          &latencyMs32,
-		StartedAt:          started,
-		FinishedAt:         &finished,
-		Metadata:           entryMetaJSON,
+		ID:                  uuid.New(),
+		RequestID:           uuid.New().String(),
+		GenfityUserID:       apiKey.GenfityUserID,
+		GenfityTenantID:     apiKey.GenfityTenantID,
+		APIKeyID:            &apiKeyID,
+		PublicModel:         publicModel,
+		RouterModel:         &routerModel,
+		RouterInstanceCode:  &routerCode,
+		PromptTokens:        promptTokens,
+		CompletionTokens:    completionTokens,
+		TotalTokens:         totalTokens,
+		InputCost:           inCost,
+		OutputCost:          outCost,
+		TotalCost:           totCost,
+		BillingMode:         billingModePtr,
+		AmountCredits:       amountCreditsPtr,
+		BalanceAfterCredits: balanceAfterCreditsPtr,
+		BalanceAfterUsd:     balanceAfterUsdPtr,
+		Status:              statusStr,
+		ErrorCode:           errorCodePtr,
+		LatencyMS:           &latencyMs32,
+		StartedAt:           started,
+		FinishedAt:          &finished,
+		Metadata:            entryMetaJSON,
 	}
 	if _, err := h.usage.Record(ctx, entry); err != nil {
 		return usageSettlement{}, err
@@ -1491,7 +1635,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 }
 
 func (h *GatewayHandler) recordUsageWithLegacyBilling(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, body []byte, publicModel string) {
-	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, started, statusCode, body, publicModel)
+	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, nil, started, statusCode, body, publicModel)
 	if err != nil {
 		return
 	}
