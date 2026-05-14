@@ -432,7 +432,7 @@ func (s *PostgresStore) upsertEntitlement(ctx context.Context, item store.Custom
 			credit_balance, credit_expires_at, payg_usd_balance, pricing_group,
 			metadata, updated_from_genfity_at
 		)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10,0),$11,COALESCE($12,0),$13,$14,$15)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10::numeric,0),$11,COALESCE($12::numeric,0),$13,$14,$15)
 		ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
 			genfity_tenant_id = EXCLUDED.genfity_tenant_id,
 			status = EXCLUDED.status,
