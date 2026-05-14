@@ -88,6 +88,7 @@ type GatewayHandler struct {
 	rateLimit     *service.RateLimitService
 	routers       *service.RouterService
 	cliProxy      *router.CLIProxyClient
+	callback      *service.GenfityCallback
 	routerAPIKey  string
 	routerTimeout time.Duration
 }
@@ -104,6 +105,7 @@ func NewGatewayHandler(
 	rateLimit *service.RateLimitService,
 	routers *service.RouterService,
 	cliProxy *router.CLIProxyClient,
+	callback *service.GenfityCallback,
 	routerAPIKey string,
 	routerTimeout time.Duration,
 ) *GatewayHandler {
@@ -114,6 +116,7 @@ func NewGatewayHandler(
 		rateLimit:     rateLimit,
 		routers:       routers,
 		cliProxy:      cliProxy,
+		callback:      callback,
 		routerAPIKey:  routerAPIKey,
 		routerTimeout: routerTimeout,
 	}
@@ -160,9 +163,50 @@ func (b *tailCaptureBuffer) Bytes() []byte {
 	return b.buf.Bytes()
 }
 
+// recordFailedRequest writes a usage_ledger entry for requests that fail
+// before the upstream call (model_not_allowed, billing failures, rate
+// limits, etc.). Without this, the api-keys logs panel would only show
+// successful + upstream-failed requests, hiding configuration / billing
+// issues that customers need to debug. Tokens stay 0 because no upstream
+// work happened.
+func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.APIKey, publicModel, errorCode string, statusCode int, started time.Time) {
+	finished := time.Now().UTC()
+	latencyMs := int32(finished.Sub(started).Milliseconds())
+	apiKeyID := apiKey.ID
+	ec := errorCode
+
+	entry := store.UsageLedgerEntry{
+		ID:              uuid.New(),
+		RequestID:       uuid.New().String(),
+		GenfityUserID:   apiKey.GenfityUserID,
+		GenfityTenantID: apiKey.GenfityTenantID,
+		APIKeyID:        &apiKeyID,
+		PublicModel:     publicModel,
+		Status:          "failed",
+		ErrorCode:       &ec,
+		LatencyMS:       &latencyMs,
+		StartedAt:       started,
+		FinishedAt:      &finished,
+		InputCost:       "0",
+		OutputCost:      "0",
+		TotalCost:       "0",
+	}
+	if _, err := h.usage.Record(ctx, entry); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("error_code", errorCode).Msg("failed to record failed-request usage entry")
+	}
+	_ = statusCode
+}
+
 func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int64) {
+	// Some upstreams (e.g. step-3.5-flash) return a single full JSON
+	// document followed by an SSE-style "data: [DONE]" terminator. The
+	// strict json.Unmarshal rejects this because of the trailing bytes.
+	// json.Decoder.Decode parses the first JSON value and ignores the
+	// rest, so we use it as the primary path and only fall back to the
+	// chunked-SSE parser when the body is genuinely an event stream.
+	dec := json.NewDecoder(bytes.NewReader(body))
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err == nil {
+	if err := dec.Decode(&payload); err == nil {
 		prompt, completion, total = parseUsageFromPayload(payload)
 		if prompt != 0 || completion != 0 || total != 0 {
 			return prompt, completion, total
@@ -476,6 +520,7 @@ type usageSettlement struct {
 	TotalCostUSD     float64
 	Success          bool
 	ErrorCode        string
+	RequestID        string
 }
 
 func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenReservationEstimate {
@@ -780,7 +825,41 @@ func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey st
 		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true)
 		return err
 	}
-	return h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, true)
+	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, true)
+
+	// Push the debit to genfity-app so User.aiGatewayCreditBalance and
+	// the AiGatewayCreditLedger stay in sync. Fire-and-forget — failures
+	// do not affect the request response. We only call this when the
+	// request actually succeeded AND a paid billing schema settled it
+	// (free models / unlimited cover are no-ops for the customer
+	// balance).
+	if settlement.Success && h.callback != nil && h.callback.Enabled() {
+		switch reservation.BillingMode {
+		case "credit_package":
+			if reservation.RequestCredits > 0 {
+				h.callback.PostUsageDebitAsync(service.UsageDebitPayload{
+					UserID:        apiKey.GenfityUserID,
+					RequestID:     settlement.RequestID,
+					BillingMode:   "credit_package",
+					AmountCredits: reservation.RequestCredits,
+					Model:         publicModel,
+					Notes:         "gateway debit",
+				})
+			}
+		case "payg_topup":
+			if settlement.TotalCostUSD > 0 {
+				h.callback.PostUsageDebitAsync(service.UsageDebitPayload{
+					UserID:      apiKey.GenfityUserID,
+					RequestID:   settlement.RequestID,
+					BillingMode: "payg_topup",
+					AmountUSD:   settlement.TotalCostUSD,
+					Model:       publicModel,
+					Notes:       "gateway debit",
+				})
+			}
+		}
+	}
+	return finalizeErr
 }
 
 func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response) []byte {
@@ -1033,21 +1112,26 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	var payload map[string]any
 	if err := decodeRuntimePayload(w, r, &payload); err != nil {
+		h.recordFailedRequest(ctx, apiKey, "", "invalid_json", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
 	publicModel, ok := payload["model"].(string)
 	if !ok || publicModel == "" {
+		h.recordFailedRequest(ctx, apiKey, "", "missing_model", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "missing_model")
 		return
 	}
 
 	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
-		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
+		ec := mapSubscriptionError(ctx, err)
+		h.recordFailedRequest(ctx, apiKey, publicModel, ec, http.StatusPaymentRequired, started)
+		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
 	if !entitlementAllowsModel(subscription, publicModel) {
+		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1056,12 +1140,14 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
+		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_allowed", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "model_not_allowed")
 		return
 	}
 
 	if h.rateLimit != nil && limits.HasRPM() {
 		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
@@ -1072,6 +1158,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		var acquireErr error
 		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, accountID, limits.ConcurrentLimit)
 		if acquireErr != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
@@ -1080,6 +1167,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	reservation, statusCode, errorCode := h.reserveRuntimeLimits(ctx, apiKey, subscription, limits, payload, model)
 	if statusCode != 0 {
+		h.recordFailedRequest(ctx, apiKey, publicModel, errorCode, statusCode, started)
 		respondError(w, statusCode, errorCode)
 		return
 	}
@@ -1274,21 +1362,26 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	var payload map[string]any
 	if err := decodeRuntimePayload(w, r, &payload); err != nil {
+		h.recordFailedRequest(ctx, apiKey, "", "invalid_json", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
 	publicModel, ok := payload["model"].(string)
 	if !ok || publicModel == "" {
+		h.recordFailedRequest(ctx, apiKey, "", "missing_model", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "missing_model")
 		return
 	}
 
 	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
-		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
+		ec := mapSubscriptionError(ctx, err)
+		h.recordFailedRequest(ctx, apiKey, publicModel, ec, http.StatusPaymentRequired, started)
+		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
 	if !entitlementAllowsModel(subscription, publicModel) {
+		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1297,12 +1390,14 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
+		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_allowed", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "model_not_allowed")
 		return
 	}
 
 	if h.rateLimit != nil && limits.HasRPM() {
 		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
@@ -1313,6 +1408,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		var acquireErr error
 		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, accountID, limits.ConcurrentLimit)
 		if acquireErr != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
@@ -1321,6 +1417,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	reservation, statusCode, errorCode := h.reserveRuntimeLimits(ctx, apiKey, subscription, limits, payload, model)
 	if statusCode != 0 {
+		h.recordFailedRequest(ctx, apiKey, publicModel, errorCode, statusCode, started)
 		respondError(w, statusCode, errorCode)
 		return
 	}
@@ -1631,6 +1728,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		TotalCostUSD:     totalCostUsd,
 		Success:          success,
 		ErrorCode:        bodyErrorCode,
+		RequestID:        entry.RequestID,
 	}, nil
 }
 

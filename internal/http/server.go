@@ -36,10 +36,17 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 
 	cliProxyClient := router.NewCLIProxyClient(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 
+	// Callback to genfity-app so per-request debits propagate to the
+	// customer-facing User.aiGatewayCreditBalance + AiGatewayCreditLedger.
+	// Without this, the customer dashboard would show a stale pre-debit
+	// balance because the gateway only debits its own copy in
+	// customer_entitlements.credit_balance.
+	genfityCallback := service.NewGenfityCallback(cfg.GenfityAppURL, cfg.GenfityInternalSecret, logger)
+
 	// NOTE: virtual combos previously lived here — they moved to CLIProxyAPI
 	// in 2026-05 (see PRD §3.3). The gateway now forwards the request body
 	// as-is; combo resolution and fallback happen upstream.
-	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, routers, cliProxyClient, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, routers, cliProxyClient, genfityCallback, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers, usage)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)

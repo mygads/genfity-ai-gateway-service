@@ -18,6 +18,7 @@ type Config struct {
 	GenfityAuthJWKSURL    string
 	GenfityJWTSecret      string
 	GenfityInternalSecret string
+	GenfityAppURL         string
 
 	AIRouterCore2InternalURL string
 	AIRouterCore2PublicURL   string
@@ -46,6 +47,7 @@ func Load() Config {
 		GenfityAuthJWKSURL:    getEnv("GENFITY_AUTH_JWKS_URL", ""),
 		GenfityJWTSecret:      getEnv("GENFITY_JWT_SECRET", getEnv("JWT_SECRET", "")),
 		GenfityInternalSecret: getEnv("GENFITY_INTERNAL_SECRET", ""),
+		GenfityAppURL:         getEnv("GENFITY_APP_URL", ""),
 
 		AIRouterCore2InternalURL: getEnv("AI_ROUTER_CORE2_INTERNAL_URL", "http://localhost:8317"),
 		AIRouterCore2PublicURL:   getEnv("AI_ROUTER_CORE2_PUBLIC_URL", ""),
