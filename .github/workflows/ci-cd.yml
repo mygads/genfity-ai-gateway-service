@@ -164,29 +164,18 @@ jobs:
         run: |
           echo "🚀 Deploying with docker compose..."
 
-          ssh $VPS_USER@$VPS_HOST << ENDSSH
-            cd ~/genfity/genfity-ai-gateway
-
-            # Force pull latest changes (override local, no conflicts)
-            git remote set-url origin https://x-access-token:${GHCR_TOKEN}@github.com/${{ github.repository }}.git
-            git fetch origin main
-            git reset --hard origin/main
-            git remote set-url origin https://github.com/${{ github.repository }}.git
-
-            # Login to GHCR
-            echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u mygads --password-stdin
-
-            # Pull and recreate
-            export IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:latest
-            sudo -E docker compose pull
-            sudo -E docker compose up -d --force-recreate
-
-            # Cleanup old images
-            echo "🧹 Cleaning up..."
-            sudo docker image prune -af --filter "until=24h" 2>/dev/null || true
-
-            echo "✅ Deployment complete!"
-          ENDSSH
+          ssh $VPS_USER@$VPS_HOST "set -e && cd ~/genfity/genfity-ai-gateway && \
+            git remote set-url origin https://x-access-token:${GHCR_TOKEN}@github.com/${{ github.repository }}.git && \
+            git fetch origin main && \
+            git reset --hard origin/main && \
+            git remote set-url origin https://github.com/${{ github.repository }}.git && \
+            echo '${GHCR_TOKEN}' | sudo docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin && \
+            export IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:latest && \
+            sudo -E docker compose pull && \
+            sudo -E docker compose up -d --force-recreate && \
+            echo '🧹 Cleaning up...' && \
+            sudo docker image prune -af --filter 'until=24h' 2>/dev/null || true && \
+            echo '✅ Deployment complete!'"
 
       - name: Health Check
         env:
@@ -196,21 +185,18 @@ jobs:
           echo "🏥 Running health check..."
           sleep 20
 
-          ssh $VPS_USER@$VPS_HOST << 'ENDSSH'
-            for i in {1..5}; do
-              if curl -sf http://localhost:8094/health > /dev/null 2>&1; then
-                echo "✅ Health check passed!"
-                sudo docker ps | grep genfity-ai-gateway
-                exit 0
-              fi
-              echo "Attempt $i failed, retrying..."
-              sleep 5
-            done
-
-            echo "❌ Health check failed!"
-            sudo docker logs genfity-ai-gateway --tail 50
-            exit 1
-          ENDSSH
+          ssh $VPS_USER@$VPS_HOST 'for i in 1 2 3 4 5; do \
+            if curl -sf http://localhost:8094/health > /dev/null 2>&1; then \
+              echo "✅ Health check passed!"; \
+              sudo docker ps | grep genfity-ai-gateway; \
+              exit 0; \
+            fi; \
+            echo "Attempt $i failed, retrying..."; \
+            sleep 5; \
+          done; \
+          echo "❌ Health check failed!"; \
+          sudo docker logs genfity-ai-gateway --tail 50; \
+          exit 1'
 
       - name: Generate summary
         if: success()
@@ -242,8 +228,6 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
-          ssh $VPS_USER@$VPS_HOST << 'ENDSSH'
-            echo "🧹 Running scheduled cleanup..."
-            sudo docker system prune -f --filter "until=24h"
-            echo "✅ Cleanup complete!"
-          ENDSSH
+          ssh $VPS_USER@$VPS_HOST 'echo "🧹 Running scheduled cleanup..." && \
+            sudo docker system prune -f --filter "until=24h" && \
+            echo "✅ Cleanup complete!"'
