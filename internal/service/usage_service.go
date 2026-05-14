@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"genfity-ai-gateway-service/internal/store"
@@ -133,4 +134,8 @@ func (s *UsageService) ListAll(ctx context.Context, limit int) []store.UsageLedg
 
 func (s *UsageService) SummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow {
 	return s.store.ListUsageSummaryGrouped(ctx, since)
+}
+
+func (s *UsageService) ListByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
+	return s.store.ListUsageByAPIKey(ctx, apiKeyID, limit)
 }

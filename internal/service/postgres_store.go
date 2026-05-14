@@ -1025,6 +1025,13 @@ func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.
 	return items
 }
 
+func (s *PostgresStore) ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
+	if limit <= 0 {
+		limit = 100
+	}
+	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger WHERE api_key_id = $1 ORDER BY started_at DESC LIMIT $2`, apiKeyID, limit)
+}
+
 func (s *PostgresStore) ListUsageByUser(ctx context.Context, userID string) []store.UsageLedgerEntry {
 	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger WHERE genfity_user_id = $1 ORDER BY started_at DESC`, userID)
 }

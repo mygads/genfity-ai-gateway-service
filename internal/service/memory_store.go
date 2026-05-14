@@ -1035,6 +1035,21 @@ func (s *MemoryStore) ListUsageSummaryGrouped(_ context.Context, _ time.Time) []
 	return nil
 }
 
+func (s *MemoryStore) ListUsageByAPIKey(_ context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := []store.UsageLedgerEntry{}
+	for _, item := range s.usage {
+		if item.APIKeyID != nil && *item.APIKeyID == apiKeyID {
+			items = append(items, item)
+			if limit > 0 && len(items) >= limit {
+				break
+			}
+		}
+	}
+	return items
+}
+
 func (s *MemoryStore) ListUsageByUser(_ context.Context, userID string) []store.UsageLedgerEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

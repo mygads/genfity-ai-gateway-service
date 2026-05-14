@@ -187,3 +187,26 @@ func (h *CustomerHandler) RegenerateAPIKey(w http.ResponseWriter, r *http.Reques
 		"raw_key": created.RawKey,
 	})
 }
+
+func (h *CustomerHandler) APIKeyLogs(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_api_key_id")
+		return
+	}
+	user := middleware.GetAuthUser(r.Context())
+	keys := h.apiKeys.ListByUser(r.Context(), user.ID)
+	owned := false
+	for _, k := range keys {
+		if k.ID == id {
+			owned = true
+			break
+		}
+	}
+	if !owned {
+		respondError(w, http.StatusNotFound, "api_key_not_found")
+		return
+	}
+	logs := h.usage.ListByAPIKey(r.Context(), id, 100)
+	respondJSON(w, http.StatusOK, map[string]any{"logs": logs})
+}

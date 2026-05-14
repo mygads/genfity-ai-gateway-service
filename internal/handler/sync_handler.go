@@ -80,6 +80,20 @@ func (h *SyncHandler) SyncModelCreditCosts(w http.ResponseWriter, r *http.Reques
 	respondJSON(w, http.StatusOK, map[string]any{"synced": count})
 }
 
+func (h *SyncHandler) SyncModels(w http.ResponseWriter, r *http.Request) {
+	var payload []service.ModelSyncItem
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	count, err := h.sync.SyncModels(r.Context(), payload)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"synced": count})
+}
+
 func (h *SyncHandler) SyncPaygTopupRates(w http.ResponseWriter, r *http.Request) {
 	var payload []store.PaygTopupRate
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {

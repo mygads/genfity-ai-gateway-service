@@ -94,6 +94,7 @@ type Store interface {
 	ListUsageByTenant(context.Context, string) []store.UsageLedgerEntry
 	ListAllUsage(ctx context.Context, limit int) []store.UsageLedgerEntry
 	ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow
+	ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry
 	SumUsageTokensByUserSince(context.Context, string, time.Time) int64
 	IncrementQuotaCounter(context.Context, string, *string, time.Time, time.Time, int64) error
 	DebitCreditBalance(context.Context, string, string, float64) error
