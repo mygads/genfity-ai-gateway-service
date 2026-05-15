@@ -60,6 +60,7 @@ Didesain untuk berintegrasi penuh dengan `genfity-app` sebagai Frontend / Master
 - `POST /internal/sync/subscription-plans`
 - `POST /internal/sync/customer-entitlements`
 - `POST /internal/sync/customer-balance`
+- `POST /internal/sync/replay-usage-debits` — idempotent replay dari usage ledger gateway ke ledger genfity-app untuk memperbaiki saldo lama saat callback sempat mati.
 - `GET /internal/export/plans`
 - `GET /internal/export/models`
 - `GET /internal/export/model-prices`
@@ -74,6 +75,7 @@ REDIS_URL=redis://localhost:6379/3
 REDIS_PREFIX=ai-gateway:prod
 GENFITY_JWT_SECRET=<jwt-secret>
 GENFITY_INTERNAL_SECRET=<shared-internal-secret>
+GENFITY_APP_URL=http://genfity-app:3000
 AI_ROUTER_CORE2_INTERNAL_URL=http://ai-core2-cliproxy:8317
 AI_ROUTER_CORE2_API_KEY=
 API_KEY_PEPPER=<secret>

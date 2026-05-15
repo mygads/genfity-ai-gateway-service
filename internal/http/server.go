@@ -42,6 +42,9 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	// balance because the gateway only debits its own copy in
 	// customer_entitlements.credit_balance.
 	genfityCallback := service.NewGenfityCallback(cfg.GenfityAppURL, cfg.GenfityInternalSecret, logger)
+	if !genfityCallback.Enabled() {
+		logger.Warn().Msg("genfity usage debit callback disabled; customer balances in genfity-app will not update")
+	}
 
 	// NOTE: virtual combos previously lived here — they moved to CLIProxyAPI
 	// in 2026-05 (see PRD §3.3). The gateway now forwards the request body
@@ -50,7 +53,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers, usage)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-	syncHandler := handler.NewSyncHandler(syncService)
+	syncHandler := handler.NewSyncHandler(syncService, genfityCallback)
 	healthHandler := handler.NewHealthHandler(syncService)
 
 	authMiddleware := mw.NewAuthMiddleware(&cfg)
@@ -132,6 +135,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Post("/sync/subscription-plans", syncHandler.SyncSubscriptionPlans)
 		r.Post("/sync/customer-entitlements", syncHandler.SyncCustomerEntitlements)
 		r.Post("/sync/customer-balance", syncHandler.SyncCustomerBalance)
+		r.Post("/sync/replay-usage-debits", syncHandler.ReplayUsageDebits)
 		r.Post("/sync/model-credit-costs", syncHandler.SyncModelCreditCosts)
 		r.Post("/sync/models", syncHandler.SyncModels)
 		r.Post("/sync/payg-topup-rates", syncHandler.SyncPaygTopupRates)

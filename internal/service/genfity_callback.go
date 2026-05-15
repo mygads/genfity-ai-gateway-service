@@ -34,6 +34,8 @@ type GenfityCallback struct {
 	log     zerolog.Logger
 }
 
+const usageDebitCallbackAttempts = 3
+
 func NewGenfityCallback(baseURL, secret string, logger zerolog.Logger) *GenfityCallback {
 	return &GenfityCallback{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -98,10 +100,20 @@ func (c *GenfityCallback) PostUsageDebitAsync(payload UsageDebitPayload) {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := c.PostUsageDebit(ctx, payload); err != nil {
-			c.log.Warn().Err(err).Str("user_id", payload.UserID).Str("request_id", payload.RequestID).Msg("usage debit callback failed")
+		var lastErr error
+		for attempt := 1; attempt <= usageDebitCallbackAttempts; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			lastErr = c.PostUsageDebit(ctx, payload)
+			cancel()
+			if lastErr == nil {
+				return
+			}
+			if attempt < usageDebitCallbackAttempts {
+				time.Sleep(time.Duration(attempt) * time.Second)
+			}
+		}
+		if lastErr != nil {
+			c.log.Warn().Err(lastErr).Str("user_id", payload.UserID).Str("request_id", payload.RequestID).Msg("usage debit callback failed")
 		}
 	}()
 }

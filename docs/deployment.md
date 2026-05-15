@@ -36,11 +36,18 @@ Public routing:
 - `https://ai-core2.genfity.com` -> CLIProxyAPI dashboard/core if admin access is needed
 
 Runtime gateway must call CLIProxyAPI by internal Docker hostname, not public DNS.
+The gateway must also call genfity-app by an internal URL for settled usage
+debits, otherwise customer credit balances in genfity-app stay stale:
+
+```env
+GENFITY_APP_URL=http://genfity-app:3000
+```
 
 ## Required secrets
 
 - `GENFITY_JWT_SECRET`
 - `GENFITY_INTERNAL_SECRET`
+- `GENFITY_APP_URL`
 - `API_KEY_PEPPER`
 - `AI_ROUTER_CORE2_API_KEY` if CLIProxyAPI requires API key
 
@@ -50,6 +57,10 @@ Runtime gateway must call CLIProxyAPI by internal Docker hostname, not public DN
 - `GET /v1/models`
 - `POST /customer/api-keys` with Genfity JWT
 - `POST /v1/chat/completions` with generated runtime key
+- Optional backfill after fixing `GENFITY_APP_URL`:
+  `POST /internal/sync/replay-usage-debits?dry_run=true&limit=500`, then
+  rerun with `dry_run=false`. Add `user_id=<id>` and/or `since=<RFC3339>`
+  to narrow the replay. The genfity-app ledger is idempotent by request ID.
 - invalid key returns 401
 - inactive subscription returns 402
 - rate limited request returns 429

@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
+	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -59,6 +62,137 @@ func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []st
 func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, balance string) error {
 	_, err := s.store.UpsertBalanceSnapshot(ctx, userID, balance)
 	return err
+}
+
+type ReplayUsageDebitsInput struct {
+	UserID string
+	Since  time.Time
+	Limit  int
+	DryRun bool
+}
+
+type ReplayUsageDebitError struct {
+	RequestID string `json:"request_id"`
+	UserID    string `json:"user_id"`
+	Error     string `json:"error"`
+}
+
+type ReplayUsageDebitsResult struct {
+	Scanned  int                     `json:"scanned"`
+	Replayed int                     `json:"replayed"`
+	Skipped  int                     `json:"skipped"`
+	Failed   int                     `json:"failed"`
+	DryRun   bool                    `json:"dry_run"`
+	Errors   []ReplayUsageDebitError `json:"errors,omitempty"`
+}
+
+func (s *SyncService) ReplayUsageDebits(ctx context.Context, callback *GenfityCallback, input ReplayUsageDebitsInput) (ReplayUsageDebitsResult, error) {
+	result := ReplayUsageDebitsResult{DryRun: input.DryRun}
+	if callback == nil || !callback.Enabled() {
+		return result, errors.New("genfity_callback_disabled")
+	}
+
+	limit := input.Limit
+	if limit <= 0 {
+		limit = 500
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+
+	entries := s.replayUsageEntries(ctx, input.UserID, input.Since, limit)
+	for _, entry := range entries {
+		if result.Scanned >= limit {
+			break
+		}
+		if !input.Since.IsZero() && entry.StartedAt.Before(input.Since) {
+			continue
+		}
+		result.Scanned++
+
+		payload, ok := replayPayloadFromUsage(entry)
+		if !ok {
+			result.Skipped++
+			continue
+		}
+		if input.DryRun {
+			result.Replayed++
+			continue
+		}
+
+		if err := callback.PostUsageDebit(ctx, payload); err != nil {
+			result.Failed++
+			result.Errors = append(result.Errors, ReplayUsageDebitError{RequestID: entry.RequestID, UserID: entry.GenfityUserID, Error: err.Error()})
+			continue
+		}
+		result.Replayed++
+	}
+
+	return result, nil
+}
+
+func (s *SyncService) replayUsageEntries(ctx context.Context, userID string, since time.Time, limit int) []store.UsageLedgerEntry {
+	if userID != "" && !since.IsZero() {
+		return s.store.ListUsageByUserSince(ctx, userID, since)
+	}
+	if userID != "" {
+		return s.store.ListUsageByUser(ctx, userID)
+	}
+	return s.store.ListAllUsage(ctx, limit)
+}
+
+func replayPayloadFromUsage(entry store.UsageLedgerEntry) (UsageDebitPayload, bool) {
+	if entry.Status != "success" || entry.BillingMode == nil || entry.RequestID == "" || entry.GenfityUserID == "" {
+		return UsageDebitPayload{}, false
+	}
+
+	switch *entry.BillingMode {
+	case "credit_package":
+		amount, ok := parseUsageAmount(entry.AmountCredits)
+		if !ok || amount <= 0 {
+			return UsageDebitPayload{}, false
+		}
+		return UsageDebitPayload{
+			UserID:        entry.GenfityUserID,
+			RequestID:     entry.RequestID,
+			BillingMode:   "credit_package",
+			AmountCredits: amount,
+			Model:         entry.PublicModel,
+			Notes:         "gateway debit replay",
+		}, true
+	case "payg_topup":
+		amount, ok := parseUsageAmount(&entry.TotalCost)
+		if !ok || amount <= 0 {
+			return UsageDebitPayload{}, false
+		}
+		return UsageDebitPayload{
+			UserID:      entry.GenfityUserID,
+			RequestID:   entry.RequestID,
+			BillingMode: "payg_topup",
+			AmountUSD:   amount,
+			Model:       entry.PublicModel,
+			Notes:       "gateway debit replay",
+		}, true
+	default:
+		return UsageDebitPayload{}, false
+	}
+}
+
+func parseUsageAmount(value *string) (float64, bool) {
+	if value == nil || *value == "" {
+		return 0, false
+	}
+	amount, err := strconv.ParseFloat(*value, 64)
+	if err != nil {
+		return 0, false
+	}
+	if amount < 0 {
+		return 0, false
+	}
+	if amount > 1_000_000 || math.IsNaN(amount) || math.IsInf(amount, 0) {
+		return 0, false
+	}
+	return amount, true
 }
 
 // SyncModelCreditCosts upserts each incoming row by FullModelID. Missing

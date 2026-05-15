@@ -77,6 +77,7 @@ func (c Config) validate() {
 	requireConfig("DATABASE_URL", c.DatabaseURL)
 	requireConfig("REDIS_URL", c.RedisURL)
 	requireConfig("GENFITY_INTERNAL_SECRET", c.GenfityInternalSecret)
+	requireConfig("GENFITY_APP_URL", c.GenfityAppURL)
 	requireConfig("API_KEY_PEPPER", c.APIKeyPepper)
 	requireConfig("ENCRYPTION_KEY", c.EncryptionKey)
 	requireConfig("AI_ROUTER_CORE2_API_KEY", c.AIRouterCore2APIKey)

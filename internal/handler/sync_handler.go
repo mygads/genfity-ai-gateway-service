@@ -3,13 +3,16 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"time"
 
 	"genfity-ai-gateway-service/internal/service"
 	"genfity-ai-gateway-service/internal/store"
 )
 
 type SyncHandler struct {
-	sync *service.SyncService
+	sync     *service.SyncService
+	callback *service.GenfityCallback
 }
 
 type balanceSyncPayload struct {
@@ -17,8 +20,8 @@ type balanceSyncPayload struct {
 	Balance string `json:"balance"`
 }
 
-func NewSyncHandler(sync *service.SyncService) *SyncHandler {
-	return &SyncHandler{sync: sync}
+func NewSyncHandler(sync *service.SyncService, callback *service.GenfityCallback) *SyncHandler {
+	return &SyncHandler{sync: sync, callback: callback}
 }
 
 func (h *SyncHandler) SyncSubscriptionPlans(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +67,40 @@ func (h *SyncHandler) SyncCustomerBalance(w http.ResponseWriter, r *http.Request
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func (h *SyncHandler) ReplayUsageDebits(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	var since time.Time
+	if raw := query.Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "invalid_since")
+			return
+		}
+		since = parsed
+	}
+	limit := 500
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			respondError(w, http.StatusBadRequest, "invalid_limit")
+			return
+		}
+		limit = parsed
+	}
+
+	result, err := h.sync.ReplayUsageDebits(r.Context(), h.callback, service.ReplayUsageDebitsInput{
+		UserID: query.Get("user_id"),
+		Since:  since,
+		Limit:  limit,
+		DryRun: query.Get("dry_run") == "true",
+	})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
 }
 
 func (h *SyncHandler) SyncModelCreditCosts(w http.ResponseWriter, r *http.Request) {
