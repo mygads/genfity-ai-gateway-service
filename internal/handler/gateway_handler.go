@@ -673,23 +673,23 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
 				}
 				credits := parseFloatPtr(&cost.CreditsPerReq)
-				if credits > 0 {
-					if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
-						if errors.Is(err, service.ErrInsufficientBalance) {
-							if source == "credit" {
-								return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
-							}
-							// Fall through to PAYG — user may have credits
-							// exhausted but still carry a PAYG balance.
-						} else {
-							return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
+				if credits <= 0 {
+					// credits_per_req=0 without is_free=true: treat as free
+					// rather than silently falling through to PAYG.
+					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
+				}
+				if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
+					if errors.Is(err, service.ErrInsufficientBalance) {
+						if source == "credit" {
+							return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
 						}
+						// Fall through to PAYG — user may have credits
+						// exhausted but still carry a PAYG balance.
 					} else {
-						return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+						return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
 					}
-				} else if source == "credit" {
-					// Pinned to credit but no credit cost configured.
-					return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
+				} else {
+					return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
 				}
 			} else if source == "credit" {
 				return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
