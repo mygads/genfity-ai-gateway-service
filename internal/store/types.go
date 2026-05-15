@@ -41,6 +41,7 @@ type APIKey struct {
 	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
+	RegeneratedAt   *time.Time `json:"regenerated_at,omitempty"`
 	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
 }
 

@@ -129,6 +129,7 @@ func (s *APIKeyService) Regenerate(ctx context.Context, id uuid.UUID, userID str
 		return nil, fmt.Errorf("generate api key: %w", err)
 	}
 	hash := s.hash(raw)
+	now := time.Now().UTC()
 	updated := store.APIKey{
 		ID:              existing.ID,
 		GenfityUserID:   existing.GenfityUserID,
@@ -140,6 +141,7 @@ func (s *APIKeyService) Regenerate(ctx context.Context, id uuid.UUID, userID str
 		BillingSource:   existing.BillingSource,
 		ExpiresAt:       existing.ExpiresAt,
 		CreatedAt:       existing.CreatedAt,
+		RegeneratedAt:   &now,
 	}
 	saved, err := s.store.UpsertAPIKey(ctx, updated)
 	if err != nil {

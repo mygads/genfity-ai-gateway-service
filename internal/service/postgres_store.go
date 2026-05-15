@@ -88,21 +88,23 @@ func (s *PostgresStore) GetPlanByCode(ctx context.Context, planCode string) (*st
 
 func (s *PostgresStore) UpsertAPIKey(ctx context.Context, item store.APIKey) (store.APIKey, error) {
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO ai_gateway.api_keys (id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, revoked_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		INSERT INTO ai_gateway.api_keys (id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, regenerated_at, revoked_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
+			key_prefix = EXCLUDED.key_prefix,
 			key_hash = EXCLUDED.key_hash,
 			status = EXCLUDED.status,
 			billing_source = EXCLUDED.billing_source,
 			last_used_at = EXCLUDED.last_used_at,
 			expires_at = EXCLUDED.expires_at,
+			regenerated_at = EXCLUDED.regenerated_at,
 			revoked_at = EXCLUDED.revoked_at
-		RETURNING id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, revoked_at`,
+		RETURNING id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, regenerated_at, revoked_at`,
 		nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.Name, item.KeyPrefix, item.KeyHash,
 		defaultString(item.Status, "active"), defaultString(item.BillingSource, "auto"),
-		item.LastUsedAt, item.ExpiresAt, defaultTime(item.CreatedAt), item.RevokedAt,
-	).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RevokedAt)
+		item.LastUsedAt, item.ExpiresAt, defaultTime(item.CreatedAt), item.RegeneratedAt, item.RevokedAt,
+	).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RegeneratedAt, &item.RevokedAt)
 	if err != nil {
 		return store.APIKey{}, err
 	}
@@ -110,7 +112,7 @@ func (s *PostgresStore) UpsertAPIKey(ctx context.Context, item store.APIKey) (st
 }
 
 func (s *PostgresStore) ListAPIKeysByUser(ctx context.Context, userID string) []store.APIKey {
-	rows, err := s.pool.Query(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, revoked_at FROM ai_gateway.api_keys WHERE genfity_user_id = $1 ORDER BY created_at DESC`, userID)
+	rows, err := s.pool.Query(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, regenerated_at, revoked_at FROM ai_gateway.api_keys WHERE genfity_user_id = $1 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil
 	}
@@ -127,7 +129,7 @@ func (s *PostgresStore) ListAPIKeysByUser(ctx context.Context, userID string) []
 
 func (s *PostgresStore) FindAPIKeyByPrefix(ctx context.Context, prefix string) (*store.APIKey, error) {
 	var item store.APIKey
-	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, revoked_at FROM ai_gateway.api_keys WHERE key_prefix = $1 LIMIT 1`, prefix).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RevokedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, regenerated_at, revoked_at FROM ai_gateway.api_keys WHERE key_prefix = $1 LIMIT 1`, prefix).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RegeneratedAt, &item.RevokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -474,7 +476,7 @@ func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string)
 	err := s.pool.QueryRow(ctx, `
 		SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status,
 			period_start, period_end, quota_tokens_monthly,
-			balance_snapshot::text, balance_reserved::text,
+			balance_snapshot::text,
 			credit_balance::text, credit_balance_reserved::text, credit_expires_at,
 			payg_usd_balance::text, payg_usd_balance_reserved::text,
 			pricing_group, metadata, updated_from_genfity_at
@@ -490,7 +492,7 @@ func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string)
 		LIMIT 1`, userID).Scan(
 		&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
 		&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly,
-		&item.BalanceSnapshot, &item.BalanceReserved,
+		&item.BalanceSnapshot,
 		&item.CreditBalance, &item.CreditBalanceReserved, &item.CreditExpiresAt,
 		&item.PaygUsdBalance, &item.PaygUsdBalanceReserved,
 		&item.PricingGroup, &metadata, &item.UpdatedFromGenfityAt,
@@ -1084,7 +1086,7 @@ func (s *PostgresStore) listUsage(ctx context.Context, sql string, args ...any) 
 }
 
 func scanAPIKey(row pgx.Row, item *store.APIKey) error {
-	return row.Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RevokedAt)
+	return row.Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RegeneratedAt, &item.RevokedAt)
 }
 
 func scanModel(row pgx.Row, item *store.AIModel) error {
