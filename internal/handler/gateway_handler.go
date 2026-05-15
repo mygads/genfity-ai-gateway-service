@@ -228,22 +228,17 @@ func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.A
 	_ = statusCode
 }
 
-func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int64) {
-	// Some upstreams (e.g. step-3.5-flash) return a single full JSON
-	// document followed by an SSE-style "data: [DONE]" terminator. The
-	// strict json.Unmarshal rejects this because of the trailing bytes.
-	// json.Decoder.Decode parses the first JSON value and ignores the
-	// rest, so we use it as the primary path and only fall back to the
-	// chunked-SSE parser when the body is genuinely an event stream.
+func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int64, cached int64, reasoning int64) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var payload map[string]any
 	if err := dec.Decode(&payload); err == nil {
-		prompt, completion, total = parseUsageFromPayload(payload)
+		prompt, completion, total, cached, reasoning = parseUsageFromPayload(payload)
 		if prompt != 0 || completion != 0 || total != 0 {
-			return prompt, completion, total
+			return prompt, completion, total, cached, reasoning
 		}
 	}
-	return parseUsageFromSSEBody(body)
+	p, c, t := parseUsageFromSSEBody(body)
+	return p, c, t, 0, 0
 }
 
 // detectProviderErrorFromBody inspects an upstream response body (JSON or SSE)
@@ -319,7 +314,7 @@ func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total i
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			return
 		}
-		p, c, t := parseUsageFromPayload(payload)
+		p, c, t, _, _ := parseUsageFromPayload(payload)
 		if p != 0 {
 			prompt = p
 		}
@@ -351,7 +346,7 @@ func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total i
 	return prompt, completion, total
 }
 
-func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int64, total int64) {
+func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int64, total int64, cached int64, reasoning int64) {
 	usage, ok := payload["usage"].(map[string]any)
 	if !ok {
 		if message, ok := payload["message"].(map[string]any); ok {
@@ -359,8 +354,9 @@ func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int
 		}
 	}
 	if usage == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
+
 	prompt = anyToInt64(usage["prompt_tokens"])
 	completion = anyToInt64(usage["completion_tokens"])
 	total = anyToInt64(usage["total_tokens"])
@@ -373,7 +369,44 @@ func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int
 	if total == 0 {
 		total = prompt + completion
 	}
-	return prompt, completion, total
+
+	reasoning = anyToInt64(usage["reasoning_tokens"])
+	if reasoning == 0 {
+		if details, ok := usage["completion_tokens_details"].(map[string]any); ok {
+			reasoning = anyToInt64(details["reasoning_tokens"])
+		}
+	}
+	if reasoning == 0 {
+		if details, ok := usage["output_tokens_details"].(map[string]any); ok {
+			reasoning = anyToInt64(details["reasoning_tokens"])
+		}
+	}
+
+	cached = anyToInt64(usage["cached_tokens"])
+	cacheRead := anyToInt64(usage["cache_read_tokens"])
+	cacheCreation := anyToInt64(usage["cache_creation_tokens"])
+	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+		if cacheRead == 0 {
+			cacheRead = anyToInt64(details["cached_tokens"])
+		}
+		if cacheRead == 0 {
+			cacheRead = anyToInt64(details["cache_read_tokens"])
+		}
+		if cacheRead == 0 {
+			cacheRead = anyToInt64(details["cache_read_input_tokens"])
+		}
+		if cacheCreation == 0 {
+			cacheCreation = anyToInt64(details["cache_creation_tokens"])
+		}
+		if cacheCreation == 0 {
+			cacheCreation = anyToInt64(details["cache_creation_input_tokens"])
+		}
+	}
+	if cached == 0 {
+		cached = cacheRead + cacheCreation
+	}
+
+	return prompt, completion, total, cached, reasoning
 }
 
 func anyToInt64(v any) int64 {
@@ -1647,7 +1680,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	finished := time.Now().UTC()
 	latencyMs := finished.Sub(started).Milliseconds()
 
-	promptTokens, completionTokens, totalTokens := parseUsageFromBody(body)
+	promptTokens, completionTokens, totalTokens, cachedTokens, reasoningTokens := parseUsageFromBody(body)
 
 	prices := h.models.ListPrices(ctx)
 	price := modelPrice(prices, model.ID)
@@ -1775,6 +1808,8 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		PromptTokens:        promptTokens,
 		CompletionTokens:    completionTokens,
 		TotalTokens:         totalTokens,
+		CachedTokens:        cachedTokens,
+		ReasoningTokens:     reasoningTokens,
 		InputCost:           inCost,
 		OutputCost:          outCost,
 		TotalCost:           totCost,
