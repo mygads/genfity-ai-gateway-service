@@ -22,10 +22,17 @@ type Server struct {
 }
 
 func New(cfg config.Config, redisClient *redis.Client, store service.Store, logger zerolog.Logger) *Server {
-	apiKeys := service.NewAPIKeyService(store, cfg.APIKeyPepper, logger)
+	// Read-through Redis cache for hot-path api_key + entitlement reads.
+	// Disabled silently when Redis isn't configured (local dev / tests).
+	var hotCache *service.Cache
+	if redisClient != nil {
+		hotCache = service.NewCache(redisClient, cfg.RedisPrefix, logger)
+	}
+
+	apiKeys := service.NewAPIKeyService(store, cfg.APIKeyPepper, logger).WithCache(hotCache)
 	models := service.NewModelService(store, logger)
 	routers := service.NewRouterService(store, logger)
-	entitlements := service.NewEntitlementService(store, logger)
+	entitlements := service.NewEntitlementService(store, logger).WithCache(hotCache)
 	usage := service.NewUsageService(store, logger)
 	syncService := service.NewSyncService(store, entitlements, models, usage, logger)
 

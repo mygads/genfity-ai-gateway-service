@@ -134,6 +134,16 @@ func (s *MemoryStore) FindAPIKeyByPrefix(_ context.Context, prefix string) (*sto
 	return nil, ErrNotFound
 }
 
+func (s *MemoryStore) GetAPIKeyByID(_ context.Context, id uuid.UUID) (*store.APIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if item, ok := s.apiKeys[id]; ok {
+		copy := item
+		return &copy, nil
+	}
+	return nil, ErrNotFound
+}
+
 func (s *MemoryStore) RevokeAPIKey(_ context.Context, id uuid.UUID, at time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

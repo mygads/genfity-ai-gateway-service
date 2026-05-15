@@ -893,7 +893,51 @@ func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey st
 			}
 		}
 	}
+
+	// Bust entitlement cache so next request sees the new balance, not
+	// the pre-debit snapshot. Cheap (one Redis DEL); no need to wait.
+	if reservation.RequestCredits > 0 || reservation.PaygUSD > 0 || reservation.CreditUSD > 0 {
+		h.entitlements.InvalidateUser(ctx, apiKey.GenfityUserID)
+	}
 	return finalizeErr
+}
+
+// recordAndFinalizeAsync runs recordAndFinalizeRuntime in a detached
+// goroutine so the request hot path can return as soon as the upstream
+// response is forwarded. Uses context.WithoutCancel so the goroutine
+// survives request completion. Recovers from panics so a single bug
+// can't crash the server. Has its own 30s timeout.
+//
+// Trade-off: if the goroutine fails, the usage_ledger row + balance
+// debit are lost for that request. Acceptable because:
+//  1. Reservation already debited the balance optimistically; if finalize
+//     fails the only loss is per-row pricing accuracy, not the user's
+//     balance.
+//  2. Billing reconciliation cron can detect drift via aggregate sums.
+//
+// Streaming path still uses the sync version because the client-facing
+// response is already complete by the time we settle.
+func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 30*time.Second)
+	go func() {
+		defer cancel()
+		defer func() {
+			if r := recover(); r != nil {
+				zerolog.Ctx(parentCtx).Error().
+					Interface("panic", r).
+					Str("public_model", publicModel).
+					Str("api_key_id", apiKey.ID.String()).
+					Msg("async settlement panicked; reservation may be inconsistent")
+			}
+		}()
+		if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, statusCode, body, publicModel); err != nil {
+			zerolog.Ctx(parentCtx).Warn().
+				Err(err).
+				Str("public_model", publicModel).
+				Str("api_key_id", apiKey.ID.String()).
+				Msg("async settlement failed")
+		}
+	}()
 }
 
 func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response) []byte {
@@ -1550,12 +1594,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
-				respondError(w, http.StatusInternalServerError, "settlement_failed")
-				return
-			}
 			settled = true
 			h.writeUpstreamResponse(w, resp, body)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
 		}
 
@@ -1568,16 +1609,13 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	// All candidates exhausted, write the last known response.
 	if lastResp != nil {
 		effectiveRoute := route
-		if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, lastStatusCode, lastBody, publicModel); err != nil {
-			respondError(w, http.StatusInternalServerError, "settlement_failed")
-			return
-		}
 		settled = true
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
 		w.WriteHeader(lastStatusCode)
 		_, _ = w.Write(lastBody)
+		h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, lastStatusCode, lastBody, publicModel)
 		return
 	}
 

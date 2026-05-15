@@ -136,6 +136,15 @@ func (s *PostgresStore) FindAPIKeyByPrefix(ctx context.Context, prefix string) (
 	return &item, err
 }
 
+func (s *PostgresStore) GetAPIKeyByID(ctx context.Context, id uuid.UUID) (*store.APIKey, error) {
+	var item store.APIKey
+	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, regenerated_at, revoked_at FROM ai_gateway.api_keys WHERE id = $1 LIMIT 1`, id).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RegeneratedAt, &item.RevokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &item, err
+}
+
 func (s *PostgresStore) RevokeAPIKey(ctx context.Context, id uuid.UUID, revokedAt time.Time) error {
 	cmd, err := s.pool.Exec(ctx, `UPDATE ai_gateway.api_keys SET status = 'revoked', revoked_at = $2 WHERE id = $1`, id, revokedAt)
 	if err != nil {

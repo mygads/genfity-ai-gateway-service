@@ -20,6 +20,7 @@ import (
 type APIKeyService struct {
 	store  Store
 	pepper string
+	cache  *Cache
 	log    zerolog.Logger
 }
 
@@ -40,6 +41,21 @@ type CreatedAPIKey struct {
 func NewAPIKeyService(store Store, pepper string, logger zerolog.Logger) *APIKeyService {
 	return &APIKeyService{store: store, pepper: pepper, log: logger.With().Str("component", "api_key_service").Logger()}
 }
+
+// WithCache attaches a Redis cache to the service. Lookups by prefix
+// (the hot path on every authenticated request) consult the cache before
+// hitting Postgres; mutators (Create / Regenerate / UpdateStatus /
+// UpdateBillingSource / Revoke) bust the relevant entry. Cache TTL is
+// kept short (apiKeyCacheTTL) so revoked/rotated keys can't linger long.
+func (s *APIKeyService) WithCache(c *Cache) *APIKeyService {
+	s.cache = c
+	return s
+}
+
+const (
+	apiKeyCacheNamespace = "apikey"
+	apiKeyCacheTTL       = 30 * time.Second
+)
 
 func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*CreatedAPIKey, error) {
 	raw, prefix, err := generateRawAPIKey()
@@ -77,9 +93,23 @@ func (s *APIKeyService) Validate(ctx context.Context, rawKey string) (*store.API
 		return nil, ErrNotFound
 	}
 
-	record, err := s.store.FindAPIKeyByPrefix(ctx, prefix)
-	if err != nil {
-		return nil, err
+	// Read-through cache by key_prefix. Cache miss / disabled → fall back
+	// to DB. Mutators bust the entry by prefix.
+	var record *store.APIKey
+	if s.cache.Enabled() {
+		var cached store.APIKey
+		if err := s.cache.Get(ctx, apiKeyCacheNamespace, prefix, &cached); err == nil {
+			r := cached
+			record = &r
+		}
+	}
+	if record == nil {
+		fresh, err := s.store.FindAPIKeyByPrefix(ctx, prefix)
+		if err != nil {
+			return nil, err
+		}
+		record = fresh
+		s.cache.Set(ctx, apiKeyCacheNamespace, prefix, fresh, apiKeyCacheTTL)
 	}
 
 	if record.Status != "active" {
@@ -103,7 +133,14 @@ func (s *APIKeyService) Validate(ctx context.Context, rawKey string) (*store.API
 }
 
 func (s *APIKeyService) Revoke(ctx context.Context, id uuid.UUID) error {
-	return s.store.RevokeAPIKey(ctx, id, time.Now().UTC())
+	prefix := s.prefixForID(ctx, id)
+	if err := s.store.RevokeAPIKey(ctx, id, time.Now().UTC()); err != nil {
+		return err
+	}
+	if prefix != "" {
+		s.cache.Del(ctx, apiKeyCacheNamespace, prefix)
+	}
+	return nil
 }
 
 // Regenerate replaces an existing key with a new raw secret while
@@ -147,6 +184,11 @@ func (s *APIKeyService) Regenerate(ctx context.Context, id uuid.UUID, userID str
 	if err != nil {
 		return nil, err
 	}
+	// Invalidate the old AND new prefix entries — old in case any caller
+	// had cached the previous key; new in case a poisoned/parallel entry
+	// exists.
+	s.cache.Del(ctx, apiKeyCacheNamespace, existing.KeyPrefix)
+	s.cache.Del(ctx, apiKeyCacheNamespace, prefix)
 	s.log.Info().Str("user_id", userID).Str("api_key_id", id.String()).Msg("regenerated api key")
 	return &CreatedAPIKey{Record: saved, RawKey: raw}, nil
 }
@@ -156,7 +198,14 @@ func (s *APIKeyService) UpdateStatus(ctx context.Context, id uuid.UUID, status s
 	if status != "active" && status != "inactive" && status != "revoked" {
 		return fmt.Errorf("invalid_status")
 	}
-	return s.store.UpdateAPIKeyStatus(ctx, id, status)
+	prefix := s.prefixForID(ctx, id)
+	if err := s.store.UpdateAPIKeyStatus(ctx, id, status); err != nil {
+		return err
+	}
+	if prefix != "" {
+		s.cache.Del(ctx, apiKeyCacheNamespace, prefix)
+	}
+	return nil
 }
 
 func (s *APIKeyService) UpdateBillingSource(ctx context.Context, id uuid.UUID, source string) error {
@@ -164,7 +213,29 @@ func (s *APIKeyService) UpdateBillingSource(ctx context.Context, id uuid.UUID, s
 	if !validBillingSource(source) {
 		return fmt.Errorf("invalid_billing_source")
 	}
-	return s.store.UpdateAPIKeyBillingSource(ctx, id, source)
+	prefix := s.prefixForID(ctx, id)
+	if err := s.store.UpdateAPIKeyBillingSource(ctx, id, source); err != nil {
+		return err
+	}
+	if prefix != "" {
+		s.cache.Del(ctx, apiKeyCacheNamespace, prefix)
+	}
+	return nil
+}
+
+// prefixForID resolves an api key id to its current key_prefix so
+// mutators can bust the cache. Best-effort — if the lookup fails we
+// rely on TTL expiry. Done as a separate read because callers don't
+// always have the prefix on hand.
+func (s *APIKeyService) prefixForID(ctx context.Context, id uuid.UUID) string {
+	if !s.cache.Enabled() {
+		return ""
+	}
+	rec, err := s.store.GetAPIKeyByID(ctx, id)
+	if err != nil || rec == nil {
+		return ""
+	}
+	return rec.KeyPrefix
 }
 
 func (s *APIKeyService) ListByUser(ctx context.Context, userID string) []store.APIKey {

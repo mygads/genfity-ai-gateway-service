@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // CLIProxyClient talks to a CLIProxyAPI-compatible upstream.
@@ -22,10 +25,37 @@ type CLIProxyClient struct {
 }
 
 func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
+	// Pool tuned for high-concurrency forwarding to a single upstream.
+	// Default Go transport caps MaxIdleConnsPerHost at 2 — under load
+	// every request beyond that pays a fresh TCP+TLS handshake. We bump
+	// per-host to 100 to keep a warm pool, and opt into HTTP/2 (with
+	// automatic H1 fallback) for multiplexed streams to cli-proxy-api.
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:          200,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	// ConfigureTransport upgrades the transport to support HTTP/2 over
+	// TLS where the upstream advertises it. For plaintext H2 (h2c) we
+	// rely on ForceAttemptHTTP2 + ALPN. Errors here are non-fatal — the
+	// transport stays valid for HTTP/1.1.
+	_ = http2.ConfigureTransport(transport)
+
 	return &CLIProxyClient{
-		baseURL:    strings.TrimRight(baseURL, "/"),
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: timeout},
+		baseURL: strings.TrimRight(baseURL, "/"),
+		apiKey:  apiKey,
+		httpClient: &http.Client{
+			Timeout:   timeout,
+			Transport: transport,
+		},
 	}
 }
 

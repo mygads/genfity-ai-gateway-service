@@ -17,6 +17,7 @@ type Store interface {
 	UpsertAPIKey(context.Context, store.APIKey) (store.APIKey, error)
 	ListAPIKeysByUser(context.Context, string) []store.APIKey
 	FindAPIKeyByPrefix(context.Context, string) (*store.APIKey, error)
+	GetAPIKeyByID(context.Context, uuid.UUID) (*store.APIKey, error)
 	RevokeAPIKey(context.Context, uuid.UUID, time.Time) error
 	UpdateAPIKeyStatus(context.Context, uuid.UUID, string) error
 	UpdateAPIKeyBillingSource(context.Context, uuid.UUID, string) error
