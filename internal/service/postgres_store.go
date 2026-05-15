@@ -471,7 +471,30 @@ func (s *PostgresStore) upsertEntitlement(ctx context.Context, item store.Custom
 func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
-	err := s.pool.QueryRow(ctx, `SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at FROM ai_gateway.customer_entitlements WHERE genfity_user_id = $1 AND status = 'active' AND (period_end IS NULL OR period_end > now()) ORDER BY CASE WHEN metadata->>'pricingGroup' = 'unlimited_plan' THEN 0 WHEN metadata->>'pricingGroup' = 'credit_package' THEN 1 ELSE 2 END, updated_at DESC LIMIT 1`, userID).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
+	err := s.pool.QueryRow(ctx, `
+		SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status,
+			period_start, period_end, quota_tokens_monthly,
+			balance_snapshot::text, balance_reserved::text,
+			credit_balance::text, credit_balance_reserved::text, credit_expires_at,
+			payg_usd_balance::text, payg_usd_balance_reserved::text,
+			pricing_group, metadata, updated_from_genfity_at
+		FROM ai_gateway.customer_entitlements
+		WHERE genfity_user_id = $1
+		  AND status = 'active'
+		  AND (period_end IS NULL OR period_end > now())
+		ORDER BY CASE
+			WHEN COALESCE(pricing_group, metadata->>'pricingGroup') IN ('unlimited', 'unlimited_plan') THEN 0
+			WHEN COALESCE(pricing_group, metadata->>'pricingGroup') = 'credit_package' THEN 1
+			ELSE 2
+		END, updated_at DESC
+		LIMIT 1`, userID).Scan(
+		&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
+		&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly,
+		&item.BalanceSnapshot, &item.BalanceReserved,
+		&item.CreditBalance, &item.CreditBalanceReserved, &item.CreditExpiresAt,
+		&item.PaygUsdBalance, &item.PaygUsdBalanceReserved,
+		&item.PricingGroup, &metadata, &item.UpdatedFromGenfityAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

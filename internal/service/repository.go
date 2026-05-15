@@ -99,3 +99,4 @@ type Store interface {
 	IncrementQuotaCounter(context.Context, string, *string, time.Time, time.Time, int64) error
 	DebitCreditBalance(context.Context, string, string, float64) error
 }
+

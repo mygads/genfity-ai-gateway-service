@@ -826,6 +826,9 @@ func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey st
 		return err
 	}
 	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, true)
+	if finalizeErr != nil {
+		return finalizeErr
+	}
 
 	// Push the debit to genfity-app so User.aiGatewayCreditBalance and
 	// the AiGatewayCreditLedger stay in sync. Fire-and-forget — failures
