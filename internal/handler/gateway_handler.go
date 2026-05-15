@@ -23,6 +23,37 @@ import (
 
 // --- entitlement helpers ---
 
+// resolveSubscription returns an active subscription if one exists, or
+// nil when the user only has credit/payg entitlements. Callers must not
+// treat a nil subscription as an error — credit-package and payg_topup
+// users intentionally have no unlimited subscription. The priority
+// billing chain in reserveRuntimeLimits handles credit/payg paths even
+// when subscription is nil.
+//
+// Real errors (DB failure etc.) still bubble up. ErrNotFound is
+// swallowed because that's the legitimate "no subscription, but maybe
+// they have credits" case.
+func (h *GatewayHandler) resolveSubscription(ctx context.Context, userID string) (*service.ActiveSubscription, error) {
+	sub, err := h.entitlements.CheckActiveSubscription(ctx, userID)
+	if err == nil {
+		return sub, nil
+	}
+	if errors.Is(err, service.ErrNotFound) {
+		return nil, nil
+	}
+	if msg := err.Error(); msg == "subscription_inactive" {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func subscriptionPlan(sub *service.ActiveSubscription) *store.SubscriptionPlanSnapshot {
+	if sub == nil {
+		return nil
+	}
+	return sub.Plan
+}
+
 func entitlementAllowsModel(entitlement any, publicModel string) bool {
 	typed, ok := entitlement.(*service.ActiveSubscription)
 	if !ok || typed == nil || typed.Entitlement == nil {
@@ -1067,12 +1098,12 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
+	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
-	if !entitlementAllowsModel(subscription, publicModel) {
+	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1126,14 +1157,14 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
+	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		ec := mapSubscriptionError(ctx, err)
 		h.recordFailedRequest(ctx, apiKey, publicModel, ec, http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if !entitlementAllowsModel(subscription, publicModel) {
+	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
@@ -1318,12 +1349,12 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
+	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
-	if !entitlementAllowsModel(subscription, publicModel) {
+	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1376,20 +1407,20 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	subscription, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID)
+	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		ec := mapSubscriptionError(ctx, err)
 		h.recordFailedRequest(ctx, apiKey, publicModel, ec, http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if !entitlementAllowsModel(subscription, publicModel) {
+	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
 
-	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
