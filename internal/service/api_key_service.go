@@ -57,6 +57,63 @@ const (
 	apiKeyCacheTTL       = 30 * time.Second
 )
 
+// cachedAPIKey mirrors store.APIKey for cache (de)serialisation. We need
+// a separate type because store.APIKey carries `KeyHash string json:"-"`
+// to keep the hash out of customer-facing JSON responses; serialising the
+// public type into Redis would silently drop the hash and every cache hit
+// would compare against an empty string and return 401.
+type cachedAPIKey struct {
+	ID              uuid.UUID  `json:"id"`
+	GenfityUserID   string     `json:"genfity_user_id"`
+	GenfityTenantID *string    `json:"genfity_tenant_id,omitempty"`
+	Name            string     `json:"name"`
+	KeyPrefix       string     `json:"key_prefix"`
+	KeyHash         string     `json:"key_hash"`
+	Status          string     `json:"status"`
+	BillingSource   string     `json:"billing_source"`
+	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	RegeneratedAt   *time.Time `json:"regenerated_at,omitempty"`
+	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+}
+
+func toCachedAPIKey(k *store.APIKey) cachedAPIKey {
+	return cachedAPIKey{
+		ID:              k.ID,
+		GenfityUserID:   k.GenfityUserID,
+		GenfityTenantID: k.GenfityTenantID,
+		Name:            k.Name,
+		KeyPrefix:       k.KeyPrefix,
+		KeyHash:         k.KeyHash,
+		Status:          k.Status,
+		BillingSource:   k.BillingSource,
+		LastUsedAt:      k.LastUsedAt,
+		ExpiresAt:       k.ExpiresAt,
+		CreatedAt:       k.CreatedAt,
+		RegeneratedAt:   k.RegeneratedAt,
+		RevokedAt:       k.RevokedAt,
+	}
+}
+
+func fromCachedAPIKey(c cachedAPIKey) store.APIKey {
+	return store.APIKey{
+		ID:              c.ID,
+		GenfityUserID:   c.GenfityUserID,
+		GenfityTenantID: c.GenfityTenantID,
+		Name:            c.Name,
+		KeyPrefix:       c.KeyPrefix,
+		KeyHash:         c.KeyHash,
+		Status:          c.Status,
+		BillingSource:   c.BillingSource,
+		LastUsedAt:      c.LastUsedAt,
+		ExpiresAt:       c.ExpiresAt,
+		CreatedAt:       c.CreatedAt,
+		RegeneratedAt:   c.RegeneratedAt,
+		RevokedAt:       c.RevokedAt,
+	}
+}
+
 func (s *APIKeyService) Create(ctx context.Context, input CreateAPIKeyInput) (*CreatedAPIKey, error) {
 	raw, prefix, err := generateRawAPIKey()
 	if err != nil {
@@ -94,12 +151,15 @@ func (s *APIKeyService) Validate(ctx context.Context, rawKey string) (*store.API
 	}
 
 	// Read-through cache by key_prefix. Cache miss / disabled → fall back
-	// to DB. Mutators bust the entry by prefix.
+	// to DB. Mutators bust the entry by prefix. Note: KeyHash carries
+	// json:"-" on the public type, so we serialise via cachedAPIKey to
+	// keep the hash inside the cache entry — without it every cache hit
+	// would 401.
 	var record *store.APIKey
 	if s.cache.Enabled() {
-		var cached store.APIKey
-		if err := s.cache.Get(ctx, apiKeyCacheNamespace, prefix, &cached); err == nil {
-			r := cached
+		var cached cachedAPIKey
+		if err := s.cache.Get(ctx, apiKeyCacheNamespace, prefix, &cached); err == nil && cached.KeyHash != "" {
+			r := fromCachedAPIKey(cached)
 			record = &r
 		}
 	}
@@ -109,7 +169,7 @@ func (s *APIKeyService) Validate(ctx context.Context, rawKey string) (*store.API
 			return nil, err
 		}
 		record = fresh
-		s.cache.Set(ctx, apiKeyCacheNamespace, prefix, fresh, apiKeyCacheTTL)
+		s.cache.Set(ctx, apiKeyCacheNamespace, prefix, toCachedAPIKey(fresh), apiKeyCacheTTL)
 	}
 
 	if record.Status != "active" {
