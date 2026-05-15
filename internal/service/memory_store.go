@@ -666,12 +666,20 @@ func (s *MemoryStore) ListUsageByTenant(_ context.Context, tenantID string) []st
 	return items
 }
 
-func (s *MemoryStore) UpsertBalanceSnapshot(_ context.Context, userID string, balance string) (*store.CustomerEntitlement, error) {
+func (s *MemoryStore) UpsertBalanceSnapshot(_ context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) (*store.CustomerEntitlement, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, item := range s.entitlements {
 		if item.GenfityUserID == userID {
 			item.BalanceSnapshot = &balance
+			if paygBalance != nil {
+				v := *paygBalance
+				item.PaygUsdBalance = &v
+			}
+			if creditExpiresAt != nil {
+				v := *creditExpiresAt
+				item.CreditExpiresAt = &v
+			}
 			item.UpdatedFromGenfityAt = time.Now().UTC()
 			s.entitlements[id] = item
 			copy := item

@@ -59,8 +59,8 @@ func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []st
 	return count, nil
 }
 
-func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, balance string) error {
-	_, err := s.store.UpsertBalanceSnapshot(ctx, userID, balance)
+func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) error {
+	_, err := s.store.UpsertBalanceSnapshot(ctx, userID, balance, paygBalance, creditExpiresAt)
 	return err
 }
 

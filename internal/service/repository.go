@@ -46,7 +46,7 @@ type Store interface {
 	UpsertEntitlement(context.Context, store.CustomerEntitlement) (store.CustomerEntitlement, error)
 	UpsertEntitlementByUser(context.Context, store.CustomerEntitlement) (store.CustomerEntitlement, error)
 	GetEntitlementByUser(context.Context, string) (*store.CustomerEntitlement, error)
-	UpsertBalanceSnapshot(context.Context, string, string) (*store.CustomerEntitlement, error)
+	UpsertBalanceSnapshot(context.Context, string, string, *string, *time.Time) (*store.CustomerEntitlement, error)
 
 	UpsertRouterInstance(context.Context, store.RouterInstance) (store.RouterInstance, error)
 	GetRouterInstanceByID(context.Context, uuid.UUID) (*store.RouterInstance, error)

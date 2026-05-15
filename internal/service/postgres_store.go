@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -513,10 +514,28 @@ func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string)
 	return &item, err
 }
 
-func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string, balance string) (*store.CustomerEntitlement, error) {
+func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) (*store.CustomerEntitlement, error) {
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
-	err := s.pool.QueryRow(ctx, `UPDATE ai_gateway.customer_entitlements SET balance_snapshot = $2, updated_from_genfity_at = now(), updated_at = now() WHERE genfity_user_id = $1 RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, userID, balance).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
+
+	setClauses := `balance_snapshot = $2, updated_from_genfity_at = now(), updated_at = now()`
+	args := []any{userID, balance}
+	argIdx := 3
+
+	if paygBalance != nil {
+		setClauses += fmt.Sprintf(`, payg_usd_balance = $%d`, argIdx)
+		args = append(args, *paygBalance)
+		argIdx++
+	}
+	if creditExpiresAt != nil {
+		setClauses += fmt.Sprintf(`, credit_expires_at = $%d`, argIdx)
+		args = append(args, *creditExpiresAt)
+		argIdx++
+	}
+
+	query := fmt.Sprintf(`UPDATE ai_gateway.customer_entitlements SET %s WHERE genfity_user_id = $1 RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, setClauses)
+
+	err := s.pool.QueryRow(ctx, query, args...).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

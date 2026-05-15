@@ -16,8 +16,10 @@ type SyncHandler struct {
 }
 
 type balanceSyncPayload struct {
-	UserID  string `json:"user_id"`
-	Balance string `json:"balance"`
+	UserID          string  `json:"user_id"`
+	Balance         string  `json:"balance"`
+	PaygBalance     *string `json:"payg_balance,omitempty"`
+	CreditExpiresAt *string `json:"credit_expires_at,omitempty"`
 }
 
 func NewSyncHandler(sync *service.SyncService, callback *service.GenfityCallback) *SyncHandler {
@@ -62,7 +64,17 @@ func (h *SyncHandler) SyncCustomerBalance(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusBadRequest, "invalid_user_id")
 		return
 	}
-	if err := h.sync.SyncCustomerBalance(r.Context(), payload.UserID, payload.Balance); err != nil {
+	var expiresAt *time.Time
+	if payload.CreditExpiresAt != nil && *payload.CreditExpiresAt != "" {
+		parsed, err := time.Parse(time.RFC3339, *payload.CreditExpiresAt)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "invalid_credit_expires_at")
+			return
+		}
+		expiresAt = &parsed
+	}
+
+	if err := h.sync.SyncCustomerBalance(r.Context(), payload.UserID, payload.Balance, payload.PaygBalance, expiresAt); err != nil {
 		respondError(w, http.StatusNotFound, "subscription_not_found")
 		return
 	}
