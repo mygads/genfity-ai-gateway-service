@@ -5,6 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
@@ -21,7 +22,7 @@ type Server struct {
 	log    zerolog.Logger
 }
 
-func New(cfg config.Config, redisClient *redis.Client, store service.Store, logger zerolog.Logger) *Server {
+func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, store service.Store, logger zerolog.Logger) *Server {
 	// Read-through Redis cache for hot-path api_key + entitlement reads.
 	// Disabled silently when Redis isn't configured (local dev / tests).
 	var hotCache *service.Cache
@@ -61,7 +62,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	adminHandler := handler.NewAdminHandler(models, routers, usage)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	syncHandler := handler.NewSyncHandler(syncService, genfityCallback, cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey)
-	healthHandler := handler.NewHealthHandler(syncService)
+	healthHandler := handler.NewHealthHandler(syncService, dbPool, redisClient)
 
 	authMiddleware := mw.NewAuthMiddleware(&cfg)
 	apiKeyMiddleware := mw.NewAPIKeyMiddleware(&cfg, apiKeys)

@@ -142,7 +142,7 @@ func main() {
 
 	var store service.Store = service.NewPostgresStore(dbpool)
 
-	server := httpserver.New(cfg, redisClient, store, logger)
+	server := httpserver.New(cfg, redisClient, dbpool, store, logger)
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           server.Router,
