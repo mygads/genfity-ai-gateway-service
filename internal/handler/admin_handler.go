@@ -496,6 +496,7 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 		"unlimited_plan": {PricingGroup: "unlimited_plan", Label: "Subscription", Users: []store.UsageSummaryRow{}},
 		"credit_package": {PricingGroup: "credit_package", Label: "Credit", Users: []store.UsageSummaryRow{}},
 		"payg_topup":     {PricingGroup: "payg_topup", Label: "Pay-as-you-go", Users: []store.UsageSummaryRow{}},
+		"unknown":        {PricingGroup: "unknown", Label: "Unknown", Users: []store.UsageSummaryRow{}},
 	}
 
 	var grandRequests int
@@ -505,7 +506,7 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 	for _, row := range rows {
 		g, ok := groupMap[row.PricingGroup]
 		if !ok {
-			g = groupMap["credit_package"]
+			g = groupMap["unknown"]
 		}
 		g.Users = append(g.Users, row)
 
@@ -528,7 +529,7 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 	}
 
 	// Compute per-group totals
-	for _, g := range []*groupPayload{sub, groupMap["credit_package"], groupMap["payg_topup"]} {
+	for _, g := range []*groupPayload{sub, groupMap["credit_package"], groupMap["payg_topup"], groupMap["unknown"]} {
 		var rc int
 		var it, ot, tt int64
 		tc := 0.0
@@ -550,6 +551,35 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Fetch credit balances for credit_package users
+	creditBalances := h.usage.CreditBalances(r.Context())
+	type creditBalancePayload struct {
+		GenfityUserID string `json:"genfity_user_id"`
+		CreditBalance string `json:"credit_balance"`
+		CreditUsed    string `json:"credit_used"`
+	}
+	cbList := make([]creditBalancePayload, 0, len(creditBalances))
+	totalCreditBalance := 0.0
+	totalCreditUsed := 0.0
+	for _, cb := range creditBalances {
+		cbList = append(cbList, creditBalancePayload{
+			GenfityUserID: cb.GenfityUserID,
+			CreditBalance: cb.CreditBalance,
+			CreditUsed:    cb.CreditUsed,
+		})
+		if v, err := strconv.ParseFloat(cb.CreditBalance, 64); err == nil {
+			totalCreditBalance += v
+		}
+		if v, err := strconv.ParseFloat(cb.CreditUsed, 64); err == nil {
+			totalCreditUsed += v
+		}
+	}
+
+	groups := []groupPayload{*sub, *groupMap["credit_package"], *groupMap["payg_topup"]}
+	if unk := groupMap["unknown"]; len(unk.Users) > 0 {
+		groups = append(groups, *unk)
+	}
+
 	respondJSON(w, http.StatusOK, map[string]any{
 		"grand_totals": groupTotals{
 			RequestCount: grandRequests,
@@ -558,10 +588,11 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 			TotalTokens:  grandTotal,
 			TotalCost:    strconv.FormatFloat(grandCost, 'f', 6, 64),
 		},
-		"groups": []groupPayload{
-			*sub,
-			*groupMap["credit_package"],
-			*groupMap["payg_topup"],
+		"groups": groups,
+		"credit_summary": map[string]any{
+			"total_balance":   strconv.FormatFloat(totalCreditBalance, 'f', 4, 64),
+			"total_reserved":  strconv.FormatFloat(totalCreditUsed, 'f', 4, 64),
+			"user_balances":   cbList,
 		},
 	})
 }

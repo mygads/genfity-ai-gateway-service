@@ -1116,6 +1116,33 @@ func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.
 	return items
 }
 
+func (s *PostgresStore) ListCreditBalances(ctx context.Context) []store.CreditBalanceRow {
+	query := `
+		SELECT
+			genfity_user_id,
+			credit_balance::text,
+			COALESCE(credit_balance_reserved, 0)::text AS credit_used
+		FROM ai_gateway.customer_entitlements
+		WHERE status = 'active'
+		  AND COALESCE(pricing_group, '') = 'credit_package'
+		  AND credit_balance IS NOT NULL`
+
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []store.CreditBalanceRow{}
+	for rows.Next() {
+		var item store.CreditBalanceRow
+		if rows.Scan(&item.GenfityUserID, &item.CreditBalance, &item.CreditUsed) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func (s *PostgresStore) ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
 	if limit <= 0 {
 		limit = 100

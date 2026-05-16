@@ -136,6 +136,10 @@ func (s *UsageService) SummaryGrouped(ctx context.Context, since time.Time) []st
 	return s.store.ListUsageSummaryGrouped(ctx, since)
 }
 
+func (s *UsageService) CreditBalances(ctx context.Context) []store.CreditBalanceRow {
+	return s.store.ListCreditBalances(ctx)
+}
+
 func (s *UsageService) ListByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
 	return s.store.ListUsageByAPIKey(ctx, apiKeyID, limit)
 }

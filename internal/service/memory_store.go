@@ -19,6 +19,7 @@ var (
 	ErrNotFound            = errors.New("not found")
 	ErrQuotaExceeded       = errors.New("quota exceeded")
 	ErrInsufficientBalance = errors.New("insufficient balance")
+	ErrModelRetired        = errors.New("model retired")
 )
 
 type MemoryStore struct {
@@ -1074,6 +1075,10 @@ func (s *MemoryStore) ListAllUsage(_ context.Context, limit int) []store.UsageLe
 }
 
 func (s *MemoryStore) ListUsageSummaryGrouped(_ context.Context, _ time.Time) []store.UsageSummaryRow {
+	return nil
+}
+
+func (s *MemoryStore) ListCreditBalances(_ context.Context) []store.CreditBalanceRow {
 	return nil
 }
 

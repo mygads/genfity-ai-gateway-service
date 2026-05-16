@@ -184,6 +184,9 @@ func (s *ModelService) ResolveRouteByPublicModel(ctx context.Context, publicMode
 	if err != nil {
 		return nil, nil, err
 	}
+	if model.Status == "retired" {
+		return nil, nil, ErrModelRetired
+	}
 	route, err := s.store.GetRouteByModelID(ctx, model.ID)
 	if err != nil {
 		return nil, nil, err

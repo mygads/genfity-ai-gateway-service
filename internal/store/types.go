@@ -211,6 +211,12 @@ type UsageSummaryRow struct {
 	LastActive    time.Time `json:"last_active"`
 }
 
+type CreditBalanceRow struct {
+	GenfityUserID string  `json:"genfity_user_id"`
+	CreditBalance string  `json:"credit_balance"`
+	CreditUsed    string  `json:"credit_used"`
+}
+
 type AuthUser struct {
 	ID        string  `json:"id"`
 	Email     string  `json:"email"`

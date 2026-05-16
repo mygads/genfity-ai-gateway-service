@@ -1208,7 +1208,11 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
-		respondError(w, http.StatusBadRequest, "model_not_allowed")
+		code := "model_not_allowed"
+		if errors.Is(err, service.ErrModelRetired) {
+			code = "model_retired"
+		}
+		respondError(w, http.StatusBadRequest, code)
 		return
 	}
 	upstreamPayload, err := clonePayload(payload)
@@ -1272,8 +1276,12 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
-		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_allowed", http.StatusBadRequest, started)
-		respondError(w, http.StatusBadRequest, "model_not_allowed")
+		code := "model_not_allowed"
+		if errors.Is(err, service.ErrModelRetired) {
+			code = "model_retired"
+		}
+		h.recordFailedRequest(ctx, apiKey, publicModel, code, http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, code)
 		return
 	}
 
@@ -1459,7 +1467,11 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 
 	route, _, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
-		respondError(w, http.StatusBadRequest, "model_not_allowed")
+		code := "model_not_allowed"
+		if errors.Is(err, service.ErrModelRetired) {
+			code = "model_retired"
+		}
+		respondError(w, http.StatusBadRequest, code)
 		return
 	}
 	upstreamPayload, err := clonePayload(payload)
@@ -1522,8 +1534,12 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
-		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_allowed", http.StatusBadRequest, started)
-		respondError(w, http.StatusBadRequest, "model_not_allowed")
+		code := "model_not_allowed"
+		if errors.Is(err, service.ErrModelRetired) {
+			code = "model_retired"
+		}
+		h.recordFailedRequest(ctx, apiKey, publicModel, code, http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, code)
 		return
 	}
 
