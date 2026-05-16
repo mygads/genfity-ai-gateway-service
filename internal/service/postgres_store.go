@@ -547,7 +547,10 @@ func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
 
-	setClauses := `balance_snapshot = $2, updated_from_genfity_at = now(), updated_at = now()`
+	// Update both balance_snapshot AND credit_balance so the reservation
+	// query (which checks credit_balance) sees the correct value after
+	// admin grants or topups synced from genfity-app.
+	setClauses := `balance_snapshot = $2, credit_balance = $2::numeric, updated_from_genfity_at = now(), updated_at = now()`
 	args := []any{userID, balance}
 	argIdx := 3
 
@@ -562,7 +565,13 @@ func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string
 		argIdx++
 	}
 
-	query := fmt.Sprintf(`UPDATE ai_gateway.customer_entitlements SET %s WHERE genfity_user_id = $1 RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, setClauses)
+	// Update the most recent active entitlement (ORDER BY updated_at DESC)
+	// so admin grants land on the correct row when multiple entitlements exist.
+	query := fmt.Sprintf(`UPDATE ai_gateway.customer_entitlements SET %s WHERE id = (
+		SELECT id FROM ai_gateway.customer_entitlements
+		WHERE genfity_user_id = $1 AND status = 'active'
+		ORDER BY updated_at DESC LIMIT 1
+	) RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, setClauses)
 
 	err := s.pool.QueryRow(ctx, query, args...).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -785,7 +794,7 @@ func (s *PostgresStore) ReserveRequestCredits(ctx context.Context, userID string
 			     WHERE genfity_user_id = $1
 			       AND status = 'active'
 			       AND credit_balance - credit_balance_reserved >= $2
-			     ORDER BY created_at ASC
+			     ORDER BY credit_balance DESC
 			     LIMIT 1
 			 )`,
 		userID, amount)
@@ -818,7 +827,7 @@ func (s *PostgresStore) FinalizeRequestCredits(ctx context.Context, userID strin
 			     WHERE genfity_user_id = $1
 			       AND status = 'active'
 			       AND credit_balance_reserved > 0
-			     ORDER BY created_at ASC
+			     ORDER BY credit_balance DESC
 			     LIMIT 1
 			 )`,
 		userID, reservedAmount, actualAmount)
