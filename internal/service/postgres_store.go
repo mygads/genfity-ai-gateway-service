@@ -71,6 +71,9 @@ func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanS
 			items = append(items, item)
 		}
 	}
+	if rows.Err() != nil {
+		return nil
+	}
 	return items
 }
 
@@ -124,6 +127,9 @@ func (s *PostgresStore) ListAPIKeysByUser(ctx context.Context, userID string) []
 		if scanAPIKey(rows, &item) == nil {
 			items = append(items, item)
 		}
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return items
 }
@@ -254,6 +260,9 @@ func (s *PostgresStore) ListAllModels(ctx context.Context) []store.AIModel {
 			items = append(items, item)
 		}
 	}
+	if rows.Err() != nil {
+		return nil
+	}
 	return items
 }
 
@@ -280,6 +289,9 @@ func (s *PostgresStore) ListModels(ctx context.Context) []store.AIModel {
 		if scanModel(rows, &item) == nil {
 			items = append(items, item)
 		}
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return items
 }
@@ -368,6 +380,9 @@ func (s *PostgresStore) ListPrices(ctx context.Context) []store.AIModelPrice {
 		if rows.Scan(&item.ID, &item.ModelID, &item.InputPricePer1M, &item.OutputPricePer1M, &item.CachedPricePer1M, &item.ReasoningPricePer1M, &item.Currency, &item.Active, &item.CreatedAt) == nil {
 			items = append(items, item)
 		}
+	}
+	if rows.Err() != nil {
+		return nil
 	}
 	return items
 }

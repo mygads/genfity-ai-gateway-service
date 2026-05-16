@@ -14,6 +14,8 @@ import (
 	"genfity-ai-gateway-service/internal/store"
 )
 
+type authUserKey struct{}
+
 func claimString(claims jwt.MapClaims, keys ...string) string {
 	for _, k := range keys {
 		if v, ok := claims[k].(string); ok && v != "" {
@@ -48,13 +50,12 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 
 			tokenString := parts[1]
 
-			// Parse JWT
 			token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 				if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 					return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 				}
 				return []byte(m.cfg.GenfityJWTSecret), nil
-			})
+			}, jwt.WithExpirationRequired(), jwt.WithValidMethods([]string{"HS256", "HS384", "HS512"}))
 
 			if err != nil || !token.Valid {
 				respondError(w, http.StatusUnauthorized, "invalid_token")
@@ -82,7 +83,6 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 				tenantID = &tenantIDStr
 			}
 
-			// Check Roles
 			roleAllowed := false
 			for _, allowed := range allowedRoles {
 				if role == allowed {
@@ -104,9 +104,8 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 				SessionID: sessionID,
 			}
 
-			ctx := context.WithValue(r.Context(), "auth_user", user)
+			ctx := context.WithValue(r.Context(), authUserKey{}, user)
 
-			// Add to logger
 			logger := hlog.FromRequest(r)
 			logger.UpdateContext(func(c zerolog.Context) zerolog.Context {
 				return c.Str("user_id", userIDStr).Str("role", role)
@@ -118,9 +117,13 @@ func (m *AuthMiddleware) RequireRoles(allowedRoles ...string) func(http.Handler)
 }
 
 func GetAuthUser(ctx context.Context) store.AuthUser {
-	val := ctx.Value("auth_user")
+	val := ctx.Value(authUserKey{})
 	if val == nil {
 		return store.AuthUser{}
 	}
-	return val.(store.AuthUser)
+	user, ok := val.(store.AuthUser)
+	if !ok {
+		return store.AuthUser{}
+	}
+	return user
 }

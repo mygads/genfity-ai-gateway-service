@@ -122,7 +122,7 @@ func (c *CLIProxyClient) get(ctx context.Context, path string) (map[string]any, 
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -136,4 +136,46 @@ func (c *CLIProxyClient) get(ctx context.Context, path string) (map[string]any, 
 		return nil, err
 	}
 	return out, nil
+}
+
+func (c *CLIProxyClient) doWithRetry(req *http.Request, maxRetries int) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			case <-time.After(time.Duration(attempt*100) * time.Millisecond):
+			}
+			req.Body = io.NopCloser(bytes.NewReader(nil))
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if isRetriableError(err) {
+				continue
+			}
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("upstream returned %d", resp.StatusCode)
+			continue
+		}
+		return resp, nil
+	}
+	return nil, lastErr
+}
+
+func isRetriableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "EOF") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "no such host")
 }
