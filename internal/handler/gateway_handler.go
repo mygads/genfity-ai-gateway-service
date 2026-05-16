@@ -669,27 +669,34 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		fullModelID := model.PublicModel
 		if fullModelID != "" {
 			if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil && cost.IsActive {
-				if cost.IsFree {
-					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
-				}
-				credits := parseFloatPtr(&cost.CreditsPerReq)
-				if credits <= 0 {
-					// credits_per_req=0 without is_free=true: treat as free
-					// rather than silently falling through to PAYG.
-					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
-				}
-				if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
-					if errors.Is(err, service.ErrInsufficientBalance) {
-						if source == "credit" {
-							return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
+				if cost.IsFree || parseFloatPtr(&cost.CreditsPerReq) <= 0 {
+					// Free model — still require the user to have a positive
+					// credit balance. Users with 0 balance (new accounts or
+					// exhausted credits) cannot access even free models.
+					if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
+						if parseFloatPtr(entitlement.CreditBalance) > 0 {
+							return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
 						}
-						// Fall through to PAYG — user may have credits
-						// exhausted but still carry a PAYG balance.
-					} else {
-						return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
 					}
+					if source == "credit" {
+						return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
+					}
+					// Fall through to PAYG check
 				} else {
-					return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+					credits := parseFloatPtr(&cost.CreditsPerReq)
+					if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
+						if errors.Is(err, service.ErrInsufficientBalance) {
+							if source == "credit" {
+								return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
+							}
+							// Fall through to PAYG — user may have credits
+							// exhausted but still carry a PAYG balance.
+						} else {
+							return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
+						}
+					} else {
+						return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+					}
 				}
 			} else if source == "credit" {
 				return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
@@ -727,9 +734,14 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 	reserveUSD := float64(estimate.PromptTokens)/1_000_000*parseFloatPtr(&price.InputPricePer1M) +
 		float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
 	if reserveUSD <= 0 {
-		// Free model under PAYG schema — allow through without a
-		// balance check.
-		return runtimeReservation{BillingMode: "payg_topup", PaygUSD: 0}, 0, ""
+		// Free model under PAYG schema — still require the user to have
+		// a positive PAYG balance. Users with $0 cannot access even free models.
+		if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.PaygUsdBalance != nil {
+			if parseFloatPtr(entitlement.PaygUsdBalance) > 0 {
+				return runtimeReservation{BillingMode: "payg_topup", PaygUSD: 0}, 0, ""
+			}
+		}
+		return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_balance"
 	}
 	if err := h.usage.ReservePaygUsdBalance(ctx, apiKey.GenfityUserID, reserveUSD); err != nil {
 		if errors.Is(err, service.ErrInsufficientBalance) {
