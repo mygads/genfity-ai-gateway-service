@@ -27,6 +27,8 @@ type Store interface {
 	UpdateModel(context.Context, store.AIModel) (store.AIModel, error)
 	DeleteModel(context.Context, uuid.UUID) error
 	ListModels(context.Context) []store.AIModel
+	ListAllModels(context.Context) []store.AIModel
+	UpdateModelStatus(context.Context, uuid.UUID, string) error
 	GetModelByID(context.Context, uuid.UUID) (*store.AIModel, error)
 	GetModelByPublicName(context.Context, string) (*store.AIModel, error)
 

@@ -248,6 +248,7 @@ type ModelSyncItem struct {
 	SupportsStreaming  bool   `json:"supports_streaming"`
 	SupportsTools      bool   `json:"supports_tools"`
 	SupportsVision     bool   `json:"supports_vision"`
+	PaygExposed        bool   `json:"payg_exposed"`
 	RouterInstanceCode string `json:"router_instance_code,omitempty"`
 	RouterModel        string `json:"router_model,omitempty"`
 }
@@ -277,15 +278,16 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 		}
 
 		model, err := s.store.UpsertModel(ctx, store.AIModel{
-			ID:                modelID,
-			PublicModel:       item.PublicModel,
-			DisplayName:       item.DisplayName,
-			Description:       desc,
-			Status:            status,
-			ContextWindow:     item.ContextWindow,
+			ID:               modelID,
+			PublicModel:      item.PublicModel,
+			DisplayName:      item.DisplayName,
+			Description:      desc,
+			Status:           status,
+			ContextWindow:    item.ContextWindow,
 			SupportsStreaming: item.SupportsStreaming,
-			SupportsTools:     item.SupportsTools,
-			SupportsVision:    item.SupportsVision,
+			SupportsTools:    item.SupportsTools,
+			SupportsVision:   item.SupportsVision,
+			PaygExposed:      item.PaygExposed,
 		})
 		if err != nil {
 			return count, err
@@ -314,6 +316,23 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 
 		count++
 	}
+
+	// Auto-cleanup: soft-delete models not in payload (set status='retired').
+	// usage_ledger joins via uuid model_id so history is preserved.
+	keep := make(map[string]struct{}, len(payload))
+	for _, item := range payload {
+		keep[item.PublicModel] = struct{}{}
+	}
+	for _, existing := range s.store.ListAllModels(ctx) {
+		if _, ok := keep[existing.PublicModel]; ok {
+			continue
+		}
+		if existing.Status == "retired" {
+			continue
+		}
+		_ = s.store.UpdateModelStatus(ctx, existing.ID, "retired")
+	}
+
 	return count, nil
 }
 

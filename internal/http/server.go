@@ -60,7 +60,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers, usage)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-	syncHandler := handler.NewSyncHandler(syncService, genfityCallback)
+	syncHandler := handler.NewSyncHandler(syncService, genfityCallback, cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey)
 	healthHandler := handler.NewHealthHandler(syncService)
 
 	authMiddleware := mw.NewAuthMiddleware(&cfg)
@@ -150,6 +150,7 @@ func New(cfg config.Config, redisClient *redis.Client, store service.Store, logg
 		r.Get("/export/models", syncHandler.ExportModels)
 		r.Get("/export/model-prices", syncHandler.ExportModelPrices)
 		r.Get("/export/usage-summary", syncHandler.ExportUsageSummary)
+		r.Get("/export/cliproxy-models", syncHandler.ExportCliproxyModels)
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)
 	})
 

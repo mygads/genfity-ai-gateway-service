@@ -55,6 +55,7 @@ type AIModel struct {
 	SupportsStreaming bool      `json:"supports_streaming"`
 	SupportsTools     bool      `json:"supports_tools"`
 	SupportsVision    bool      `json:"supports_vision"`
+	PaygExposed       bool      `json:"payg_exposed"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

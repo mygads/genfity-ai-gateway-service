@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -11,8 +13,10 @@ import (
 )
 
 type SyncHandler struct {
-	sync     *service.SyncService
-	callback *service.GenfityCallback
+	sync               *service.SyncService
+	callback           *service.GenfityCallback
+	cliproxyInternalURL string
+	cliproxyAPIKey      string
 }
 
 type balanceSyncPayload struct {
@@ -22,8 +26,8 @@ type balanceSyncPayload struct {
 	CreditExpiresAt *string `json:"credit_expires_at,omitempty"`
 }
 
-func NewSyncHandler(sync *service.SyncService, callback *service.GenfityCallback) *SyncHandler {
-	return &SyncHandler{sync: sync, callback: callback}
+func NewSyncHandler(sync *service.SyncService, callback *service.GenfityCallback, cliproxyInternalURL, cliproxyAPIKey string) *SyncHandler {
+	return &SyncHandler{sync: sync, callback: callback, cliproxyInternalURL: cliproxyInternalURL, cliproxyAPIKey: cliproxyAPIKey}
 }
 
 func (h *SyncHandler) SyncSubscriptionPlans(w http.ResponseWriter, r *http.Request) {
@@ -176,4 +180,46 @@ func (h *SyncHandler) ExportUsageSummary(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	respondJSON(w, http.StatusOK, h.sync.ExportUsageSummary(r.Context(), userID))
+}
+
+func (h *SyncHandler) ExportCliproxyModels(w http.ResponseWriter, r *http.Request) {
+	if h.cliproxyInternalURL == "" {
+		respondJSON(w, http.StatusOK, map[string]any{"models": []any{}})
+		return
+	}
+	url := fmt.Sprintf("%s/v1/models", h.cliproxyInternalURL)
+	req, err := http.NewRequestWithContext(r.Context(), "GET", url, nil)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "cliproxy_request_failed")
+		return
+	}
+	if h.cliproxyAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+h.cliproxyAPIKey)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		respondError(w, http.StatusBadGateway, "cliproxy_unreachable")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		respondError(w, http.StatusBadGateway, "cliproxy_error")
+		return
+	}
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		respondError(w, http.StatusBadGateway, "cliproxy_invalid_response")
+		return
+	}
+	models := make([]map[string]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		models = append(models, map[string]string{"id": m.ID})
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"models": models})
 }

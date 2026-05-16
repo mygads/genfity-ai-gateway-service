@@ -704,6 +704,12 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		// Key is pinned to a higher-priority schema that didn't match.
 		return runtimeReservation{}, http.StatusPaymentRequired, "billing_source_not_applicable"
 	}
+	if !model.PaygExposed {
+		if source == "payg" {
+			return runtimeReservation{}, http.StatusPaymentRequired, "payg_model_not_published"
+		}
+		return runtimeReservation{}, 0, ""
+	}
 	prices := h.models.ListPrices(ctx)
 	price := modelPrice(prices, model.ID)
 	if price == nil {
@@ -1121,6 +1127,9 @@ func (h *GatewayHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	allowsViaPayg := func(m store.AIModel) bool {
+		if !m.PaygExposed {
+			return false
+		}
 		price := modelPrice(prices, m.ID)
 		return price != nil
 	}

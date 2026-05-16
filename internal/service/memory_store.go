@@ -793,6 +793,30 @@ func (s *MemoryStore) DeleteModel(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (s *MemoryStore) UpdateModelStatus(_ context.Context, id uuid.UUID, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, ok := s.models[id]
+	if !ok {
+		return ErrNotFound
+	}
+	item.Status = status
+	item.UpdatedAt = time.Now().UTC()
+	s.models[id] = item
+	return nil
+}
+
+func (s *MemoryStore) ListAllModels(_ context.Context) []store.AIModel {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	items := make([]store.AIModel, 0, len(s.models))
+	for _, item := range s.models {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].PublicModel < items[j].PublicModel })
+	return items
+}
+
 func (s *MemoryStore) UpsertPrice(_ context.Context, price store.AIModelPrice) (store.AIModelPrice, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
