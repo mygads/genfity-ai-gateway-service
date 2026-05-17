@@ -1428,20 +1428,15 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	var lastBody []byte
 	var lastStatusCode int
 
-	// For streaming requests, start sending keepalive to client immediately
-	// to prevent Cloudflare 120s idle timeout while waiting for CLIProxyAPI
-	// combo fallback / model reasoning.
-	var stopKeepalive func()
-	if streamRequested {
-		stopKeepalive = startPreResponseKeepalive(w, 25*time.Second)
-	}
+	// Start sending keepalive to client immediately to prevent Cloudflare
+	// 120s idle timeout while waiting for CLIProxyAPI combo fallback / model
+	// reasoning. Applies to both streaming and non-streaming requests.
+	stopKeepalive := startPreResponseKeepalive(w, 25*time.Second)
 
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
 		if cloneErr != nil {
-			if stopKeepalive != nil {
-				stopKeepalive()
-			}
+			stopKeepalive()
 			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone messages payload failed")
 			respondError(w, http.StatusInternalServerError, "internal_error")
 			return
@@ -1744,19 +1739,14 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	var lastBody []byte
 	var lastStatusCode int
 
-	// For streaming requests, start sending keepalive to client immediately
-	// to prevent Cloudflare 120s idle timeout while waiting for CLIProxyAPI.
-	var stopChatKeepalive func()
-	if streamRequested {
-		stopChatKeepalive = startPreResponseKeepalive(w, 25*time.Second)
-	}
+	// Start sending keepalive to client immediately to prevent Cloudflare
+	// 120s idle timeout while waiting for CLIProxyAPI.
+	stopChatKeepalive := startPreResponseKeepalive(w, 25*time.Second)
 
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
 		if cloneErr != nil {
-			if stopChatKeepalive != nil {
-				stopChatKeepalive()
-			}
+			stopChatKeepalive()
 			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone chat payload failed")
 			respondError(w, http.StatusInternalServerError, "internal_error")
 			return
