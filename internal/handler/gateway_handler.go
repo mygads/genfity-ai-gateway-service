@@ -1081,6 +1081,50 @@ func readBodyWithKeepalive(w http.ResponseWriter, body io.ReadCloser, interval t
 	}
 }
 
+// startPreResponseKeepalive starts sending SSE-style keep-alive comments to the
+// client before the upstream response arrives. This prevents Cloudflare from
+// timing out (120s) while the gateway waits for CLIProxyAPI to finish combo
+// fallback or model reasoning. Returns a stop function that must be called
+// once the upstream response is received.
+func startPreResponseKeepalive(w http.ResponseWriter, interval time.Duration) func() {
+	if interval <= 0 {
+		interval = 25 * time.Second
+	}
+	flusher, canFlush := w.(http.Flusher)
+	if !canFlush {
+		return func() {}
+	}
+
+	// Commit headers early with streaming-compatible settings so keepalive
+	// bytes actually reach Cloudflare.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	stopCh := make(chan struct{})
+	var once sync.Once
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				_, _ = w.Write([]byte(": keep-alive\n\n"))
+				flusher.Flush()
+			}
+		}
+	}()
+
+	return func() {
+		once.Do(func() { close(stopCh) })
+	}
+}
+
 // isRetriableStatus returns true when the upstream error code should trigger
 // a combo fallback to the next entry.
 func isRetriableStatus(code int) bool {
@@ -1384,9 +1428,20 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	var lastBody []byte
 	var lastStatusCode int
 
+	// For streaming requests, start sending keepalive to client immediately
+	// to prevent Cloudflare 120s idle timeout while waiting for CLIProxyAPI
+	// combo fallback / model reasoning.
+	var stopKeepalive func()
+	if streamRequested {
+		stopKeepalive = startPreResponseKeepalive(w, 25*time.Second)
+	}
+
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
 		if cloneErr != nil {
+			if stopKeepalive != nil {
+				stopKeepalive()
+			}
 			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone messages payload failed")
 			respondError(w, http.StatusInternalServerError, "internal_error")
 			return
@@ -1408,6 +1463,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 		statusCode := resp.StatusCode
 		if streamRequested && statusCode < 400 {
+			if stopKeepalive != nil {
+				stopKeepalive()
+			}
 			effectiveRoute := &store.AIModelRoute{
 				ID:                 route.ID,
 				ModelID:            route.ModelID,
@@ -1491,6 +1549,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastResp != nil {
+		if stopKeepalive != nil {
+			stopKeepalive()
+		}
 		if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, lastStatusCode, lastBody, publicModel); err != nil {
 			respondError(w, http.StatusInternalServerError, "settlement_failed")
 			return
@@ -1504,6 +1565,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if stopKeepalive != nil {
+		stopKeepalive()
+	}
 	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
@@ -1680,9 +1744,19 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	var lastBody []byte
 	var lastStatusCode int
 
+	// For streaming requests, start sending keepalive to client immediately
+	// to prevent Cloudflare 120s idle timeout while waiting for CLIProxyAPI.
+	var stopChatKeepalive func()
+	if streamRequested {
+		stopChatKeepalive = startPreResponseKeepalive(w, 25*time.Second)
+	}
+
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
 		if cloneErr != nil {
+			if stopChatKeepalive != nil {
+				stopChatKeepalive()
+			}
 			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone chat payload failed")
 			respondError(w, http.StatusInternalServerError, "internal_error")
 			return
@@ -1707,6 +1781,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 		statusCode := resp.StatusCode
 		if streamRequested && statusCode < 400 {
+			if stopChatKeepalive != nil {
+				stopChatKeepalive()
+			}
 			effectiveRoute := &store.AIModelRoute{
 				ID:                 route.ID,
 				ModelID:            route.ModelID,
@@ -1775,6 +1852,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	// All candidates exhausted, write the last known response.
 	if lastResp != nil {
+		if stopChatKeepalive != nil {
+			stopChatKeepalive()
+		}
 		effectiveRoute := route
 		settled = true
 		for k, v := range lastResp.Header {
@@ -1786,6 +1866,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if stopChatKeepalive != nil {
+		stopChatKeepalive()
+	}
 	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
