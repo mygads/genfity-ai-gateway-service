@@ -8,20 +8,23 @@ import (
 )
 
 type SubscriptionPlanSnapshot struct {
-	ID                  uuid.UUID       `json:"id"`
-	PlanCode            string          `json:"plan_code"`
-	DisplayName         string          `json:"display_name"`
-	Status              string          `json:"status"`
-	MonthlyPrice        string          `json:"monthly_price"`
-	Currency            string          `json:"currency"`
-	QuotaTokensMonthly  *int64          `json:"quota_tokens_monthly,omitempty"`
-	RateLimitRPM        *int32          `json:"rate_limit_rpm,omitempty"`
-	RateLimitTPM        *int32          `json:"rate_limit_tpm,omitempty"`
-	ConcurrentLimit     *int32          `json:"concurrent_limit,omitempty"`
-	Metadata            json.RawMessage `json:"metadata,omitempty"`
-	SyncedFromGenfityAt time.Time       `json:"synced_from_genfity_at"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	ID                   uuid.UUID       `json:"id"`
+	PlanCode             string          `json:"plan_code"`
+	DisplayName          string          `json:"display_name"`
+	Status               string          `json:"status"`
+	MonthlyPrice         string          `json:"monthly_price"`
+	Currency             string          `json:"currency"`
+	QuotaTokensMonthly   *int64          `json:"quota_tokens_monthly,omitempty"`
+	RateLimitRPM         *int32          `json:"rate_limit_rpm,omitempty"`
+	RateLimitTPM         *int32          `json:"rate_limit_tpm,omitempty"`
+	ConcurrentLimit      *int32          `json:"concurrent_limit,omitempty"`
+	// MaxRequestsPerPeriod caps total requests in one entitlement period
+	// (period_start..period_end). NULL/0 = unlimited.
+	MaxRequestsPerPeriod *int32          `json:"max_requests_per_period,omitempty"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	SyncedFromGenfityAt  time.Time       `json:"synced_from_genfity_at"`
+	CreatedAt            time.Time       `json:"created_at"`
+	UpdatedAt            time.Time       `json:"updated_at"`
 }
 
 type APIKey struct {
@@ -56,6 +59,14 @@ type AIModel struct {
 	SupportsTools     bool      `json:"supports_tools"`
 	SupportsVision    bool      `json:"supports_vision"`
 	PaygExposed       bool      `json:"payg_exposed"`
+	// IsFree marks the model as free-tier and activates the FreeLimit*
+	// fields below (per-(user,model) limits). When false, those fields
+	// are ignored. The user's billing balance must still be > 0 even
+	// when the model is free.
+	IsFree            bool      `json:"is_free"`
+	FreeLimitRPD      *int32    `json:"free_limit_rpd,omitempty"`
+	FreeLimitRPM      *int32    `json:"free_limit_rpm,omitempty"`
+	FreeLimitTPD      *int64    `json:"free_limit_tpd,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

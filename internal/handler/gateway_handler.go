@@ -502,6 +502,47 @@ func estimatePayloadTokens(value any) int64 {
 	return (chars + 3) / 4
 }
 
+// applyPreRequestLimits enforces the limits that we can check before the
+// upstream call: plan-period total requests + per-(user,model) free model
+// RPM/RPD. Returns an errorCode + statusCode when the request must be
+// rejected; ("", 0) means continue. Plan RPM/concurrency are kept inline
+// at the call sites because the concurrency release is owned there.
+func (h *GatewayHandler) applyPreRequestLimits(
+	ctx context.Context,
+	apiKey store.APIKey,
+	subscription *service.ActiveSubscription,
+	limits service.PlanLimits,
+	model *store.AIModel,
+) (errorCode string, statusCode int) {
+	if h.rateLimit == nil {
+		return "", 0
+	}
+	if limits.HasMaxRequestsPerPeriod() && subscription != nil && subscription.Entitlement != nil {
+		pk := periodKey(subscription.Entitlement)
+		_, end := activePeriod(subscription.Entitlement)
+		ttl := time.Until(end)
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		if err := h.rateLimit.CheckRequestsPerPeriod(ctx, apiKey.GenfityUserID, pk, ttl, limits.MaxRequestsPerPeriod); err != nil {
+			return "plan_period_limit_exceeded", http.StatusTooManyRequests
+		}
+	}
+	if model != nil && model.IsFree {
+		if model.FreeLimitRPM != nil && *model.FreeLimitRPM > 0 {
+			if err := h.rateLimit.CheckFreeModelRPM(ctx, apiKey.GenfityUserID, model.PublicModel, int(*model.FreeLimitRPM)); err != nil {
+				return "free_model_rpm_exceeded", http.StatusTooManyRequests
+			}
+		}
+		if model.FreeLimitRPD != nil && *model.FreeLimitRPD > 0 {
+			if err := h.rateLimit.CheckFreeModelRPD(ctx, apiKey.GenfityUserID, model.PublicModel, int(*model.FreeLimitRPD)); err != nil {
+				return "free_model_rpd_exceeded", http.StatusTooManyRequests
+			}
+		}
+	}
+	return "", 0
+}
+
 func activePeriod(entitlement *store.CustomerEntitlement) (time.Time, time.Time) {
 	now := time.Now().UTC()
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
@@ -515,6 +556,18 @@ func activePeriod(entitlement *store.CustomerEntitlement) (time.Time, time.Time)
 		}
 	}
 	return start, end
+}
+
+// periodKey returns a stable string identifying the current entitlement
+// period for use as part of a Redis counter key. Buying a new
+// subscription cycle changes period_start/period_end and yields a
+// different key, so the counter starts fresh per cycle.
+func periodKey(entitlement *store.CustomerEntitlement) string {
+	if entitlement == nil {
+		return ""
+	}
+	start, end := activePeriod(entitlement)
+	return fmt.Sprintf("%d-%d", start.Unix(), end.Unix())
 }
 
 func pricingGroup(subscription *service.ActiveSubscription) string {
@@ -782,6 +835,14 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 	if h.rateLimit != nil && limits.HasTPM() {
 		if err := h.rateLimit.CheckTPM(ctx, apiKey.GenfityUserID, limits.TPMAllowance(estimate.TotalTokens), limits.TPM); err != nil {
 			return runtimeReservation{}, http.StatusTooManyRequests, "rate_limit_exceeded"
+		}
+	}
+	// Free-model per-(user,model) token-per-day cap. We reserve the
+	// estimated tokens here; FinalizeFreeModelTPD reconciles after the
+	// upstream call returns the real usage.
+	if h.rateLimit != nil && model != nil && model.IsFree && model.FreeLimitTPD != nil && *model.FreeLimitTPD > 0 {
+		if err := h.rateLimit.CheckFreeModelTPD(ctx, apiKey.GenfityUserID, model.PublicModel, estimate.TotalTokens, *model.FreeLimitTPD); err != nil {
+			return runtimeReservation{}, http.StatusTooManyRequests, "free_model_tpd_exceeded"
 		}
 	}
 
@@ -1378,6 +1439,11 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if errCode, status := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model); status != 0 {
+		h.recordFailedRequest(ctx, apiKey, publicModel, errCode, status, started)
+		respondError(w, status, errCode)
+		return
+	}
 	release := func() {}
 	accountID := apiKey.GenfityUserID
 	if h.rateLimit != nil && limits.HasConcurrency() {
@@ -1686,6 +1752,11 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 			return
 		}
+	}
+	if errCode, status := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model); status != 0 {
+		h.recordFailedRequest(ctx, apiKey, publicModel, errCode, status, started)
+		respondError(w, status, errCode)
+		return
 	}
 	release := func() {}
 	accountID := apiKey.GenfityUserID

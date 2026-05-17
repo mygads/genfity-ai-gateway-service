@@ -249,6 +249,12 @@ type ModelSyncItem struct {
 	SupportsTools      bool   `json:"supports_tools"`
 	SupportsVision     bool   `json:"supports_vision"`
 	PaygExposed        bool   `json:"payg_exposed"`
+	// IsFree marks the model as free-tier; when true the gateway enforces
+	// per-(user,model) limits below in addition to plan-level limits.
+	IsFree             bool   `json:"is_free"`
+	FreeLimitRPD       *int32 `json:"free_limit_rpd,omitempty"`
+	FreeLimitRPM       *int32 `json:"free_limit_rpm,omitempty"`
+	FreeLimitTPD       *int64 `json:"free_limit_tpd,omitempty"`
 	RouterInstanceCode string `json:"router_instance_code,omitempty"`
 	RouterModel        string `json:"router_model,omitempty"`
 }
@@ -278,16 +284,20 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 		}
 
 		model, err := s.store.UpsertModel(ctx, store.AIModel{
-			ID:               modelID,
-			PublicModel:      item.PublicModel,
-			DisplayName:      item.DisplayName,
-			Description:      desc,
-			Status:           status,
-			ContextWindow:    item.ContextWindow,
+			ID:                modelID,
+			PublicModel:       item.PublicModel,
+			DisplayName:       item.DisplayName,
+			Description:       desc,
+			Status:            status,
+			ContextWindow:     item.ContextWindow,
 			SupportsStreaming: item.SupportsStreaming,
-			SupportsTools:    item.SupportsTools,
-			SupportsVision:   item.SupportsVision,
-			PaygExposed:      item.PaygExposed,
+			SupportsTools:     item.SupportsTools,
+			SupportsVision:    item.SupportsVision,
+			PaygExposed:       item.PaygExposed,
+			IsFree:            item.IsFree,
+			FreeLimitRPD:      item.FreeLimitRPD,
+			FreeLimitRPM:      item.FreeLimitRPM,
+			FreeLimitTPD:      item.FreeLimitTPD,
 		})
 		if err != nil {
 			return count, err

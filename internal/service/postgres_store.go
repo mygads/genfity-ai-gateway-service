@@ -29,8 +29,9 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, item store.SubscriptionP
 		INSERT INTO ai_gateway.subscription_plan_snapshots (
 			id, plan_code, display_name, status, monthly_price, currency,
 			quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit,
+			max_requests_per_period,
 			metadata, synced_from_genfity_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (plan_code) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
 			status = EXCLUDED.status,
@@ -40,17 +41,20 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, item store.SubscriptionP
 			rate_limit_rpm = EXCLUDED.rate_limit_rpm,
 			rate_limit_tpm = EXCLUDED.rate_limit_tpm,
 			concurrent_limit = EXCLUDED.concurrent_limit,
+			max_requests_per_period = EXCLUDED.max_requests_per_period,
 			metadata = EXCLUDED.metadata,
 			synced_from_genfity_at = EXCLUDED.synced_from_genfity_at,
 			updated_at = now()
 		RETURNING id, plan_code, display_name, status, monthly_price::text, currency,
 			quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit,
+			max_requests_per_period,
 			metadata, synced_from_genfity_at, created_at, updated_at`,
 		nilUUID(item.ID), item.PlanCode, item.DisplayName, defaultString(item.Status, "active"), item.MonthlyPrice,
 		defaultString(item.Currency, "IDR"), item.QuotaTokensMonthly, item.RateLimitRPM, item.RateLimitTPM,
-		item.ConcurrentLimit, metadata, defaultTime(item.SyncedFromGenfityAt),
+		item.ConcurrentLimit, item.MaxRequestsPerPeriod, metadata, defaultTime(item.SyncedFromGenfityAt),
 	).Scan(&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency,
 		&item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit,
+		&item.MaxRequestsPerPeriod,
 		&item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return store.SubscriptionPlanSnapshot{}, err
@@ -59,7 +63,7 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, item store.SubscriptionP
 }
 
 func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanSnapshot {
-	rows, err := s.pool.Query(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots ORDER BY plan_code ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, max_requests_per_period, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots ORDER BY plan_code ASC`)
 	if err != nil {
 		return nil
 	}
@@ -67,7 +71,7 @@ func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanS
 	items := []store.SubscriptionPlanSnapshot{}
 	for rows.Next() {
 		var item store.SubscriptionPlanSnapshot
-		if rows.Scan(&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency, &item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit, &item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt) == nil {
+		if rows.Scan(&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency, &item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit, &item.MaxRequestsPerPeriod, &item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt) == nil {
 			items = append(items, item)
 		}
 	}
@@ -79,9 +83,10 @@ func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanS
 
 func (s *PostgresStore) GetPlanByCode(ctx context.Context, planCode string) (*store.SubscriptionPlanSnapshot, error) {
 	var item store.SubscriptionPlanSnapshot
-	err := s.pool.QueryRow(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots WHERE plan_code = $1 LIMIT 1`, planCode).Scan(
+	err := s.pool.QueryRow(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, max_requests_per_period, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots WHERE plan_code = $1 LIMIT 1`, planCode).Scan(
 		&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency,
 		&item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit,
+		&item.MaxRequestsPerPeriod,
 		&item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -192,8 +197,8 @@ func (s *PostgresStore) UpdateAPIKeyLastUsedAt(ctx context.Context, id uuid.UUID
 
 func (s *PostgresStore) UpsertModel(ctx context.Context, item store.AIModel) (store.AIModel, error) {
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO ai_gateway.ai_models (id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		INSERT INTO ai_gateway.ai_models (id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (public_model) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
 			description = EXCLUDED.description,
@@ -203,10 +208,14 @@ func (s *PostgresStore) UpsertModel(ctx context.Context, item store.AIModel) (st
 			supports_tools = EXCLUDED.supports_tools,
 			supports_vision = EXCLUDED.supports_vision,
 			payg_exposed = EXCLUDED.payg_exposed,
+			is_free = EXCLUDED.is_free,
+			free_limit_rpd = EXCLUDED.free_limit_rpd,
+			free_limit_rpm = EXCLUDED.free_limit_rpm,
+			free_limit_tpd = EXCLUDED.free_limit_tpd,
 			updated_at = now()
-		RETURNING id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, created_at, updated_at`,
-		nilUUID(item.ID), item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed,
-	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.CreatedAt, &item.UpdatedAt)
+		RETURNING id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at`,
+		nilUUID(item.ID), item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed, item.IsFree, item.FreeLimitRPD, item.FreeLimitRPM, item.FreeLimitTPD,
+	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return store.AIModel{}, err
 	}
@@ -225,11 +234,15 @@ func (s *PostgresStore) UpdateModel(ctx context.Context, item store.AIModel) (st
 			supports_tools = $8,
 			supports_vision = $9,
 			payg_exposed = $10,
+			is_free = $11,
+			free_limit_rpd = $12,
+			free_limit_rpm = $13,
+			free_limit_tpd = $14,
 			updated_at = now()
 		WHERE id = $1
-		RETURNING id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, created_at, updated_at`,
-		item.ID, item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed,
-	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.CreatedAt, &item.UpdatedAt)
+		RETURNING id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at`,
+		item.ID, item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed, item.IsFree, item.FreeLimitRPD, item.FreeLimitRPM, item.FreeLimitTPD,
+	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.AIModel{}, ErrNotFound
 	}
@@ -248,7 +261,7 @@ func (s *PostgresStore) UpdateModelStatus(ctx context.Context, id uuid.UUID, sta
 }
 
 func (s *PostgresStore) ListAllModels(ctx context.Context) []store.AIModel {
-	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, created_at, updated_at FROM ai_gateway.ai_models ORDER BY public_model ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models ORDER BY public_model ASC`)
 	if err != nil {
 		return nil
 	}
@@ -278,7 +291,7 @@ func (s *PostgresStore) DeleteModel(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *PostgresStore) ListModels(ctx context.Context) []store.AIModel {
-	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, created_at, updated_at FROM ai_gateway.ai_models ORDER BY display_name ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models ORDER BY display_name ASC`)
 	if err != nil {
 		return nil
 	}
@@ -298,7 +311,7 @@ func (s *PostgresStore) ListModels(ctx context.Context) []store.AIModel {
 
 func (s *PostgresStore) GetModelByID(ctx context.Context, id uuid.UUID) (*store.AIModel, error) {
 	var item store.AIModel
-	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, created_at, updated_at FROM ai_gateway.ai_models WHERE id = $1 LIMIT 1`, id).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.CreatedAt, &item.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE id = $1 LIMIT 1`, id).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -307,7 +320,7 @@ func (s *PostgresStore) GetModelByID(ctx context.Context, id uuid.UUID) (*store.
 
 func (s *PostgresStore) GetModelByPublicName(ctx context.Context, publicModel string) (*store.AIModel, error) {
 	var item store.AIModel
-	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, created_at, updated_at FROM ai_gateway.ai_models WHERE public_model = $1 LIMIT 1`, publicModel).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.CreatedAt, &item.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE public_model = $1 LIMIT 1`, publicModel).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1198,7 +1211,7 @@ func scanAPIKey(row pgx.Row, item *store.APIKey) error {
 }
 
 func scanModel(row pgx.Row, item *store.AIModel) error {
-	return row.Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.CreatedAt, &item.UpdatedAt)
+	return row.Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 }
 
 func scanRoute(row pgx.Row, item *store.AIModelRoute) error {
