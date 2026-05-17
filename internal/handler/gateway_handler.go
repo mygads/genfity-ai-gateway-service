@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1039,6 +1040,47 @@ func (h *GatewayHandler) clientForRouter(ctx context.Context, routerInstanceCode
 	return router.NewCLIProxyClient(instance.InternalBaseURL, h.routerAPIKey, timeout), true
 }
 
+// readBodyWithKeepalive reads the upstream response body while sending periodic
+// newlines to the downstream client to prevent proxy idle timeouts (Cloudflare 120s).
+// It strips keepalive newlines from the captured body so callers get clean content.
+func readBodyWithKeepalive(w http.ResponseWriter, body io.ReadCloser, interval time.Duration) []byte {
+	if interval <= 0 {
+		interval = 25 * time.Second
+	}
+	flusher, canFlush := w.(http.Flusher)
+
+	var (
+		result []byte
+		done   = make(chan struct{})
+		mu     sync.Mutex
+	)
+
+	go func() {
+		defer close(done)
+		raw, _ := io.ReadAll(body)
+		mu.Lock()
+		result = raw
+		mu.Unlock()
+	}()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			mu.Lock()
+			out := bytes.TrimLeft(result, "\n\r ")
+			mu.Unlock()
+			return out
+		case <-ticker.C:
+			if canFlush {
+				_, _ = w.Write([]byte("\n"))
+				flusher.Flush()
+			}
+		}
+	}
+}
+
 // isRetriableStatus returns true when the upstream error code should trigger
 // a combo fallback to the next entry.
 func isRetriableStatus(code int) bool {
@@ -1388,6 +1430,36 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Non-streaming success: read body with keepalive to prevent
+		// Cloudflare idle timeout (120s).
+		if !streamRequested && statusCode < 400 {
+			effectiveRoute := &store.AIModelRoute{
+				ID:                 route.ID,
+				ModelID:            route.ModelID,
+				RouterInstanceCode: cand.routerInstanceCode,
+				RouterModel:        cand.routerModel,
+				Status:             route.Status,
+				CreatedAt:          route.CreatedAt,
+			}
+			body := readBodyWithKeepalive(w, resp.Body, 25*time.Second)
+			resp.Body.Close()
+			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+				zerolog.Ctx(ctx).Error().Err(err).
+					Str("public_model", publicModel).
+					Str("router_instance_code", cand.routerInstanceCode).
+					Str("router_model", cand.routerModel).
+					Str("api_key_id", apiKey.ID.String()).
+					Msg("non-streaming settlement failed")
+			}
+			settled = true
+			for k, v := range resp.Header {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(statusCode)
+			_, _ = w.Write(body)
+			return
+		}
+
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 
@@ -1654,6 +1726,25 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
 			settled = true
+			return
+		}
+
+		// Non-streaming success: read body with keepalive to prevent
+		// Cloudflare idle timeout (120s).
+		if !streamRequested && statusCode < 400 {
+			effectiveRoute := &store.AIModelRoute{
+				ID:                 route.ID,
+				ModelID:            route.ModelID,
+				RouterInstanceCode: cand.routerInstanceCode,
+				RouterModel:        cand.routerModel,
+				Status:             route.Status,
+				CreatedAt:          route.CreatedAt,
+			}
+			body := readBodyWithKeepalive(w, resp.Body, 25*time.Second)
+			resp.Body.Close()
+			settled = true
+			h.writeUpstreamResponse(w, resp, body)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
 		}
 

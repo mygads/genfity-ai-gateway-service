@@ -57,7 +57,7 @@ func Load() Config {
 		EncryptionKey:          getEnv("ENCRYPTION_KEY", ""),
 		DefaultCurrency:        getEnv("DEFAULT_CURRENCY", "IDR"),
 		LogLevel:               getEnv("LOG_LEVEL", "info"),
-		RequestTimeoutSeconds:  getEnvInt("REQUEST_TIMEOUT_SECONDS", 120),
+		RequestTimeoutSeconds:  getEnvInt("REQUEST_TIMEOUT_SECONDS", 330),
 		GlobalRateLimitEnabled: getEnvBool("GLOBAL_RATE_LIMIT_ENABLED", true),
 		GlobalRateLimitRPM:     getEnvInt("GLOBAL_RATE_LIMIT_RPM", 300),
 		GlobalRateLimitBurst:   getEnvInt("GLOBAL_RATE_LIMIT_BURST", 60),
