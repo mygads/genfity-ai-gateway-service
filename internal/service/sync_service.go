@@ -257,6 +257,13 @@ type ModelSyncItem struct {
 	FreeLimitTPD       *int64 `json:"free_limit_tpd,omitempty"`
 	RouterInstanceCode string `json:"router_instance_code,omitempty"`
 	RouterModel        string `json:"router_model,omitempty"`
+	// PAYG pricing fields — when present, SyncModels upserts an
+	// ai_model_prices row so the gateway can bill PAYG requests.
+	PriceInputPer1M    *string `json:"price_input_per_1m,omitempty"`
+	PriceOutputPer1M   *string `json:"price_output_per_1m,omitempty"`
+	PriceCachedPer1M   *string `json:"price_cached_per_1m,omitempty"`
+	PriceReasoningPer1M *string `json:"price_reasoning_per_1m,omitempty"`
+	PriceCurrency      string  `json:"price_currency,omitempty"`
 }
 
 func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (int, error) {
@@ -319,6 +326,49 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 				RouterInstanceCode: item.RouterInstanceCode,
 				RouterModel:        item.RouterModel,
 				Status:             "active",
+			}); err != nil {
+				return count, err
+			}
+		}
+
+		// Optionally upsert PAYG price. When price fields are supplied
+		// (even "0"), create/update the ai_model_prices row so the gateway
+		// billing logic finds a non-nil price entry for this model.
+		if item.PriceInputPer1M != nil || item.PriceOutputPer1M != nil {
+			inputPrice := "0"
+			if item.PriceInputPer1M != nil {
+				inputPrice = *item.PriceInputPer1M
+			}
+			outputPrice := "0"
+			if item.PriceOutputPer1M != nil {
+				outputPrice = *item.PriceOutputPer1M
+			}
+			currency := item.PriceCurrency
+			if currency == "" {
+				currency = "USD"
+			}
+
+			var priceID uuid.UUID
+			existingPrices := s.models.ListPrices(ctx)
+			for _, p := range existingPrices {
+				if p.ModelID == model.ID {
+					priceID = p.ID
+					break
+				}
+			}
+			if priceID == uuid.Nil {
+				priceID = uuid.New()
+			}
+
+			if _, err := s.models.UpsertPrice(ctx, store.AIModelPrice{
+				ID:                  priceID,
+				ModelID:             model.ID,
+				InputPricePer1M:     inputPrice,
+				OutputPricePer1M:    outputPrice,
+				CachedPricePer1M:    item.PriceCachedPer1M,
+				ReasoningPricePer1M: item.PriceReasoningPer1M,
+				Currency:            currency,
+				Active:              true,
 			}); err != nil {
 				return count, err
 			}
