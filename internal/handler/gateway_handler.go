@@ -55,6 +55,14 @@ func subscriptionPlan(sub *service.ActiveSubscription) *store.SubscriptionPlanSn
 	return sub.Plan
 }
 
+func shouldEnforceUnlimitedAllowlist(apiKey store.APIKey) bool {
+	source := apiKey.BillingSource
+	if source == "" {
+		source = "auto"
+	}
+	return source == "auto" || source == "subscription"
+}
+
 func entitlementAllowsModel(entitlement any, publicModel string) bool {
 	typed, ok := entitlement.(*service.ActiveSubscription)
 	if !ok || typed == nil || typed.Entitlement == nil {
@@ -1364,7 +1372,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
-	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1429,7 +1437,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
@@ -1673,7 +1681,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
-	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1743,7 +1751,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
 		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
