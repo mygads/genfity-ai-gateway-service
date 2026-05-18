@@ -21,6 +21,10 @@ type SubscriptionPlanSnapshot struct {
 	// MaxRequestsPerPeriod caps total requests in one entitlement period
 	// (period_start..period_end). NULL/0 = unlimited.
 	MaxRequestsPerPeriod *int32          `json:"max_requests_per_period,omitempty"`
+	// RateLimitRPD caps requests per calendar day (UTC) per user on this
+	// plan. Independent of MaxRequestsPerPeriod — admin may set either or
+	// both. NULL/0 = no daily limit.
+	RateLimitRPD         *int32          `json:"rate_limit_rpd,omitempty"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
 	SyncedFromGenfityAt  time.Time       `json:"synced_from_genfity_at"`
 	CreatedAt            time.Time       `json:"created_at"`

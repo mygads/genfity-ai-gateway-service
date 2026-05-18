@@ -24,6 +24,9 @@ type PlanLimits struct {
 	// MaxRequestsPerPeriod caps total requests for one entitlement period
 	// (period_start..period_end). 0 = unlimited.
 	MaxRequestsPerPeriod int
+	// RPD caps requests per calendar day (UTC) per user on the plan. 0 =
+	// no daily limit. Independent of MaxRequestsPerPeriod.
+	RPD                  int
 }
 
 func NewRateLimitService(client *redis.Client, prefix string, logger zerolog.Logger) *RateLimitService {
@@ -115,6 +118,9 @@ func PlanLimitsFromSnapshot(plan *store.SubscriptionPlanSnapshot) PlanLimits {
 	if plan.MaxRequestsPerPeriod != nil {
 		limits.MaxRequestsPerPeriod = int(*plan.MaxRequestsPerPeriod)
 	}
+	if plan.RateLimitRPD != nil {
+		limits.RPD = int(*plan.RateLimitRPD)
+	}
 	return limits
 }
 
@@ -138,6 +144,10 @@ func (l PlanLimits) HasMaxRequestsPerPeriod() bool {
 	return l.MaxRequestsPerPeriod > 0
 }
 
+func (l PlanLimits) HasRPD() bool {
+	return l.RPD > 0
+}
+
 func (l PlanLimits) TPMAllowance(estimatedTokens int64) int64 {
 	if !l.HasTPM() {
 		return 0
@@ -150,6 +160,31 @@ func (l PlanLimits) TPMAllowance(estimatedTokens int64) int64 {
 
 func (l PlanLimits) TPMExceeded(actualTotalTokens int64) bool {
 	return l.HasTPM() && actualTotalTokens > int64(l.TPM)
+}
+
+// CheckPlanRPD enforces the per-(user,plan) request count for the current
+// UTC calendar day. Independent of MaxRequestsPerPeriod, which is scoped
+// to the entitlement period; RPD resets at UTC midnight every day. The
+// counter expires after 25 hours so it survives clock skew across the
+// day boundary. limit <= 0 means no daily cap.
+func (s *RateLimitService) CheckPlanRPD(ctx context.Context, userID, planCode string, limit int) error {
+	if limit <= 0 || userID == "" {
+		return nil
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	count, err := s.client.Incr(ctx, key).Result()
+	if err != nil {
+		return err
+	}
+	if count == 1 {
+		_ = s.client.Expire(ctx, key, 25*time.Hour).Err()
+	}
+	if int(count) > limit {
+		_ = s.client.Decr(ctx, key).Err()
+		return fmt.Errorf("plan_rpd_exceeded")
+	}
+	return nil
 }
 
 // CheckRequestsPerPeriod increments and validates the per-(user,plan,period)

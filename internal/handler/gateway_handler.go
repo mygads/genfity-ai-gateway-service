@@ -536,6 +536,11 @@ func (h *GatewayHandler) applyPreRequestLimits(
 			return "plan_period_limit_exceeded", http.StatusTooManyRequests
 		}
 	}
+	if limits.HasRPD() && subscription != nil && subscription.Plan != nil {
+		if err := h.rateLimit.CheckPlanRPD(ctx, apiKey.GenfityUserID, subscription.Plan.PlanCode, limits.RPD); err != nil {
+			return "plan_rpd_exceeded", http.StatusTooManyRequests
+		}
+	}
 	if model != nil && model.IsFree {
 		if model.FreeLimitRPM != nil && *model.FreeLimitRPM > 0 {
 			if err := h.rateLimit.CheckFreeModelRPM(ctx, apiKey.GenfityUserID, model.PublicModel, int(*model.FreeLimitRPM)); err != nil {
