@@ -571,7 +571,13 @@ func periodKey(entitlement *store.CustomerEntitlement) string {
 }
 
 func pricingGroup(subscription *service.ActiveSubscription) string {
-	if subscription == nil || subscription.Entitlement == nil || len(subscription.Entitlement.Metadata) == 0 {
+	if subscription == nil || subscription.Entitlement == nil {
+		return ""
+	}
+	if subscription.Entitlement.PricingGroup != nil && *subscription.Entitlement.PricingGroup != "" {
+		return *subscription.Entitlement.PricingGroup
+	}
+	if len(subscription.Entitlement.Metadata) == 0 {
 		return ""
 	}
 	var meta map[string]any
@@ -594,7 +600,17 @@ func quotaLimit(subscription *service.ActiveSubscription) int64 {
 }
 
 func balanceAmount(subscription *service.ActiveSubscription) float64 {
-	if subscription == nil || subscription.Entitlement == nil || subscription.Entitlement.BalanceSnapshot == nil {
+	if subscription == nil || subscription.Entitlement == nil {
+		return 0
+	}
+	// Prefer CreditBalance (authoritative for credit_package entitlements).
+	if subscription.Entitlement.CreditBalance != nil {
+		value, _ := strconv.ParseFloat(*subscription.Entitlement.CreditBalance, 64)
+		if value > 0 {
+			return value
+		}
+	}
+	if subscription.Entitlement.BalanceSnapshot == nil {
 		return 0
 	}
 	value, _ := strconv.ParseFloat(*subscription.Entitlement.BalanceSnapshot, 64)
