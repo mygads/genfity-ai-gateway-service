@@ -60,10 +60,7 @@ func shouldEnforceUnlimitedAllowlist(apiKey store.APIKey) bool {
 	if source == "" {
 		source = "auto"
 	}
-	// Only hard-block for keys pinned to subscription. For "auto" mode,
-	// the user may have a credit package or PAYG balance to fall back to
-	// when the unlimited plan doesn't cover the requested model.
-	return source == "subscription"
+	return source == "auto" || source == "subscription"
 }
 
 func entitlementAllowsModel(entitlement any, publicModel string) bool {
