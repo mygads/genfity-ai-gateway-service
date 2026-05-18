@@ -970,6 +970,9 @@ func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID string) (*s
 }
 
 func entitlementPricingGroup(item store.CustomerEntitlement) string {
+	if item.PricingGroup != nil && *item.PricingGroup != "" {
+		return *item.PricingGroup
+	}
 	if len(item.Metadata) == 0 {
 		return ""
 	}
