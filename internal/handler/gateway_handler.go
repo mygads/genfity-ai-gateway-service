@@ -727,7 +727,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		if group == "" {
 			group = pricingGroup(subscription)
 		}
-		if group == "unlimited" && modelCoveredByUnlimited(subscription, model) {
+		if (group == "unlimited" || group == "unlimited_plan") && modelCoveredByUnlimited(subscription, model) {
 			return runtimeReservation{BillingMode: "unlimited"}, 0, ""
 		}
 		// If key is pinned to subscription only, fail closed when
