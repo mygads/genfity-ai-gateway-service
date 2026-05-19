@@ -63,38 +63,42 @@ func shouldEnforceUnlimitedAllowlist(apiKey store.APIKey) bool {
 	return source == "auto" || source == "subscription"
 }
 
+// isUnlimitedSubscription returns true when the active subscription is on
+// an unlimited plan, using the live-policy chain: live plan snapshot first,
+// entitlement column / metadata as fallback. Admin flipping a plan's
+// pricingGroup propagates to existing subscribers next request.
+func isUnlimitedSubscription(subscription *service.ActiveSubscription) bool {
+	if subscription == nil || subscription.Entitlement == nil {
+		return false
+	}
+	group := resolveSubscriptionPricingGroup(subscription)
+	if group == "" {
+		group = pricingGroup(subscription)
+	}
+	return group == "unlimited" || group == "unlimited_plan"
+}
+
 func entitlementAllowsModel(entitlement any, publicModel string) bool {
 	typed, ok := entitlement.(*service.ActiveSubscription)
 	if !ok || typed == nil || typed.Entitlement == nil {
 		return false
 	}
-	metadata := typed.Entitlement.Metadata
-	if len(metadata) == 0 {
+	// Use the live-policy chain so plan edits propagate without
+	// re-syncing every user's entitlement. Falls back to entitlement
+	// metadata only when plan snapshot doesn't define allowedModels.
+	group := resolveSubscriptionPricingGroup(typed)
+	if group != "unlimited_plan" && group != "unlimited" {
+		// Non-unlimited plans don't enforce an allowlist at this gate.
 		return true
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(metadata, &payload); err != nil {
-		// Fail-closed: corrupt metadata means we cannot verify allowance.
-		return false
-	}
-	pricingGroup, _ := payload["pricingGroup"].(string)
-	if pricingGroup != "unlimited_plan" {
+	allowed := resolveAllowedModels(typed)
+	if len(allowed) == 0 {
+		// Permissive default for legacy unlimited plans without an
+		// explicit allowlist (matches modelCoveredByUnlimited).
 		return true
 	}
-	allowedRaw, exists := payload["allowedModels"]
-	if !exists {
-		allowedRaw = payload["allowed_models"]
-	}
-	if allowedRaw == nil {
-		// Unlimited plan must explicitly allow-list models. Fail-closed.
-		return false
-	}
-	allowed, ok := allowedRaw.([]any)
-	if !ok {
-		return false
-	}
-	for _, item := range allowed {
-		if modelName, ok := item.(string); ok && strings.EqualFold(modelName, publicModel) {
+	for _, modelName := range allowed {
+		if strings.EqualFold(modelName, publicModel) {
 			return true
 		}
 	}
@@ -907,11 +911,22 @@ func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenRe
 		completion = anyToInt64(payload["max_completion_tokens"])
 	}
 	bounded := completion > 0
-	if completion == 0 && model != nil && model.ContextWindow != nil {
-		remaining := int64(*model.ContextWindow) - prompt
-		if remaining > 0 {
-			completion = remaining
-			bounded = true
+	if completion == 0 {
+		// When the client doesn't bound the response, use a sane default
+		// rather than the full context window. Reserving context_window
+		// (e.g. 1M for some free models) burns the entire per-day TPD
+		// budget on the very first request, even though real responses
+		// are typically <2k tokens. The reservation is reconciled with
+		// the actual usage on finalize, so a slight over-reserve is
+		// safe; an over-reserve of 1M tokens is not.
+		completion = 4096
+		// Don't exceed remaining context window if the model declares one
+		// — the upstream would reject a request that asks for more.
+		if model != nil && model.ContextWindow != nil {
+			remaining := int64(*model.ContextWindow) - prompt
+			if remaining > 0 && remaining < completion {
+				completion = remaining
+			}
 		}
 	}
 	total := prompt + completion
@@ -1693,7 +1708,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
-	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -1758,7 +1773,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
 		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
@@ -2002,7 +2017,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
 		return
 	}
-	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
 	}
@@ -2072,7 +2087,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if shouldEnforceUnlimitedAllowlist(apiKey) && subscription != nil && pricingGroup(subscription) == "unlimited_plan" && !entitlementAllowsModel(subscription, publicModel) {
+	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
 		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
