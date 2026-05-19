@@ -720,15 +720,12 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 	allowPayg := source == "auto" || source == "payg"
 
 	// Priority 1: Unlimited coverage. The subscription must be an
-	// "unlimited" plan AND the model must appear in allowedModels
-	// metadata. allowedModels may be empty on legacy plans — in that
-	// case we fall through (not covered).
+	// "unlimited" plan AND the model must appear in allowedModels.
+	// pricingGroup + allowedModels are resolved live from the plan
+	// snapshot so admin edits propagate to existing subscribers
+	// immediately; the entitlement's frozen copy is the legacy fallback.
 	if allowSubscription && subscription != nil && subscription.Entitlement != nil {
-		entitlement := subscription.Entitlement
-		group := ""
-		if entitlement.PricingGroup != nil {
-			group = *entitlement.PricingGroup
-		}
+		group := resolveSubscriptionPricingGroup(subscription)
 		if group == "" {
 			group = pricingGroup(subscription)
 		}
@@ -836,27 +833,115 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 }
 
 // modelCoveredByUnlimited returns true when the model's public id is
-// listed in the subscription's allowedModels metadata. An unlimited
-// plan with empty allowedModels covers ONLY the legacy behaviour of
-// any-model-allowed; we keep that permissive default so existing
-// "unlimited everything" plans don't break.
+// listed in the active subscription's allowedModels. We resolve from
+// the live plan snapshot's metadata FIRST (so admin edits propagate to
+// every existing subscriber immediately — the "live policy" model),
+// and fall back to the entitlement's frozen metadata only when the
+// plan snapshot doesn't carry the field. An unlimited plan with empty
+// allowedModels covers ANY model (legacy permissive default).
 func modelCoveredByUnlimited(subscription *service.ActiveSubscription, model *store.AIModel) bool {
 	if subscription == nil || model == nil || subscription.Entitlement == nil {
 		return false
 	}
-	meta := map[string]any{}
-	_ = json.Unmarshal(subscription.Entitlement.Metadata, &meta)
-	allowed, ok := meta["allowedModels"].([]any)
-	if !ok || len(allowed) == 0 {
+	allowed := resolveAllowedModels(subscription)
+	if len(allowed) == 0 {
 		// Permissive default for legacy unlimited plans.
 		return true
 	}
-	for _, v := range allowed {
-		if s, ok := v.(string); ok && s == model.PublicModel {
+	for _, s := range allowed {
+		if s == model.PublicModel {
 			return true
 		}
 	}
 	return false
+}
+
+// resolveAllowedModels reads allowedModels from the LIVE plan snapshot
+// metadata first, falling back to the entitlement's frozen metadata.
+// This is the central plumbing for "Live policy": plan edits affect
+// existing users on the next request, no manual entitlement re-sync
+// required. Returns an empty slice when neither source defines it.
+func resolveAllowedModels(subscription *service.ActiveSubscription) []string {
+	if subscription == nil {
+		return nil
+	}
+	// Priority 1: live plan snapshot metadata.
+	if subscription.Plan != nil && len(subscription.Plan.Metadata) > 0 {
+		planMeta := map[string]any{}
+		if err := json.Unmarshal(subscription.Plan.Metadata, &planMeta); err == nil {
+			if list, ok := extractAllowedModels(planMeta); ok {
+				return list
+			}
+		}
+	}
+	// Priority 2: entitlement metadata (frozen at purchase, legacy fallback).
+	if subscription.Entitlement != nil && len(subscription.Entitlement.Metadata) > 0 {
+		entMeta := map[string]any{}
+		if err := json.Unmarshal(subscription.Entitlement.Metadata, &entMeta); err == nil {
+			if list, ok := extractAllowedModels(entMeta); ok {
+				return list
+			}
+		}
+	}
+	return nil
+}
+
+func extractAllowedModels(meta map[string]any) ([]string, bool) {
+	raw, exists := meta["allowedModels"]
+	if !exists {
+		raw, exists = meta["allowed_models"]
+	}
+	if !exists {
+		return nil, false
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out, true
+}
+
+// resolveSubscriptionPricingGroup returns the active pricing group with
+// the same Live-policy chain as resolveAllowedModels: live plan metadata
+// first, entitlement column / metadata as fallback. Admin flipping a
+// plan's pricingGroup propagates to existing subscribers next request.
+func resolveSubscriptionPricingGroup(subscription *service.ActiveSubscription) string {
+	if subscription == nil {
+		return ""
+	}
+	// Priority 1: live plan snapshot metadata.
+	if subscription.Plan != nil && len(subscription.Plan.Metadata) > 0 {
+		planMeta := map[string]any{}
+		if err := json.Unmarshal(subscription.Plan.Metadata, &planMeta); err == nil {
+			if s, ok := planMeta["pricingGroup"].(string); ok && s != "" {
+				return s
+			}
+			if s, ok := planMeta["pricing_group"].(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	// Priority 2: entitlement (legacy fallback).
+	if subscription.Entitlement != nil {
+		if subscription.Entitlement.PricingGroup != nil && *subscription.Entitlement.PricingGroup != "" {
+			return *subscription.Entitlement.PricingGroup
+		}
+		if len(subscription.Entitlement.Metadata) > 0 {
+			entMeta := map[string]any{}
+			if err := json.Unmarshal(subscription.Entitlement.Metadata, &entMeta); err == nil {
+				if s, ok := entMeta["pricingGroup"].(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, limits service.PlanLimits, payload map[string]any, model *store.AIModel) (runtimeReservation, int, string) {
@@ -1271,35 +1356,36 @@ func (h *GatewayHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 	allModels := h.models.ListModels(ctx)
 	prices := h.models.ListPrices(ctx)
 
-	// Lookup user's entitlement once for "subscription" and "auto".
-	var entitlement *store.CustomerEntitlement
+	// Lookup user's active subscription (entitlement + live plan snapshot)
+	// once for "subscription" and "auto". We need the live plan snapshot
+	// because allowedModels is resolved from plan metadata (not entitlement
+	// metadata) so admin edits propagate to existing subscribers — see
+	// resolveAllowedModels for the full lookup chain.
+	var subscription *service.ActiveSubscription
 	if source == "subscription" || source == "auto" {
-		if ent, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil {
-			entitlement = ent
+		if sub, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID); err == nil {
+			subscription = sub
 		}
 	}
 
 	allowsViaSubscription := func(m store.AIModel) bool {
-		if entitlement == nil {
+		if subscription == nil || subscription.Entitlement == nil {
 			return false
 		}
 		// Plan must be unlimited group; otherwise subscription doesn't apply.
-		group := ""
-		if entitlement.PricingGroup != nil {
-			group = *entitlement.PricingGroup
-		}
+		// Resolve pricing_group from the live plan first so admin edits
+		// (e.g. flipping pricingGroup on a plan) take effect immediately.
+		group := resolveSubscriptionPricingGroup(subscription)
 		if group != "unlimited" && group != "unlimited_plan" {
 			return false
 		}
-		// Check allowedModels metadata; empty = all models allowed (legacy).
-		meta := map[string]any{}
-		_ = json.Unmarshal(entitlement.Metadata, &meta)
-		allowed, ok := meta["allowedModels"].([]any)
-		if !ok || len(allowed) == 0 {
+		// Empty allowedModels = all models allowed (legacy permissive default).
+		allowed := resolveAllowedModels(subscription)
+		if len(allowed) == 0 {
 			return true
 		}
-		for _, v := range allowed {
-			if s, ok := v.(string); ok && s == m.PublicModel {
+		for _, s := range allowed {
+			if s == m.PublicModel {
 				return true
 			}
 		}
