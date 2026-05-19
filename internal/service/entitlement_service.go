@@ -106,8 +106,13 @@ func (s *EntitlementService) CheckActiveSubscription(ctx context.Context, userID
 	if err != nil {
 		return nil, err
 	}
-	if plan.Status != "active" {
-		return nil, fmt.Errorf("subscription_inactive")
-	}
+	// We intentionally DO NOT block on plan.Status != "active" here.
+	// "inactive" in genfity-app means "hidden from the marketplace + new
+	// checkout disabled" — existing subscribers keep their entitlement
+	// alive until period_end. Blocking at the runtime layer would cancel
+	// paid users mid-period whenever an admin retires a plan, which is
+	// the opposite of what admins expect from "inactive". The marketplace
+	// and checkout endpoints are responsible for filtering inactive
+	// plans away from new buyers.
 	return &ActiveSubscription{Entitlement: entitlement, Plan: plan}, nil
 }
