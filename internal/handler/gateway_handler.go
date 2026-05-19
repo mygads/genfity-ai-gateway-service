@@ -242,6 +242,18 @@ func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int6
 	var payload map[string]any
 	if err := dec.Decode(&payload); err == nil {
 		prompt, completion, total, cached, reasoning = parseUsageFromPayload(payload)
+		// If completion is 0 but the response has content (text or tool_use),
+		// estimate from body. Anthropic upstream sometimes reports
+		// output_tokens=0 for tool_use responses; without this fallback,
+		// credit/PAYG users get charged $0 for tool calls.
+		if completion == 0 {
+			if est := estimateOutputTokensFromPayload(payload); est > 0 {
+				completion = est
+				if total < prompt+completion {
+					total = prompt + completion
+				}
+			}
+		}
 		if prompt != 0 || completion != 0 || total != 0 {
 			return prompt, completion, total, cached, reasoning
 		}
@@ -313,6 +325,13 @@ func detectErrorFromPayload(payload map[string]any) string {
 
 func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total int64) {
 	var event strings.Builder
+	// Track whether we've seen a final usage report (message_delta with
+	// stop_reason set, or chat.completion final chunk). When we have, we
+	// stop overwriting from earlier partials. SSE upstreams sometimes
+	// emit per-event running counters AND a final cumulative — the parser
+	// previously did "last non-zero wins" which can pick a partial.
+	var contentChars int64
+	finalSeen := false
 	flush := func() {
 		data := strings.TrimSpace(event.String())
 		event.Reset()
@@ -321,6 +340,16 @@ func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total i
 		}
 		var payload map[string]any
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			return
+		}
+		// Track text/tool_use content so we can fall back to char-based
+		// estimation if no usage block ever arrives.
+		contentChars += extractContentCharsFromSSEEvent(payload)
+
+		isFinal := isFinalSSEEvent(payload)
+		// Only overwrite if we haven't seen a final yet, OR this event is
+		// also a final (e.g. multiple message_delta arriving).
+		if finalSeen && !isFinal {
 			return
 		}
 		p, c, t, _, _ := parseUsageFromPayload(payload)
@@ -332,6 +361,9 @@ func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total i
 		}
 		if t != 0 {
 			total = t
+		}
+		if isFinal {
+			finalSeen = true
 		}
 	}
 
@@ -349,10 +381,208 @@ func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total i
 		}
 	}
 	flush()
+
+	// Fallback: if upstream never reported a meaningful completion count
+	// (tool_use streams, providers without include_usage), estimate from
+	// the content we observed. ~4 chars per token is the standard rough
+	// approximation that matches OpenAI's tiktoken at ±10%.
+	if completion == 0 && contentChars > 0 {
+		completion = (contentChars + 3) / 4
+		if completion < 1 {
+			completion = 1
+		}
+	}
 	if total == 0 {
 		total = prompt + completion
 	}
 	return prompt, completion, total
+}
+
+// extractContentCharsFromSSEEvent counts chars in any text/tool_use payload
+// inside one SSE chunk, regardless of provider format. We handle the
+// shapes we see in production:
+//   - OpenAI: choices[].delta.content (string)
+//   - Anthropic: delta.text, content_block.text, content_block.input (tool_use)
+//   - Anthropic: content[].text, content[].input
+func extractContentCharsFromSSEEvent(payload map[string]any) int64 {
+	var chars int64
+	// OpenAI delta.content
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, ch := range choices {
+			chMap, _ := ch.(map[string]any)
+			if chMap == nil {
+				continue
+			}
+			if delta, ok := chMap["delta"].(map[string]any); ok {
+				if s, ok := delta["content"].(string); ok {
+					chars += int64(len(s))
+				}
+				if calls, ok := delta["tool_calls"].([]any); ok {
+					for _, c := range calls {
+						chars += charsInToolCall(c)
+					}
+				}
+			}
+			if msg, ok := chMap["message"].(map[string]any); ok {
+				if s, ok := msg["content"].(string); ok {
+					chars += int64(len(s))
+				}
+				if calls, ok := msg["tool_calls"].([]any); ok {
+					for _, c := range calls {
+						chars += charsInToolCall(c)
+					}
+				}
+			}
+		}
+	}
+	// Anthropic delta on content_block_delta
+	if delta, ok := payload["delta"].(map[string]any); ok {
+		if s, ok := delta["text"].(string); ok {
+			chars += int64(len(s))
+		}
+		if s, ok := delta["partial_json"].(string); ok {
+			chars += int64(len(s))
+		}
+	}
+	// Anthropic content_block_start with a tool_use block
+	if cb, ok := payload["content_block"].(map[string]any); ok {
+		chars += charsInAnthropicContentBlock(cb)
+	}
+	// Anthropic message.content array (message_start gives empty, but
+	// some providers ship a flat final event with content[])
+	if msg, ok := payload["message"].(map[string]any); ok {
+		if blocks, ok := msg["content"].([]any); ok {
+			for _, b := range blocks {
+				if cb, ok := b.(map[string]any); ok {
+					chars += charsInAnthropicContentBlock(cb)
+				}
+			}
+		}
+	}
+	// Top-level content (Anthropic non-streaming response)
+	if blocks, ok := payload["content"].([]any); ok {
+		for _, b := range blocks {
+			if cb, ok := b.(map[string]any); ok {
+				chars += charsInAnthropicContentBlock(cb)
+			}
+		}
+	}
+	return chars
+}
+
+func charsInAnthropicContentBlock(cb map[string]any) int64 {
+	var chars int64
+	if s, ok := cb["text"].(string); ok {
+		chars += int64(len(s))
+	}
+	if input, ok := cb["input"].(map[string]any); ok {
+		if b, err := json.Marshal(input); err == nil {
+			chars += int64(len(b))
+		}
+	}
+	if input, ok := cb["input"].([]any); ok {
+		if b, err := json.Marshal(input); err == nil {
+			chars += int64(len(b))
+		}
+	}
+	if name, ok := cb["name"].(string); ok {
+		chars += int64(len(name))
+	}
+	return chars
+}
+
+func charsInToolCall(c any) int64 {
+	cMap, ok := c.(map[string]any)
+	if !ok {
+		return 0
+	}
+	var chars int64
+	if fn, ok := cMap["function"].(map[string]any); ok {
+		if s, ok := fn["name"].(string); ok {
+			chars += int64(len(s))
+		}
+		if s, ok := fn["arguments"].(string); ok {
+			chars += int64(len(s))
+		}
+	}
+	return chars
+}
+
+// isFinalSSEEvent reports whether the SSE chunk is a terminal usage
+// event we should trust over earlier partials. Anthropic emits
+// `message_delta` with `stop_reason` (and the final `usage`) before
+// `message_stop`; OpenAI emits a chunk with `finish_reason` set.
+func isFinalSSEEvent(payload map[string]any) bool {
+	if t, ok := payload["type"].(string); ok {
+		if t == "message_delta" {
+			if d, ok := payload["delta"].(map[string]any); ok {
+				if sr, ok := d["stop_reason"].(string); ok && sr != "" {
+					return true
+				}
+			}
+		}
+	}
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, ch := range choices {
+			chMap, _ := ch.(map[string]any)
+			if chMap == nil {
+				continue
+			}
+			if fr, ok := chMap["finish_reason"].(string); ok && fr != "" {
+				return true
+			}
+		}
+	}
+	// OpenAI always sends a tail chunk where usage is populated when
+	// stream_options.include_usage=true; treat any chunk that already
+	// carries a usage block as final.
+	if _, ok := payload["usage"].(map[string]any); ok {
+		return true
+	}
+	return false
+}
+
+// estimateOutputTokensFromPayload counts text + tool_use content in a
+// non-streaming response payload and returns ~chars/4 as token estimate.
+// Returns 0 when the body has no usable content (in which case the
+// upstream's reported zero is presumably correct).
+func estimateOutputTokensFromPayload(payload map[string]any) int64 {
+	var chars int64
+	// Anthropic-shape: top-level content array
+	if blocks, ok := payload["content"].([]any); ok {
+		for _, b := range blocks {
+			if cb, ok := b.(map[string]any); ok {
+				chars += charsInAnthropicContentBlock(cb)
+			}
+		}
+	}
+	// OpenAI-shape: choices[].message
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, ch := range choices {
+			chMap, _ := ch.(map[string]any)
+			if chMap == nil {
+				continue
+			}
+			if msg, ok := chMap["message"].(map[string]any); ok {
+				if s, ok := msg["content"].(string); ok {
+					chars += int64(len(s))
+				}
+				if calls, ok := msg["tool_calls"].([]any); ok {
+					for _, c := range calls {
+						chars += charsInToolCall(c)
+					}
+				}
+			}
+		}
+	}
+	if chars == 0 {
+		return 0
+	}
+	tokens := (chars + 3) / 4
+	if tokens < 1 {
+		tokens = 1
+	}
+	return tokens
 }
 
 func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int64, total int64, cached int64, reasoning int64) {

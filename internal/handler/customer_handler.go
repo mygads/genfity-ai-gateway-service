@@ -116,12 +116,46 @@ func (h *CustomerHandler) Quota(w http.ResponseWriter, r *http.Request) {
 
 func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
-	entitlement, err := h.entitlements.GetByUser(r.Context(), user.ID)
+	subscription, err := h.entitlements.CheckActiveSubscription(r.Context(), user.ID)
 	if err != nil {
-		respondError(w, http.StatusNotFound, "subscription_not_found")
+		// Fallback: maybe entitlement exists but no plan snapshot.
+		// Don't fail outright — return entitlement-only response so the
+		// dashboard can still render saldo/expiry cards.
+		entitlement, gerr := h.entitlements.GetByUser(r.Context(), user.ID)
+		if gerr != nil {
+			respondError(w, http.StatusNotFound, "subscription_not_found")
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{
+			"subscription": entitlement,
+			"plan":         nil,
+		})
 		return
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"subscription": entitlement})
+	// Flatten plan limits onto the response so the customer dashboard
+	// can display RPD/RPM/concurrent/period/quota caps without making a
+	// second admin call. The frontend reads these fields directly.
+	resp := map[string]any{
+		"subscription": subscription.Entitlement,
+		"plan":         subscription.Plan,
+	}
+	if subscription.Plan != nil {
+		resp["plan_code"] = subscription.Entitlement.PlanCode
+		resp["plan_name"] = subscription.Plan.DisplayName
+		resp["status"] = subscription.Entitlement.Status
+		resp["period_start"] = subscription.Entitlement.PeriodStart
+		resp["period_end"] = subscription.Entitlement.PeriodEnd
+		resp["quota_tokens_monthly"] = subscription.Plan.QuotaTokensMonthly
+		resp["rate_limit_rpm"] = subscription.Plan.RateLimitRPM
+		resp["rate_limit_tpm"] = subscription.Plan.RateLimitTPM
+		resp["rate_limit_rpd"] = subscription.Plan.RateLimitRPD
+		resp["concurrent_limit"] = subscription.Plan.ConcurrentLimit
+		resp["max_requests_per_period"] = subscription.Plan.MaxRequestsPerPeriod
+		if subscription.Entitlement.PricingGroup != nil {
+			resp["pricing_group"] = *subscription.Entitlement.PricingGroup
+		}
+	}
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (h *CustomerHandler) UpdateAPIKeyStatus(w http.ResponseWriter, r *http.Request) {
