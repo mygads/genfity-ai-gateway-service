@@ -327,6 +327,64 @@ func detectErrorFromPayload(payload map[string]any) string {
 	return ""
 }
 
+// looksLikeSuccessfulCompletion returns true only when the body has the
+// expected shape of a real completion (OpenAI choices[], Anthropic
+// content[], or an SSE stream that started emitting). Used as the
+// "is this really a success" gate for tick-on-success counters —
+// stricter than detectProviderErrorFromBody, which only catches the
+// known error envelopes. Some providers return HTTP 200 with shapes
+// like `{"message":"Improperly formed request.","reason":null}` that
+// neither match the success schema nor any error envelope; treating
+// those as success would charge users for failed requests.
+func looksLikeSuccessfulCompletion(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	// SSE: presence of any `data:` line means the stream started — at
+	// that point the request reached upstream and produced output. We
+	// trust the streaming body's own error detection elsewhere.
+	if bytes.Contains(body, []byte("data:")) {
+		return true
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+	// OpenAI-shape: choices is a non-empty array.
+	if choices, ok := payload["choices"].([]any); ok && len(choices) > 0 {
+		return true
+	}
+	// Anthropic-shape: content is a non-empty array AND type=="message".
+	if content, ok := payload["content"].([]any); ok && len(content) > 0 {
+		if t, _ := payload["type"].(string); t == "message" {
+			return true
+		}
+		return true
+	}
+	// Anthropic count_tokens / embeddings success: presence of
+	// input_tokens (count) or data array (embeddings).
+	if _, ok := payload["input_tokens"]; ok {
+		return true
+	}
+	if data, ok := payload["data"].([]any); ok && len(data) > 0 {
+		return true
+	}
+	return false
+}
+
+// shouldCountAsSuccess combines HTTP status, in-body error detection,
+// and positive shape detection. Counters tick only when ALL three
+// agree the request really succeeded.
+func shouldCountAsSuccess(statusCode int, body []byte) bool {
+	if statusCode < 200 || statusCode >= 300 {
+		return false
+	}
+	if detectProviderErrorFromBody(body) != "" {
+		return false
+	}
+	return looksLikeSuccessfulCompletion(body)
+}
+
 func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total int64) {
 	var event strings.Builder
 	// Track whether we've seen a final usage report (message_delta with
@@ -1852,7 +1910,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	// Period/RPD/free-model tick only on real success — 4xx/5xx and
 	// in-body provider errors leave the deferred rollback to release
 	// the slot.
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && detectProviderErrorFromBody(body) == "" {
+	if shouldCountAsSuccess(resp.StatusCode, body) {
 		preCounters.commit()
 	}
 	h.recordUsageWithLegacyBilling(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
@@ -2055,7 +2113,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 					Msg("non-streaming settlement failed")
 			}
 			settled = true
-			preCounters.commit()
+			if shouldCountAsSuccess(statusCode, body) {
+				preCounters.commit()
+			}
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
@@ -2084,7 +2144,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			// Period/RPD/free-model counters tick ONLY on real success.
 			// 4xx/5xx provider errors and in-body provider errors leave
 			// the deferred rollback to release the slot.
-			if statusCode >= 200 && statusCode < 300 && detectProviderErrorFromBody(body) == "" {
+			if shouldCountAsSuccess(statusCode, body) {
 				preCounters.commit()
 			}
 			for k, v := range resp.Header {
@@ -2109,7 +2169,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settled = true
-		if lastStatusCode >= 200 && lastStatusCode < 300 && detectProviderErrorFromBody(lastBody) == "" {
+		if shouldCountAsSuccess(lastStatusCode, lastBody) {
 			preCounters.commit()
 		}
 		for k, v := range lastResp.Header {
@@ -2400,7 +2460,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			body := readBodyWithKeepalive(w, resp.Body, 25*time.Second)
 			resp.Body.Close()
 			settled = true
-			preCounters.commit()
+			if shouldCountAsSuccess(statusCode, body) {
+				preCounters.commit()
+			}
 			h.writeUpstreamResponse(w, resp, body)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
@@ -2425,7 +2487,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			// failures (4xx, 5xx with no retry, in-body errors) leave
 			// the deferred rollback to release the slot — the caller
 			// shouldn't be charged for our or the provider's failure.
-			if statusCode >= 200 && statusCode < 300 && detectProviderErrorFromBody(body) == "" {
+			if shouldCountAsSuccess(statusCode, body) {
 				preCounters.commit()
 			}
 			h.writeUpstreamResponse(w, resp, body)
@@ -2448,7 +2510,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		settled = true
 		// Same rule as above: only commit if the final response is a
 		// genuine success.
-		if lastStatusCode >= 200 && lastStatusCode < 300 && detectProviderErrorFromBody(lastBody) == "" {
+		if shouldCountAsSuccess(lastStatusCode, lastBody) {
 			preCounters.commit()
 		}
 		for k, v := range lastResp.Header {
