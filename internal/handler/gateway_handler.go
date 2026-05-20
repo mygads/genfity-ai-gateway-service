@@ -1849,9 +1849,12 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	// Request reached upstream and got a response — count it against the
-	// period cap regardless of HTTP status, mirroring Messages/ChatCompletions.
-	preCounters.commit()
+	// Period/RPD/free-model tick only on real success — 4xx/5xx and
+	// in-body provider errors leave the deferred rollback to release
+	// the slot.
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && detectProviderErrorFromBody(body) == "" {
+		preCounters.commit()
+	}
 	h.recordUsageWithLegacyBilling(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
 	h.writeUpstreamResponse(w, resp, body)
 }
@@ -2078,12 +2081,12 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			settled = true
-			// Non-retriable provider error: the request reached upstream
-			// and got a real response, so it should count against the
-			// period cap. Without commit() the deferred rollback would
-			// release the slot — making provider errors free, which is
-			// the wrong incentive.
-			preCounters.commit()
+			// Period/RPD/free-model counters tick ONLY on real success.
+			// 4xx/5xx provider errors and in-body provider errors leave
+			// the deferred rollback to release the slot.
+			if statusCode >= 200 && statusCode < 300 && detectProviderErrorFromBody(body) == "" {
+				preCounters.commit()
+			}
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
@@ -2106,7 +2109,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settled = true
-		preCounters.commit()
+		if lastStatusCode >= 200 && lastStatusCode < 300 && detectProviderErrorFromBody(lastBody) == "" {
+			preCounters.commit()
+		}
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
@@ -2415,8 +2420,14 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				CreatedAt:          route.CreatedAt,
 			}
 			settled = true
-			// Non-retriable provider error reached upstream — count it.
-			preCounters.commit()
+			// Period/RPD/free-model counters tick ONLY on real success
+			// (HTTP 2xx + no in-body provider error). Non-retriable
+			// failures (4xx, 5xx with no retry, in-body errors) leave
+			// the deferred rollback to release the slot — the caller
+			// shouldn't be charged for our or the provider's failure.
+			if statusCode >= 200 && statusCode < 300 && detectProviderErrorFromBody(body) == "" {
+				preCounters.commit()
+			}
 			h.writeUpstreamResponse(w, resp, body)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
@@ -2435,7 +2446,11 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		}
 		effectiveRoute := route
 		settled = true
-		preCounters.commit()
+		// Same rule as above: only commit if the final response is a
+		// genuine success.
+		if lastStatusCode >= 200 && lastStatusCode < 300 && detectProviderErrorFromBody(lastBody) == "" {
+			preCounters.commit()
+		}
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
