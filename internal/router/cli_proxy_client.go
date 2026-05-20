@@ -19,12 +19,17 @@ import (
 // genfity-ai-gateway-service needs; all provider/auth configuration
 // is handled directly inside the CLIProxyAPI web panel.
 type CLIProxyClient struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
+	baseURL       string
+	apiKey        string
+	managementKey string
+	httpClient    *http.Client
 }
 
 func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
+	return NewCLIProxyClientWithManagementKey(baseURL, apiKey, "", timeout)
+}
+
+func NewCLIProxyClientWithManagementKey(baseURL, apiKey, managementKey string, timeout time.Duration) *CLIProxyClient {
 	// Pool tuned for high-concurrency forwarding to a single upstream.
 	// Default Go transport caps MaxIdleConnsPerHost at 2 — under load
 	// every request beyond that pays a fresh TCP+TLS handshake. We bump
@@ -50,8 +55,9 @@ func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyC
 	_ = http2.ConfigureTransport(transport)
 
 	return &CLIProxyClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
+		baseURL:       strings.TrimRight(baseURL, "/"),
+		apiKey:        apiKey,
+		managementKey: managementKey,
 		httpClient: &http.Client{
 			Timeout:   timeout,
 			Transport: transport,
@@ -94,6 +100,49 @@ func (c *CLIProxyClient) CountMessageTokens(ctx context.Context, payload map[str
 // Embeddings forwards an embeddings request.
 func (c *CLIProxyClient) Embeddings(ctx context.Context, payload map[string]any) (*http.Response, error) {
 	return c.forwardJSON(ctx, "/v1/embeddings", payload)
+}
+
+// ListAuthFiles fetches /v0/management/auth-files using the management key.
+// Returns the raw JSON map containing the "files" array.
+func (c *CLIProxyClient) ListAuthFiles(ctx context.Context) (map[string]any, error) {
+	return c.managementGet(ctx, "/v0/management/auth-files")
+}
+
+// GetGithubQuota fetches GitHub Copilot quota for a specific auth_index.
+func (c *CLIProxyClient) GetGithubQuota(ctx context.Context, authIndex string) (map[string]any, error) {
+	return c.managementGet(ctx, "/v0/management/github-quota?auth_index="+authIndex)
+}
+
+// GetKiroQuota fetches Kiro quota for a specific auth_index.
+func (c *CLIProxyClient) GetKiroQuota(ctx context.Context, authIndex string) (map[string]any, error) {
+	return c.managementGet(ctx, "/v0/management/kiro-quota?auth_index="+authIndex)
+}
+
+// managementGet calls a CLIProxyAPI management endpoint with the management key.
+// Returns "management_key_not_configured" error when the key is missing.
+func (c *CLIProxyClient) managementGet(ctx context.Context, path string) (map[string]any, error) {
+	if c.managementKey == "" {
+		return nil, fmt.Errorf("management_key_not_configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.managementKey)
+	resp, err := c.doWithRetry(req, 1)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("upstream_error status=%d body=%s", resp.StatusCode, string(b))
+	}
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // forwardJSON marshals payload, sends the request, and returns the raw

@@ -226,6 +226,15 @@ type UsageSummaryRow struct {
 	LastActive    time.Time `json:"last_active"`
 }
 
+// ProviderStatsRow aggregates usage_ledger by router_model prefix
+// (segment before the first "/"). Used by admin Provider Stats page.
+type ProviderStatsRow struct {
+	Prefix       string `json:"prefix"`
+	TotalCount   int64  `json:"total_count"`
+	SuccessCount int64  `json:"success_count"`
+	ErrorCount   int64  `json:"error_count"`
+}
+
 // UsageLogFilter scopes the admin "Logs" modal query.
 //
 // Limit/Offset drive offset-based pagination so the modal can deep-link

@@ -1129,6 +1129,10 @@ func (s *MemoryStore) ListUsageSummaryGrouped(_ context.Context, _ time.Time) []
 	return nil
 }
 
+func (s *MemoryStore) ListProviderStats(_ context.Context, _ time.Time) []store.ProviderStatsRow {
+	return nil
+}
+
 func (s *MemoryStore) ListCreditBalances(_ context.Context) []store.CreditBalanceRow {
 	return nil
 }

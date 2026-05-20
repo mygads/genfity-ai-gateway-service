@@ -1216,6 +1216,39 @@ func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.
 	return items
 }
 
+func (s *PostgresStore) ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow {
+	query := `
+		SELECT
+			COALESCE(NULLIF(split_part(router_model, '/', 1), ''), 'unknown') AS prefix,
+			COUNT(*)::bigint AS total_count,
+			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		GROUP BY prefix
+		ORDER BY total_count DESC`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+
+	rows, err := s.pool.Query(ctx, query, sinceArg)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []store.ProviderStatsRow{}
+	for rows.Next() {
+		var item store.ProviderStatsRow
+		if rows.Scan(&item.Prefix, &item.TotalCount, &item.SuccessCount, &item.ErrorCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func (s *PostgresStore) ListCreditBalances(ctx context.Context) []store.CreditBalanceRow {
 	query := `
 		SELECT

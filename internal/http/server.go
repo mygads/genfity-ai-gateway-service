@@ -42,7 +42,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		rateLimit = service.NewRateLimitService(redisClient, cfg.RedisPrefix, logger)
 	}
 
-	cliProxyClient := router.NewCLIProxyClient(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	cliProxyClient := router.NewCLIProxyClientWithManagementKey(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, cfg.AIRouterCore2ManagementKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 
 	// Callback to genfity-app so per-request debits propagate to the
 	// customer-facing User.aiGatewayCreditBalance + AiGatewayCreditLedger.
@@ -60,6 +60,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, routers, cliProxyClient, genfityCallback, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
 	adminHandler := handler.NewAdminHandler(models, routers, usage, store)
+	monitoringHandler := handler.NewMonitoringHandler(cliProxyClient, usage, store)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	syncHandler := handler.NewSyncHandler(syncService, genfityCallback, cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey)
 	healthHandler := handler.NewHealthHandler(syncService, dbPool, redisClient)
@@ -137,6 +138,11 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)
 		r.Get("/routers/{code}/providers", routerProxyHandler.Providers)
 		r.Get("/routers/{code}/providers/{providerID}/models", routerProxyHandler.ProviderModels)
+
+		// OAuth account monitoring + provider stats (PRD: admin monitoring pages).
+		r.Get("/oauth-accounts", monitoringHandler.ListOAuthAccounts)
+		r.Get("/oauth-accounts/{authIndex}/quota", monitoringHandler.GetOAuthAccountQuota)
+		r.Get("/provider-stats", monitoringHandler.GetProviderStats)
 	})
 
 	r.Route("/internal", func(r chi.Router) {

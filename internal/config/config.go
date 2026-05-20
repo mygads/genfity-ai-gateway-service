@@ -23,6 +23,7 @@ type Config struct {
 	AIRouterCore2InternalURL string
 	AIRouterCore2PublicURL   string
 	AIRouterCore2APIKey      string
+	AIRouterCore2ManagementKey string
 
 	APIKeyPepper           string
 	EncryptionKey          string
@@ -52,6 +53,7 @@ func Load() Config {
 		AIRouterCore2InternalURL: getEnv("AI_ROUTER_CORE2_INTERNAL_URL", "http://localhost:8317"),
 		AIRouterCore2PublicURL:   getEnv("AI_ROUTER_CORE2_PUBLIC_URL", ""),
 		AIRouterCore2APIKey:      getEnv("AI_ROUTER_CORE2_API_KEY", ""),
+		AIRouterCore2ManagementKey: getEnv("AI_ROUTER_CORE2_MANAGEMENT_KEY", ""),
 
 		APIKeyPepper:           getEnv("API_KEY_PEPPER", ""),
 		EncryptionKey:          getEnv("ENCRYPTION_KEY", ""),

@@ -101,6 +101,9 @@ type Store interface {
 	// disables that predicate.
 	ListUsageLogs(ctx context.Context, filter store.UsageLogFilter) ([]store.UsageLedgerEntry, int, error)
 	ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow
+	// ListProviderStats aggregates usage_ledger rows since `since` by
+	// router_model prefix. Used by the admin Provider Stats page.
+	ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow
 	ListCreditBalances(ctx context.Context) []store.CreditBalanceRow
 	ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry
 	SumUsageTokensByUserSince(context.Context, string, time.Time) int64
