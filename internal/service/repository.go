@@ -96,6 +96,10 @@ type Store interface {
 	ListUsageByUserSince(context.Context, string, time.Time) []store.UsageLedgerEntry
 	ListUsageByTenant(context.Context, string) []store.UsageLedgerEntry
 	ListAllUsage(ctx context.Context, limit int) []store.UsageLedgerEntry
+	// ListUsageLogs is a paginated, filtered view of usage_ledger for the
+	// admin "Logs" modal. Filters are optional; passing zero values
+	// disables that predicate.
+	ListUsageLogs(ctx context.Context, filter store.UsageLogFilter) ([]store.UsageLedgerEntry, int, error)
 	ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow
 	ListCreditBalances(ctx context.Context) []store.CreditBalanceRow
 	ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry

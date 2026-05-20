@@ -1077,6 +1077,54 @@ func (s *MemoryStore) ListAllUsage(_ context.Context, limit int) []store.UsageLe
 	return items
 }
 
+func (s *MemoryStore) ListUsageLogs(_ context.Context, f store.UsageLogFilter) ([]store.UsageLedgerEntry, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matched := make([]store.UsageLedgerEntry, 0, len(s.usage))
+	for _, item := range s.usage {
+		if f.UserID != "" && item.GenfityUserID != f.UserID {
+			continue
+		}
+		if f.APIKeyID != nil && (item.APIKeyID == nil || *item.APIKeyID != *f.APIKeyID) {
+			continue
+		}
+		if f.Status != "" && item.Status != f.Status {
+			continue
+		}
+		if f.BillingMode != "" && (item.BillingMode == nil || *item.BillingMode != f.BillingMode) {
+			continue
+		}
+		if f.PublicModel != "" && item.PublicModel != f.PublicModel {
+			continue
+		}
+		if !f.From.IsZero() && item.StartedAt.Before(f.From) {
+			continue
+		}
+		if !f.To.IsZero() && !item.StartedAt.Before(f.To) {
+			continue
+		}
+		matched = append(matched, item)
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].StartedAt.After(matched[j].StartedAt) })
+	total := len(matched)
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		return []store.UsageLedgerEntry{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return matched[offset:end], total, nil
+}
+
 func (s *MemoryStore) ListUsageSummaryGrouped(_ context.Context, _ time.Time) []store.UsageSummaryRow {
 	return nil
 }

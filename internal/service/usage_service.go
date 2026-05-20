@@ -143,3 +143,7 @@ func (s *UsageService) CreditBalances(ctx context.Context) []store.CreditBalance
 func (s *UsageService) ListByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
 	return s.store.ListUsageByAPIKey(ctx, apiKeyID, limit)
 }
+
+func (s *UsageService) ListLogs(ctx context.Context, filter store.UsageLogFilter) ([]store.UsageLedgerEntry, int, error) {
+	return s.store.ListUsageLogs(ctx, filter)
+}

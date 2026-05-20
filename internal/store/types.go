@@ -226,6 +226,24 @@ type UsageSummaryRow struct {
 	LastActive    time.Time `json:"last_active"`
 }
 
+// UsageLogFilter scopes the admin "Logs" modal query.
+//
+// Limit/Offset drive offset-based pagination so the modal can deep-link
+// into a page (1000-row admin scroll). UserID/APIKeyID/Status/BillingMode/
+// PublicModel narrow the result set; empty values disable that predicate.
+type UsageLogFilter struct {
+	UserID      string
+	APIKeyID    *uuid.UUID
+	Status      string
+	BillingMode string
+	PublicModel string
+	Search      string // matches user_id / public_model / request_id (ILIKE)
+	From        time.Time
+	To          time.Time
+	Limit       int
+	Offset      int
+}
+
 type CreditBalanceRow struct {
 	GenfityUserID string  `json:"genfity_user_id"`
 	CreditBalance string  `json:"credit_balance"`

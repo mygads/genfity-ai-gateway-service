@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -1106,6 +1107,76 @@ func (s *PostgresStore) ListAllUsage(ctx context.Context, limit int) []store.Usa
 		limit = 100
 	}
 	return s.listUsage(ctx, `SELECT `+usageLedgerSelectColumns+` FROM ai_gateway.usage_ledger ORDER BY started_at DESC LIMIT $1`, limit)
+}
+
+// ListUsageLogs powers the admin "Logs" modal. Returns the page rows
+// plus a total row count for the same filter so the UI can render a
+// pager. Total ignores limit/offset so the count is stable across
+// pages.
+func (s *PostgresStore) ListUsageLogs(ctx context.Context, f store.UsageLogFilter) ([]store.UsageLedgerEntry, int, error) {
+	limit := f.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	offset := f.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	conds := []string{"1 = 1"}
+	args := []any{}
+	pos := 0
+	addArg := func(v any) string {
+		args = append(args, v)
+		pos++
+		return fmt.Sprintf("$%d", pos)
+	}
+
+	if f.UserID != "" {
+		conds = append(conds, "genfity_user_id = "+addArg(f.UserID))
+	}
+	if f.APIKeyID != nil {
+		conds = append(conds, "api_key_id = "+addArg(*f.APIKeyID))
+	}
+	if f.Status != "" {
+		conds = append(conds, "status = "+addArg(f.Status))
+	}
+	if f.BillingMode != "" {
+		conds = append(conds, "billing_mode = "+addArg(f.BillingMode))
+	}
+	if f.PublicModel != "" {
+		conds = append(conds, "public_model = "+addArg(f.PublicModel))
+	}
+	if f.Search != "" {
+		needle := "%" + strings.ToLower(f.Search) + "%"
+		conds = append(conds, "(LOWER(genfity_user_id) LIKE "+addArg(needle)+" OR LOWER(public_model) LIKE "+addArg(needle)+" OR LOWER(request_id) LIKE "+addArg(needle)+")")
+	}
+	if !f.From.IsZero() {
+		conds = append(conds, "started_at >= "+addArg(f.From))
+	}
+	if !f.To.IsZero() {
+		conds = append(conds, "started_at < "+addArg(f.To))
+	}
+
+	whereSQL := strings.Join(conds, " AND ")
+
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*)::int FROM ai_gateway.usage_ledger WHERE `+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	limitArg := addArg(limit)
+	offsetArg := addArg(offset)
+
+	query := `SELECT ` + usageLedgerSelectColumns +
+		` FROM ai_gateway.usage_ledger WHERE ` + whereSQL +
+		` ORDER BY started_at DESC LIMIT ` + limitArg + ` OFFSET ` + offsetArg
+
+	items := s.listUsage(ctx, query, args...)
+	return items, total, nil
 }
 
 func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow {

@@ -18,6 +18,7 @@ type AdminHandler struct {
 	models  *service.ModelService
 	routers *service.RouterService
 	usage   *service.UsageService
+	store   service.Store
 }
 
 // patchHasField returns true if the PATCH body contained a key (even if null).
@@ -51,8 +52,8 @@ func patchDecodeOptionalString(fields map[string]json.RawMessage, key string) (*
 	return &v, true
 }
 
-func NewAdminHandler(models *service.ModelService, routers *service.RouterService, usage *service.UsageService) *AdminHandler {
-	return &AdminHandler{models: models, routers: routers, usage: usage}
+func NewAdminHandler(models *service.ModelService, routers *service.RouterService, usage *service.UsageService, store service.Store) *AdminHandler {
+	return &AdminHandler{models: models, routers: routers, usage: usage, store: store}
 }
 
 func respondAdminWriteError(w http.ResponseWriter, err error) {
@@ -459,6 +460,138 @@ func (h *AdminHandler) DeleteRouterInstance(w http.ResponseWriter, r *http.Reque
 
 func (h *AdminHandler) ListAllUsage(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{"usage": h.usage.ListAll(r.Context(), 200)})
+}
+
+// ListUsageLogs is the per-request log feed for the admin "Logs" modal.
+// Returns up to 1000 rows per page with offset pagination, enriched
+// with the originating api key's prefix + name (so the UI can show
+// "ai-xyz123 (My Personal Key)" without a second round trip).
+func (h *AdminHandler) ListUsageLogs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+
+	filter := store.UsageLogFilter{
+		UserID:      q.Get("user_id"),
+		Status:      q.Get("status"),
+		BillingMode: q.Get("billing_mode"),
+		PublicModel: q.Get("public_model"),
+		Search:      q.Get("search"),
+		Limit:       limit,
+		Offset:      offset,
+	}
+
+	if v := q.Get("api_key_id"); v != "" {
+		if id, err := uuid.Parse(v); err == nil {
+			filter.APIKeyID = &id
+		}
+	}
+	if v := q.Get("from"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			filter.From = t
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			filter.To = t
+		}
+	}
+
+	rows, total, err := h.usage.ListLogs(r.Context(), filter)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "list_logs_failed")
+		return
+	}
+
+	// Enrich with api key prefix + name. Gather unique IDs to avoid N
+	// round trips for the same key.
+	apiKeyMeta := map[uuid.UUID]map[string]any{}
+	for _, row := range rows {
+		if row.APIKeyID == nil {
+			continue
+		}
+		id := *row.APIKeyID
+		if _, ok := apiKeyMeta[id]; ok {
+			continue
+		}
+		key, err := h.store.GetAPIKeyByID(r.Context(), id)
+		if err != nil || key == nil {
+			apiKeyMeta[id] = nil
+			continue
+		}
+		apiKeyMeta[id] = map[string]any{
+			"id":             key.ID.String(),
+			"name":           key.Name,
+			"key_prefix":     key.KeyPrefix,
+			"billing_source": key.BillingSource,
+		}
+	}
+
+	enriched := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		entry := map[string]any{
+			"id":                    row.ID,
+			"request_id":            row.RequestID,
+			"genfity_user_id":       row.GenfityUserID,
+			"public_model":          row.PublicModel,
+			"router_model":          row.RouterModel,
+			"router_instance_code":  row.RouterInstanceCode,
+			"prompt_tokens":         row.PromptTokens,
+			"completion_tokens":     row.CompletionTokens,
+			"total_tokens":          row.TotalTokens,
+			"cached_tokens":         row.CachedTokens,
+			"reasoning_tokens":      row.ReasoningTokens,
+			"input_cost":            row.InputCost,
+			"output_cost":           row.OutputCost,
+			"total_cost":            row.TotalCost,
+			"billing_mode":          row.BillingMode,
+			"amount_credits":        row.AmountCredits,
+			"balance_after_credits": row.BalanceAfterCredits,
+			"balance_after_usd":     row.BalanceAfterUsd,
+			"status":                row.Status,
+			"error_code":            row.ErrorCode,
+			"latency_ms":            row.LatencyMS,
+			"started_at":            row.StartedAt,
+			"finished_at":           row.FinishedAt,
+		}
+		if row.APIKeyID != nil {
+			entry["api_key_id"] = row.APIKeyID.String()
+			if meta := apiKeyMeta[*row.APIKeyID]; meta != nil {
+				entry["api_key"] = meta
+			}
+		}
+		// Surface pricing_group from metadata so the UI can label "subs"
+		// vs "credit" vs "payg" without parsing the JSON blob.
+		if len(row.Metadata) > 0 {
+			var meta map[string]any
+			if err := json.Unmarshal(row.Metadata, &meta); err == nil {
+				if pg, ok := meta["pricing_group"].(string); ok {
+					entry["pricing_group"] = pg
+				}
+				if planCode, ok := meta["plan_code"].(string); ok {
+					entry["plan_code"] = planCode
+				}
+			}
+		}
+		enriched = append(enriched, entry)
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"data":   enriched,
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
+	})
 }
 
 func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request) {
