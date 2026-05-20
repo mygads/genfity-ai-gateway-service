@@ -744,50 +744,133 @@ func estimatePayloadTokens(value any) int64 {
 	return (chars + 3) / 4
 }
 
+// preRequestCounters tracks which counters were incremented during
+// applyPreRequestLimits so the caller can roll them back if a later
+// step fails (concurrency acquire, billing reservation, payload clone,
+// upstream call). Without rollback, every later-stage failure burned a
+// period/RPD slot and banned users well below the configured cap.
+type preRequestCounters struct {
+	rateLimit       *service.RateLimitService
+	userID          string
+	periodKey       string
+	planCode        string
+	publicModel     string
+	periodConsumed  bool
+	rpdConsumed     bool
+	freeRPMConsumed bool
+	freeRPDConsumed bool
+	committed       bool
+}
+
+// rollback releases every counter that was incremented in
+// applyPreRequestLimits, unless commit() has already been called.
+// Pass a fresh background context if r.Context() is already canceled
+// (e.g. client disconnect mid-request) so the decrement still goes
+// through.
+func (p *preRequestCounters) rollback(ctx context.Context) {
+	if p == nil || p.rateLimit == nil || p.committed {
+		return
+	}
+	if p.periodConsumed {
+		p.rateLimit.RollbackRequestsPerPeriod(ctx, p.userID, p.periodKey)
+		p.periodConsumed = false
+	}
+	if p.rpdConsumed {
+		p.rateLimit.RollbackPlanRPD(ctx, p.userID, p.planCode)
+		p.rpdConsumed = false
+	}
+	if p.freeRPMConsumed {
+		p.rateLimit.RollbackFreeModelRPM(ctx, p.userID, p.publicModel)
+		p.freeRPMConsumed = false
+	}
+	if p.freeRPDConsumed {
+		p.rateLimit.RollbackFreeModelRPD(ctx, p.userID, p.publicModel)
+		p.freeRPDConsumed = false
+	}
+}
+
+// commit marks the request as having genuinely consumed the slot.
+// After commit, rollback is a no-op. Call once the upstream returns
+// (success or non-retriable failure) and the usage_ledger entry has
+// been recorded — at that point the request "exists" and should count
+// against the period cap.
+func (p *preRequestCounters) commit() {
+	if p == nil {
+		return
+	}
+	p.committed = true
+}
+
 // applyPreRequestLimits enforces the limits that we can check before the
 // upstream call: plan-period total requests + per-(user,model) free model
 // RPM/RPD. Returns an errorCode + statusCode when the request must be
 // rejected; ("", 0) means continue. Plan RPM/concurrency are kept inline
 // at the call sites because the concurrency release is owned there.
+//
+// Counters are incremented in the order period → RPD → free-RPM →
+// free-RPD. If a later check trips, every earlier increment is rolled
+// back before the function returns — this keeps the period counter
+// honest. The returned tracker also lets the caller roll back later
+// failures (concurrency, billing reservation, payload clone, upstream
+// error) so those don't quietly eat period slots either.
 func (h *GatewayHandler) applyPreRequestLimits(
 	ctx context.Context,
 	apiKey store.APIKey,
 	subscription *service.ActiveSubscription,
 	limits service.PlanLimits,
 	model *store.AIModel,
-) (errorCode string, statusCode int) {
+) (errorCode string, statusCode int, tracker *preRequestCounters) {
 	if h.rateLimit == nil {
-		return "", 0
+		return "", 0, nil
+	}
+	tracker = &preRequestCounters{
+		rateLimit:   h.rateLimit,
+		userID:      apiKey.GenfityUserID,
+		publicModel: "",
+	}
+	if model != nil {
+		tracker.publicModel = model.PublicModel
+	}
+	if subscription != nil && subscription.Plan != nil {
+		tracker.planCode = subscription.Plan.PlanCode
 	}
 	if limits.HasMaxRequestsPerPeriod() && subscription != nil && subscription.Entitlement != nil {
 		pk := periodKey(subscription.Entitlement)
+		tracker.periodKey = pk
 		_, end := activePeriod(subscription.Entitlement)
 		ttl := time.Until(end)
 		if ttl <= 0 {
 			ttl = 24 * time.Hour
 		}
 		if err := h.rateLimit.CheckRequestsPerPeriod(ctx, apiKey.GenfityUserID, pk, ttl, limits.MaxRequestsPerPeriod); err != nil {
-			return "plan_period_limit_exceeded", http.StatusTooManyRequests
+			return "plan_period_limit_exceeded", http.StatusTooManyRequests, tracker
 		}
+		tracker.periodConsumed = true
 	}
 	if limits.HasRPD() && subscription != nil && subscription.Plan != nil {
 		if err := h.rateLimit.CheckPlanRPD(ctx, apiKey.GenfityUserID, subscription.Plan.PlanCode, limits.RPD); err != nil {
-			return "plan_rpd_exceeded", http.StatusTooManyRequests
+			tracker.rollback(ctx)
+			return "plan_rpd_exceeded", http.StatusTooManyRequests, tracker
 		}
+		tracker.rpdConsumed = true
 	}
 	if model != nil && model.IsFree {
 		if model.FreeLimitRPM != nil && *model.FreeLimitRPM > 0 {
 			if err := h.rateLimit.CheckFreeModelRPM(ctx, apiKey.GenfityUserID, model.PublicModel, int(*model.FreeLimitRPM)); err != nil {
-				return "free_model_rpm_exceeded", http.StatusTooManyRequests
+				tracker.rollback(ctx)
+				return "free_model_rpm_exceeded", http.StatusTooManyRequests, tracker
 			}
+			tracker.freeRPMConsumed = true
 		}
 		if model.FreeLimitRPD != nil && *model.FreeLimitRPD > 0 {
 			if err := h.rateLimit.CheckFreeModelRPD(ctx, apiKey.GenfityUserID, model.PublicModel, int(*model.FreeLimitRPD)); err != nil {
-				return "free_model_rpd_exceeded", http.StatusTooManyRequests
+				tracker.rollback(ctx)
+				return "free_model_rpd_exceeded", http.StatusTooManyRequests, tracker
 			}
+			tracker.freeRPDConsumed = true
 		}
 	}
-	return "", 0
+	return "", 0, tracker
 }
 
 func activePeriod(entitlement *store.CustomerEntitlement) (time.Time, time.Time) {
@@ -1713,6 +1796,8 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
 		code := "model_not_allowed"
@@ -1722,6 +1807,28 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, code)
 		return
 	}
+	// Enforce the same plan/free-model caps as Messages/ChatCompletions.
+	// Without this, an embeddings-only key could blow past max_requests
+	// _per_period and free_model_rpd because the dashboard count + the
+	// gateway counter are completely bypassed.
+	if h.rateLimit != nil && limits.HasRPM() {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
+			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			return
+		}
+	}
+	errCode, status, preCounters := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model)
+	if status != 0 {
+		h.recordFailedRequest(ctx, apiKey, publicModel, errCode, status, started)
+		respondError(w, status, errCode)
+		return
+	}
+	defer func() {
+		bgCtx := context.Background()
+		preCounters.rollback(bgCtx)
+	}()
+
 	upstreamPayload, err := clonePayload(payload)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("clone embeddings payload failed")
@@ -1742,6 +1849,9 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	// Request reached upstream and got a response — count it against the
+	// period cap regardless of HTTP status, mirroring Messages/ChatCompletions.
+	preCounters.commit()
 	h.recordUsageWithLegacyBilling(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
 	h.writeUpstreamResponse(w, resp, body)
 }
@@ -1799,11 +1909,21 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if errCode, status := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model); status != 0 {
+	errCode, status, preCounters := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model)
+	if status != 0 {
 		h.recordFailedRequest(ctx, apiKey, publicModel, errCode, status, started)
 		respondError(w, status, errCode)
 		return
 	}
+	// Roll back the period/RPD/free-model counters on any abnormal exit
+	// (concurrency rejected, billing reservation failed, payload clone
+	// failed, every candidate upstream failed). The success/non-retriable
+	// branches below call preCounters.commit() right before returning, at
+	// which point this defer becomes a no-op.
+	defer func() {
+		bgCtx := context.Background()
+		preCounters.rollback(bgCtx)
+	}()
 	release := func() {}
 	accountID := apiKey.GenfityUserID
 	if h.rateLimit != nil && limits.HasConcurrency() {
@@ -1906,6 +2026,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
 			settled = true
+			preCounters.commit()
 			return
 		}
 
@@ -1931,6 +2052,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 					Msg("non-streaming settlement failed")
 			}
 			settled = true
+			preCounters.commit()
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
@@ -1956,6 +2078,12 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			settled = true
+			// Non-retriable provider error: the request reached upstream
+			// and got a real response, so it should count against the
+			// period cap. Without commit() the deferred rollback would
+			// release the slot — making provider errors free, which is
+			// the wrong incentive.
+			preCounters.commit()
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
@@ -1978,6 +2106,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settled = true
+		preCounters.commit()
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
@@ -1989,6 +2118,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	if stopKeepalive != nil {
 		stopKeepalive()
 	}
+	// All candidates failed without ever reaching upstream successfully —
+	// release the period slot so the user isn't penalized for our outage.
+	// preCounters rollback runs via the deferred call above.
 	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
@@ -2020,6 +2152,17 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
 		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
 		return
+	}
+
+	// Enforce RPM only — count_tokens is a preflight helper, so charging
+	// it against the period cap would punish well-behaved clients that
+	// pre-size their context. RPM still protects the upstream from spam.
+	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+	if h.rateLimit != nil && limits.HasRPM() {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
+			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			return
+		}
 	}
 
 	route, _, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
@@ -2113,11 +2256,21 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
-	if errCode, status := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model); status != 0 {
+	errCode, status, preCounters := h.applyPreRequestLimits(ctx, apiKey, subscription, limits, model)
+	if status != 0 {
 		h.recordFailedRequest(ctx, apiKey, publicModel, errCode, status, started)
 		respondError(w, status, errCode)
 		return
 	}
+	// Roll back the period/RPD/free-model counters on any abnormal exit
+	// (concurrency rejected, billing reservation failed, payload clone
+	// failed, every candidate upstream failed). The success/non-retriable
+	// branches below call preCounters.commit() right before returning, at
+	// which point this defer becomes a no-op.
+	defer func() {
+		bgCtx := context.Background()
+		preCounters.rollback(bgCtx)
+	}()
 	release := func() {}
 	accountID := apiKey.GenfityUserID
 	if h.rateLimit != nil && limits.HasConcurrency() {

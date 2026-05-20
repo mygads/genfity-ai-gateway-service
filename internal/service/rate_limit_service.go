@@ -286,6 +286,50 @@ func (s *RateLimitService) CheckFreeModelTPD(ctx context.Context, userID, public
 	return nil
 }
 
+// RollbackRequestsPerPeriod undoes one increment of the per-(user,plan,
+// period) counter. Use when a later check (free-model RPM/RPD,
+// concurrency, balance reservation) rejected the request after the
+// period counter was already incremented — without this, the period
+// counter leaks every rejection and bans the user well below the
+// configured cap.
+func (s *RateLimitService) RollbackRequestsPerPeriod(ctx context.Context, userID, periodKey string) {
+	if userID == "" || periodKey == "" {
+		return
+	}
+	key := fmt.Sprintf("%s:rl:plan-period:%s:%s", s.prefix, userID, periodKey)
+	_, _ = s.client.Decr(ctx, key).Result()
+}
+
+// RollbackPlanRPD undoes one increment of the per-(user,plan) daily
+// counter. Same rationale as RollbackRequestsPerPeriod.
+func (s *RateLimitService) RollbackPlanRPD(ctx context.Context, userID, planCode string) {
+	if userID == "" {
+		return
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	_, _ = s.client.Decr(ctx, key).Result()
+}
+
+// RollbackFreeModelRPD/RPM mirror the period/RPD rollbacks for the
+// per-(user,model) counters.
+func (s *RateLimitService) RollbackFreeModelRPM(ctx context.Context, userID, publicModel string) {
+	if userID == "" || publicModel == "" {
+		return
+	}
+	key := fmt.Sprintf("%s:rl:free-model:%s:%s:rpm", s.prefix, userID, publicModel)
+	_, _ = s.client.Decr(ctx, key).Result()
+}
+
+func (s *RateLimitService) RollbackFreeModelRPD(ctx context.Context, userID, publicModel string) {
+	if userID == "" || publicModel == "" {
+		return
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:free-model:%s:%s:rpd:%s", s.prefix, userID, publicModel, day)
+	_, _ = s.client.Decr(ctx, key).Result()
+}
+
 // FinalizeFreeModelTPD reconciles the actual tokens used against the
 // estimate previously reserved. Call once the request finishes. Negative
 // adjustments shrink the reserved budget; positive adjustments extend it
