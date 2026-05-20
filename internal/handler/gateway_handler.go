@@ -2377,6 +2377,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
 			settled = true
+			preCounters.commit()
 			return
 		}
 
@@ -2394,6 +2395,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			body := readBodyWithKeepalive(w, resp.Body, 25*time.Second)
 			resp.Body.Close()
 			settled = true
+			preCounters.commit()
 			h.writeUpstreamResponse(w, resp, body)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
@@ -2413,6 +2415,8 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				CreatedAt:          route.CreatedAt,
 			}
 			settled = true
+			// Non-retriable provider error reached upstream — count it.
+			preCounters.commit()
 			h.writeUpstreamResponse(w, resp, body)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
@@ -2431,6 +2435,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		}
 		effectiveRoute := route
 		settled = true
+		preCounters.commit()
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
