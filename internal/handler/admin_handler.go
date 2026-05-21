@@ -598,6 +598,8 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 	rangeParam := r.URL.Query().Get("range")
 	var since time.Time
 	switch rangeParam {
+	case "1d":
+		since = time.Now().UTC().Add(-24 * time.Hour)
 	case "7d":
 		since = time.Now().UTC().Add(-7 * 24 * time.Hour)
 	case "90d":

@@ -2591,17 +2591,65 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	latencyMs32 := int32(latencyMs)
 
 	var entryMeta map[string]any
-	if subscription != nil && subscription.Entitlement != nil {
-		var subMeta map[string]any
-		if len(subscription.Entitlement.Metadata) > 0 {
-			_ = json.Unmarshal(subscription.Entitlement.Metadata, &subMeta)
+	// Pricing group source-of-truth: prefer the billing_mode the
+	// reservation actually charged on. That keeps the usage_ledger
+	// consistent with the debit even when the entitlement metadata is
+	// stale or empty (older rows had `pricingGroup` only, never
+	// `pricing_group`, which left us with "unknown" buckets).
+	pricingGroup := ""
+	planCode := ""
+	if reservation != nil {
+		switch reservation.BillingMode {
+		case "unlimited":
+			pricingGroup = "unlimited_plan"
+		case "credit_package":
+			pricingGroup = "credit_package"
+		case "payg_topup":
+			pricingGroup = "payg_topup"
 		}
-		pg, _ := subMeta["pricingGroup"].(string)
-		isUnlim := pg == "unlimited_plan"
+	}
+	if subscription != nil && subscription.Entitlement != nil {
+		planCode = subscription.Entitlement.PlanCode
+		// Resolve from live plan / column / metadata if billing_mode
+		// didn't already pin a group (e.g. when the reservation path
+		// is skipped for free-tier validation responses).
+		if pricingGroup == "" {
+			if g := resolveSubscriptionPricingGroup(subscription); g != "" {
+				pricingGroup = g
+			} else {
+				var subMeta map[string]any
+				if len(subscription.Entitlement.Metadata) > 0 {
+					_ = json.Unmarshal(subscription.Entitlement.Metadata, &subMeta)
+				}
+				if v, ok := subMeta["pricing_group"].(string); ok && v != "" {
+					pricingGroup = v
+				} else if v, ok := subMeta["pricingGroup"].(string); ok && v != "" {
+					pricingGroup = v
+				}
+			}
+		}
+	}
+	if pricingGroup == "" {
+		// Last-resort: an API key dedicated to a single billing source
+		// (e.g. PAYG topup key with no live entitlement) tells us how
+		// the user is paying. Without this, every request from that
+		// key would still land in "Unknown".
+		switch apiKey.BillingSource {
+		case "payg":
+			pricingGroup = "payg_topup"
+		case "credit":
+			pricingGroup = "credit_package"
+		case "subscription":
+			pricingGroup = "unlimited_plan"
+		}
+	}
+	if pricingGroup != "" {
 		entryMeta = map[string]any{
-			"pricing_group": pg,
-			"is_unlimited":  isUnlim,
-			"plan_code":     subscription.Entitlement.PlanCode,
+			"pricing_group": pricingGroup,
+			"is_unlimited":  pricingGroup == "unlimited_plan" || pricingGroup == "unlimited",
+		}
+		if planCode != "" {
+			entryMeta["plan_code"] = planCode
 		}
 	}
 	var entryMetaJSON []byte
