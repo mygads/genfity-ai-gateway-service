@@ -11,6 +11,7 @@
 -- the reservation's billing_mode, so no future rows should land in
 -- "unknown" unless billing_mode itself is empty.
 
+-- +goose StatementBegin
 -- Map billing_mode -> pricing_group on rows that don't already have one.
 UPDATE ai_gateway.usage_ledger
 SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
@@ -25,7 +26,9 @@ SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
 WHERE billing_mode IS NOT NULL
   AND billing_mode IN ('unlimited', 'credit_package', 'payg_topup')
   AND COALESCE(NULLIF(metadata->>'pricing_group', ''), '') = '';
+-- +goose StatementEnd
 
+-- +goose StatementBegin
 -- Promote camelCase pricingGroup (legacy) into snake_case for any row
 -- where snake_case is still missing.
 UPDATE ai_gateway.usage_ledger
@@ -35,6 +38,7 @@ SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
 )
 WHERE COALESCE(NULLIF(metadata->>'pricing_group', ''), '') = ''
   AND COALESCE(NULLIF(metadata->>'pricingGroup', ''), '') <> '';
+-- +goose StatementEnd
 
 -- +goose Down
 -- Backfill is non-destructive; no down migration.
