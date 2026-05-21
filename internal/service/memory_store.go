@@ -969,6 +969,33 @@ func (s *MemoryStore) GetEntitlementByUser(_ context.Context, userID string) (*s
 	return nil, ErrNotFound
 }
 
+func (s *MemoryStore) ListActiveEntitlementsByUser(_ context.Context, userID string) ([]store.CustomerEntitlement, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now().UTC()
+	var unlimited, credit, other []store.CustomerEntitlement
+	for _, item := range s.entitlements {
+		if item.GenfityUserID != userID || item.Status != "active" {
+			continue
+		}
+		if item.PeriodEnd != nil && item.PeriodEnd.Before(now) {
+			continue
+		}
+		copy := item
+		switch entitlementPricingGroup(item) {
+		case "unlimited_plan", "unlimited":
+			unlimited = append(unlimited, copy)
+		case "credit_package":
+			credit = append(credit, copy)
+		default:
+			other = append(other, copy)
+		}
+	}
+	out := append(unlimited, credit...)
+	out = append(out, other...)
+	return out, nil
+}
+
 func entitlementPricingGroup(item store.CustomerEntitlement) string {
 	if item.PricingGroup != nil && *item.PricingGroup != "" {
 		return *item.PricingGroup

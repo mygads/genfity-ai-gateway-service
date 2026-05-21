@@ -48,6 +48,14 @@ type Store interface {
 	UpsertEntitlement(context.Context, store.CustomerEntitlement) (store.CustomerEntitlement, error)
 	UpsertEntitlementByUser(context.Context, store.CustomerEntitlement) (store.CustomerEntitlement, error)
 	GetEntitlementByUser(context.Context, string) (*store.CustomerEntitlement, error)
+	// ListActiveEntitlementsByUser returns every active, non-expired
+	// entitlement for the user. A user can hold multiple entitlements at
+	// once (e.g. unlimited trial + credit_package + payg_topup), and
+	// callers that need a specific pricing_group (credit balance for a
+	// credit-pinned key, PAYG balance for a PAYG-pinned key) must pick
+	// from this list rather than rely on GetEntitlementByUser, which
+	// only returns the highest-priority row.
+	ListActiveEntitlementsByUser(context.Context, string) ([]store.CustomerEntitlement, error)
 	UpsertBalanceSnapshot(context.Context, string, string, *string, *time.Time) (*store.CustomerEntitlement, error)
 
 	UpsertRouterInstance(context.Context, store.RouterInstance) (store.RouterInstance, error)

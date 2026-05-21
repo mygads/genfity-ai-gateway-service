@@ -83,6 +83,52 @@ func (s *EntitlementService) GetByUser(ctx context.Context, userID string) (*sto
 	return fresh, nil
 }
 
+// ListActiveByUser returns every active entitlement for the user. Use
+// when you need a specific pricing_group row (e.g. credit_package row
+// for credit balance) and the legacy GetByUser would return the wrong
+// one because it picks the highest-priority entitlement only. Bypasses
+// the GetByUser cache; the underlying query is still indexed and runs
+// once per request, so the impact is small.
+func (s *EntitlementService) ListActiveByUser(ctx context.Context, userID string) ([]store.CustomerEntitlement, error) {
+	return s.store.ListActiveEntitlementsByUser(ctx, userID)
+}
+
+// GetCreditEntitlementByUser returns the credit_package entitlement
+// for the user (if any). credit-pinned API keys must read
+// CreditBalance from this row, not from the unlimited row whose
+// CreditBalance is always NULL. Returns ErrNotFound when the user
+// has no credit_package entitlement.
+func (s *EntitlementService) GetCreditEntitlementByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
+	rows, err := s.ListActiveByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if entitlementPricingGroup(rows[i]) == "credit_package" {
+			row := rows[i]
+			return &row, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// GetPaygEntitlementByUser returns the payg_topup entitlement for the
+// user (if any). PAYG-pinned API keys must read PaygUsdBalance from
+// this row.
+func (s *EntitlementService) GetPaygEntitlementByUser(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
+	rows, err := s.ListActiveByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if entitlementPricingGroup(rows[i]) == "payg_topup" {
+			row := rows[i]
+			return &row, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (s *EntitlementService) CheckActive(ctx context.Context, userID string) (*store.CustomerEntitlement, error) {
 	subscription, err := s.CheckActiveSubscription(ctx, userID)
 	if err != nil {

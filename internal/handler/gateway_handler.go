@@ -1145,7 +1145,11 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 			// Free model — still require the user to carry a positive
 			// credit balance. Users with 0 balance (new accounts or
 			// exhausted credits) cannot access even free models.
-			if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
+			// Read CreditBalance from the credit_package row specifically;
+			// users with both unlimited + credit_package would otherwise
+			// have GetByUser return the unlimited row whose CreditBalance
+			// is always NULL.
+			if entitlement, err := h.entitlements.GetCreditEntitlementByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
 				if parseFloatPtr(entitlement.CreditBalance) > 0 {
 					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
 				}
@@ -1178,8 +1182,9 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		if reserveUSD <= 0 {
 			// Zero-priced model under PAYG — still require a positive
 			// PAYG balance so $0 accounts cannot reach even free models
-			// from a PAYG-pinned key.
-			if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.PaygUsdBalance != nil {
+			// from a PAYG-pinned key. Read PaygUsdBalance from the
+			// payg_topup row specifically — see credit comment above.
+			if entitlement, err := h.entitlements.GetPaygEntitlementByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.PaygUsdBalance != nil {
 				if parseFloatPtr(entitlement.PaygUsdBalance) > 0 {
 					return runtimeReservation{BillingMode: "payg_topup", PaygUSD: 0}, 0, ""
 				}
@@ -2719,30 +2724,36 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 			// balanceAfter snapshot. Read failures are non-fatal — leave
 			// the field null and the FE will fall back to the running
 			// snapshot from /api/user/ai-gateway/billing.
-			if reservation.RequestCredits > 0 || reservation.PaygUSD > 0 {
-				if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil {
-					if reservation.RequestCredits > 0 && entitlement.CreditBalance != nil {
-						current := parseFloatPtr(entitlement.CreditBalance)
-						after := current - reservation.RequestCredits
-						if after < 0 {
-							after = 0
-						}
-						a := fmt.Sprintf("%.4f", after)
-						balanceAfterCreditsPtr = &a
+			//
+			// Read each balance from the row that owns it: credit_package
+			// row has CreditBalance, payg_topup row has PaygUsdBalance.
+			// GetByUser would return the unlimited row first when the
+			// user holds both, leaving credit_balance NULL and snapshot
+			// stuck on the previous request's value.
+			if reservation.RequestCredits > 0 {
+				if entitlement, err := h.entitlements.GetCreditEntitlementByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
+					current := parseFloatPtr(entitlement.CreditBalance)
+					after := current - reservation.RequestCredits
+					if after < 0 {
+						after = 0
 					}
-					if reservation.PaygUSD > 0 && entitlement.PaygUsdBalance != nil {
-						current := parseFloatPtr(entitlement.PaygUsdBalance)
-						actual := totalCostUsd
-						if actual <= 0 {
-							actual = reservation.PaygUSD
-						}
-						after := current - actual
-						if after < 0 {
-							after = 0
-						}
-						a := formatAmount(after)
-						balanceAfterUsdPtr = &a
+					a := fmt.Sprintf("%.4f", after)
+					balanceAfterCreditsPtr = &a
+				}
+			}
+			if reservation.PaygUSD > 0 {
+				if entitlement, err := h.entitlements.GetPaygEntitlementByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.PaygUsdBalance != nil {
+					current := parseFloatPtr(entitlement.PaygUsdBalance)
+					actual := totalCostUsd
+					if actual <= 0 {
+						actual = reservation.PaygUSD
 					}
+					after := current - actual
+					if after < 0 {
+						after = 0
+					}
+					a := formatAmount(after)
+					balanceAfterUsdPtr = &a
 				}
 			}
 		}

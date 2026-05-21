@@ -582,6 +582,55 @@ func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string)
 	return &item, err
 }
 
+// ListActiveEntitlementsByUser returns every active, non-expired
+// entitlement row for the user. The caller picks the right row for
+// the request — credit-pinned keys must read CreditBalance from the
+// credit_package row, not the unlimited row whose CreditBalance is
+// always NULL. Same priority-ordered as GetEntitlementByUser so
+// consumers that take the first row keep the legacy behavior.
+func (s *PostgresStore) ListActiveEntitlementsByUser(ctx context.Context, userID string) ([]store.CustomerEntitlement, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, genfity_user_id, genfity_tenant_id, plan_code, status,
+			period_start, period_end, quota_tokens_monthly,
+			balance_snapshot::text,
+			credit_balance::text, credit_balance_reserved::text, credit_expires_at,
+			payg_usd_balance::text, payg_usd_balance_reserved::text,
+			pricing_group, metadata, updated_from_genfity_at
+		FROM ai_gateway.customer_entitlements
+		WHERE genfity_user_id = $1
+		  AND status = 'active'
+		  AND (period_end IS NULL OR period_end > now())
+		ORDER BY CASE
+			WHEN COALESCE(pricing_group, metadata->>'pricingGroup') IN ('unlimited', 'unlimited_plan') THEN 0
+			WHEN COALESCE(pricing_group, metadata->>'pricingGroup') = 'credit_package' THEN 1
+			ELSE 2
+		END,
+		period_start DESC NULLS LAST, updated_at DESC, period_end DESC NULLS LAST`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.CustomerEntitlement
+	for rows.Next() {
+		var item store.CustomerEntitlement
+		var metadata json.RawMessage
+		if err := rows.Scan(
+			&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
+			&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly,
+			&item.BalanceSnapshot,
+			&item.CreditBalance, &item.CreditBalanceReserved, &item.CreditExpiresAt,
+			&item.PaygUsdBalance, &item.PaygUsdBalanceReserved,
+			&item.PricingGroup, &metadata, &item.UpdatedFromGenfityAt,
+		); err != nil {
+			return nil, err
+		}
+		item.Metadata = metadata
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) (*store.CustomerEntitlement, error) {
 	var item store.CustomerEntitlement
 	var metadata json.RawMessage
