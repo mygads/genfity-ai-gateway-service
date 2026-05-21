@@ -557,7 +557,16 @@ func (s *PostgresStore) GetEntitlementByUser(ctx context.Context, userID string)
 			WHEN COALESCE(pricing_group, metadata->>'pricingGroup') IN ('unlimited', 'unlimited_plan') THEN 0
 			WHEN COALESCE(pricing_group, metadata->>'pricingGroup') = 'credit_package' THEN 1
 			ELSE 2
-		END, period_end DESC NULLS LAST, updated_at DESC
+		END,
+		-- Tiebreaker: prefer the most recently activated subscription.
+		-- We sort by period_start DESC first because a freshly-bought
+		-- plan always has a later period_start than the one it replaced;
+		-- updated_at is the safety net when period_start is null (legacy
+		-- rows). Sorting by period_end DESC instead — as the legacy
+		-- query did — picks the row with the latest expiry, which means
+		-- a stale 3-day trial can outrank a brand-new 1-day plan and
+		-- continue to enforce its (smaller) allowedModels list.
+		period_start DESC NULLS LAST, updated_at DESC, period_end DESC NULLS LAST
 		LIMIT 1`, userID).Scan(
 		&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
 		&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly,
