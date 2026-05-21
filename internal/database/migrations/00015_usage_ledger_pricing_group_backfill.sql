@@ -1,16 +1,17 @@
+-- +goose Up
 -- 00015_usage_ledger_pricing_group_backfill.sql
 --
 -- Older usage_ledger rows wrote metadata->>'pricingGroup' (camelCase)
 -- but the admin dashboard summarizes by metadata->>'pricing_group'
 -- (snake_case). The result was a large "Unknown" bucket on the
 -- AI Gateway Usage admin page even when billing_mode was perfectly
--- valid. This migration backfills `metadata->>'pricing_group'` from
--- the row's `billing_mode` so historical rows get classified
+-- valid. This migration backfills metadata->>'pricing_group' from
+-- the row's billing_mode so historical rows get classified
 -- correctly. Going forward the writer derives pricing_group from
 -- the reservation's billing_mode, so no future rows should land in
 -- "unknown" unless billing_mode itself is empty.
 
--- Map billing_mode → pricing_group on rows that don't already have one.
+-- Map billing_mode -> pricing_group on rows that don't already have one.
 UPDATE ai_gateway.usage_ledger
 SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
     'pricing_group',
@@ -34,3 +35,7 @@ SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
 )
 WHERE COALESCE(NULLIF(metadata->>'pricing_group', ''), '') = ''
   AND COALESCE(NULLIF(metadata->>'pricingGroup', ''), '') <> '';
+
+-- +goose Down
+-- Backfill is non-destructive; no down migration.
+SELECT 1;
