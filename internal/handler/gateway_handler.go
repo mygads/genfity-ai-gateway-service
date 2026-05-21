@@ -2087,7 +2087,16 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
 			settled = true
-			preCounters.commit()
+			// Streaming HTTP 200 doesn't guarantee a real completion — the
+			// upstream can emit `data: {"error": ...}` or close mid-stream
+			// before any content lands. Use the same shouldCountAsSuccess
+			// gate as the non-streaming branch so a provider hiccup or
+			// truncated stream doesn't burn the user's RPD slot. Without
+			// this check, every failed streaming attempt ticked the
+			// counter even though recordUsage flagged the row as failed.
+			if shouldCountAsSuccess(statusCode, body) {
+				preCounters.commit()
+			}
 			return
 		}
 
@@ -2442,7 +2451,13 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
 			settled = true
-			preCounters.commit()
+			// See /v1/messages streaming branch — HTTP 200 alone is not
+			// proof of a real completion, so gate the counter commit on
+			// shouldCountAsSuccess to avoid charging the user when the
+			// stream errored out or never produced content.
+			if shouldCountAsSuccess(statusCode, body) {
+				preCounters.commit()
+			}
 			return
 		}
 
