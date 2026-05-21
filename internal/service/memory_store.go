@@ -104,7 +104,7 @@ func (s *MemoryStore) UpsertAPIKey(_ context.Context, key store.APIKey) (store.A
 		key.CreatedAt = time.Now().UTC()
 	}
 	if key.BillingSource == "" {
-		key.BillingSource = "auto"
+		key.BillingSource = "subscription"
 	}
 	s.apiKeys[key.ID] = key
 	return key, nil

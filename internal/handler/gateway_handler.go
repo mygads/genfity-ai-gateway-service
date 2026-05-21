@@ -58,9 +58,9 @@ func subscriptionPlan(sub *service.ActiveSubscription) *store.SubscriptionPlanSn
 func shouldEnforceUnlimitedAllowlist(apiKey store.APIKey) bool {
 	source := apiKey.BillingSource
 	if source == "" {
-		source = "auto"
+		source = "subscription"
 	}
-	return source == "auto" || source == "subscription"
+	return source == "subscription"
 }
 
 // isUnlimitedSubscription returns true when the active subscription is on
@@ -1109,124 +1109,96 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 
 	source := apiKey.BillingSource
 	if source == "" {
-		source = "auto"
+		source = "subscription"
 	}
 
-	allowSubscription := source == "auto" || source == "subscription"
-	allowCredit := source == "auto" || source == "credit"
-	allowPayg := source == "auto" || source == "payg"
-
-	// Priority 1: Unlimited coverage. The subscription must be an
-	// "unlimited" plan AND the model must appear in allowedModels.
-	// pricingGroup + allowedModels are resolved live from the plan
-	// snapshot so admin edits propagate to existing subscribers
-	// immediately; the entitlement's frozen copy is the legacy fallback.
-	if allowSubscription && subscription != nil && subscription.Entitlement != nil {
+	// API keys are pinned to exactly one billing source. The legacy
+	// "auto" cascade was removed in 2026-05; each branch below now
+	// resolves billing for its source and either succeeds or fails
+	// closed. There is no fall-through between branches — a credit-key
+	// hitting "insufficient_credit_balance" must NOT silently consume
+	// PAYG balance, and vice versa.
+	switch source {
+	case "subscription":
+		if subscription == nil || subscription.Entitlement == nil {
+			return runtimeReservation{}, http.StatusPaymentRequired, "no_active_subscription"
+		}
 		group := resolveSubscriptionPricingGroup(subscription)
 		if group == "" {
 			group = pricingGroup(subscription)
 		}
-		if (group == "unlimited" || group == "unlimited_plan") && modelCoveredByUnlimited(subscription, model) {
-			return runtimeReservation{BillingMode: "unlimited"}, 0, ""
-		}
-		// If key is pinned to subscription only, fail closed when
-		// unlimited isn't applicable to this request.
-		if source == "subscription" {
+		if (group != "unlimited" && group != "unlimited_plan") || !modelCoveredByUnlimited(subscription, model) {
 			return runtimeReservation{}, http.StatusPaymentRequired, "subscription_not_covering_model"
 		}
-	} else if source == "subscription" {
-		// Pinned to subscription but no active entitlement.
-		return runtimeReservation{}, http.StatusPaymentRequired, "no_active_subscription"
-	}
+		return runtimeReservation{BillingMode: "unlimited"}, 0, ""
 
-	// Priority 2: request credits. Look up the per-model credit cost.
-	// We use the model's PublicModel (e.g. "mtr/claude-opus-4.7") as
-	// the lookup key — this is what sync pushes from genfity-app.
-	if allowCredit {
+	case "credit":
 		fullModelID := model.PublicModel
-		if fullModelID != "" {
-			if cost, err := h.models.GetModelCreditCost(ctx, fullModelID); err == nil && cost != nil && cost.IsActive {
-				if cost.IsFree || parseFloatPtr(&cost.CreditsPerReq) <= 0 {
-					// Free model — still require the user to have a positive
-					// credit balance. Users with 0 balance (new accounts or
-					// exhausted credits) cannot access even free models.
-					if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
-						if parseFloatPtr(entitlement.CreditBalance) > 0 {
-							return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
-						}
-					}
-					if source == "credit" {
-						return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
-					}
-					// Fall through to PAYG check
-				} else {
-					credits := parseFloatPtr(&cost.CreditsPerReq)
-					if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
-						if errors.Is(err, service.ErrInsufficientBalance) {
-							if source == "credit" {
-								return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
-							}
-							// Fall through to PAYG — user may have credits
-							// exhausted but still carry a PAYG balance.
-						} else {
-							return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
-						}
-					} else {
-						return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
-					}
-				}
-			} else if source == "credit" {
-				return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
-			}
-		} else if source == "credit" {
+		if fullModelID == "" {
 			return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
 		}
-	}
+		cost, err := h.models.GetModelCreditCost(ctx, fullModelID)
+		if err != nil || cost == nil || !cost.IsActive {
+			return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
+		}
+		if cost.IsFree || parseFloatPtr(&cost.CreditsPerReq) <= 0 {
+			// Free model — still require the user to carry a positive
+			// credit balance. Users with 0 balance (new accounts or
+			// exhausted credits) cannot access even free models.
+			if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
+				if parseFloatPtr(entitlement.CreditBalance) > 0 {
+					return runtimeReservation{BillingMode: "credit_package", RequestCredits: 0}, 0, ""
+				}
+			}
+			return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
+		}
+		credits := parseFloatPtr(&cost.CreditsPerReq)
+		if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
+			if errors.Is(err, service.ErrInsufficientBalance) {
+				return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
+			}
+			return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
+		}
+		return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
 
-	// Priority 3: PAYG USD balance.
-	if !allowPayg {
-		// Key is pinned to a higher-priority schema that didn't match.
-		return runtimeReservation{}, http.StatusPaymentRequired, "billing_source_not_applicable"
-	}
-	if !model.PaygExposed {
-		if source == "payg" {
+	case "payg":
+		if !model.PaygExposed {
 			return runtimeReservation{}, http.StatusPaymentRequired, "payg_model_not_published"
 		}
-		return runtimeReservation{}, 0, ""
-	}
-	prices := h.models.ListPrices(ctx)
-	price := modelPrice(prices, model.ID)
-	if price == nil {
-		// No PAYG price configured.
-		if source == "payg" {
+		prices := h.models.ListPrices(ctx)
+		price := modelPrice(prices, model.ID)
+		if price == nil {
 			return runtimeReservation{}, http.StatusPaymentRequired, "payg_price_not_configured"
 		}
-		// Auto mode: nothing more we can do at the priority chain level.
-		// Return "no match" so caller falls back to legacy paths.
-		return runtimeReservation{}, 0, ""
-	}
-	if !estimate.Bounded && parseFloatPtr(&price.OutputPricePer1M) > 0 {
-		return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
-	}
-	reserveUSD := float64(estimate.PromptTokens)/1_000_000*parseFloatPtr(&price.InputPricePer1M) +
-		float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
-	if reserveUSD <= 0 {
-		// Free model under PAYG schema — still require the user to have
-		// a positive PAYG balance. Users with $0 cannot access even free models.
-		if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.PaygUsdBalance != nil {
-			if parseFloatPtr(entitlement.PaygUsdBalance) > 0 {
-				return runtimeReservation{BillingMode: "payg_topup", PaygUSD: 0}, 0, ""
-			}
+		if !estimate.Bounded && parseFloatPtr(&price.OutputPricePer1M) > 0 {
+			return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
 		}
-		return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_balance"
-	}
-	if err := h.usage.ReservePaygUsdBalance(ctx, apiKey.GenfityUserID, reserveUSD); err != nil {
-		if errors.Is(err, service.ErrInsufficientBalance) {
+		reserveUSD := float64(estimate.PromptTokens)/1_000_000*parseFloatPtr(&price.InputPricePer1M) +
+			float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
+		if reserveUSD <= 0 {
+			// Zero-priced model under PAYG — still require a positive
+			// PAYG balance so $0 accounts cannot reach even free models
+			// from a PAYG-pinned key.
+			if entitlement, err := h.entitlements.GetByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.PaygUsdBalance != nil {
+				if parseFloatPtr(entitlement.PaygUsdBalance) > 0 {
+					return runtimeReservation{BillingMode: "payg_topup", PaygUSD: 0}, 0, ""
+				}
+			}
 			return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_balance"
 		}
-		return runtimeReservation{}, http.StatusInternalServerError, "payg_reservation_failed"
+		if err := h.usage.ReservePaygUsdBalance(ctx, apiKey.GenfityUserID, reserveUSD); err != nil {
+			if errors.Is(err, service.ErrInsufficientBalance) {
+				return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_balance"
+			}
+			return runtimeReservation{}, http.StatusInternalServerError, "payg_reservation_failed"
+		}
+		return runtimeReservation{BillingMode: "payg_topup", PaygUSD: reserveUSD}, 0, ""
+
+	default:
+		// Unknown source — DB CHECK constraint should prevent this, but
+		// fail closed defensively if a row slipped through.
+		return runtimeReservation{}, http.StatusPaymentRequired, "billing_source_not_applicable"
 	}
-	return runtimeReservation{BillingMode: "payg_topup", PaygUSD: reserveUSD}, 0, ""
 }
 
 // modelCoveredByUnlimited returns true when the model's public id is
@@ -1262,7 +1234,7 @@ func modelCoveredByUnlimited(subscription *service.ActiveSubscription, model *st
 // well below their real cap.
 //
 // Mirror tryPriorityBilling priority-1 exactly:
-//   - billing_source allows subscription ("auto" or "subscription")
+//   - billing_source is "subscription"
 //   - subscription is unlimited (pricing_group = "unlimited"/"unlimited_plan")
 //   - model is in allowedModels (or allowedModels is empty = permissive)
 func requestWillUseUnlimited(apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel) bool {
@@ -1271,9 +1243,9 @@ func requestWillUseUnlimited(apiKey store.APIKey, subscription *service.ActiveSu
 	}
 	source := apiKey.BillingSource
 	if source == "" {
-		source = "auto"
+		source = "subscription"
 	}
-	if source != "auto" && source != "subscription" {
+	if source != "subscription" {
 		return false
 	}
 	group := resolveSubscriptionPricingGroup(subscription)
@@ -1768,8 +1740,6 @@ func isRetriableTrigger(body []byte, triggers []string) bool {
 //   - "subscription" → only models in the user's active entitlement
 //                      allowedModels (empty allowedModels = all models).
 //   - "payg"         → only models with a configured PAYG price.
-//   - "auto"         → union of all three (any model the user could pay
-//                      for via any priority).
 //
 // A model that doesn't pass the filter is hidden so customers don't
 // see options they can't actually use with this key.
@@ -1780,19 +1750,19 @@ func (h *GatewayHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 
 	source := apiKey.BillingSource
 	if source == "" {
-		source = "auto"
+		source = "subscription"
 	}
 
 	allModels := h.models.ListModels(ctx)
 	prices := h.models.ListPrices(ctx)
 
 	// Lookup user's active subscription (entitlement + live plan snapshot)
-	// once for "subscription" and "auto". We need the live plan snapshot
-	// because allowedModels is resolved from plan metadata (not entitlement
-	// metadata) so admin edits propagate to existing subscribers — see
-	// resolveAllowedModels for the full lookup chain.
+	// only when the key is pinned to subscription. We need the live plan
+	// snapshot because allowedModels is resolved from plan metadata (not
+	// entitlement metadata) so admin edits propagate to existing
+	// subscribers — see resolveAllowedModels for the full lookup chain.
 	var subscription *service.ActiveSubscription
-	if source == "subscription" || source == "auto" {
+	if source == "subscription" {
 		if sub, err := h.entitlements.CheckActiveSubscription(ctx, apiKey.GenfityUserID); err == nil {
 			subscription = sub
 		}
@@ -1852,8 +1822,10 @@ func (h *GatewayHandler) ListModels(w http.ResponseWriter, r *http.Request) {
 			visible = allowsViaCredit(m)
 		case "payg":
 			visible = allowsViaPayg(m)
-		default: // "auto"
-			visible = allowsViaSubscription(m) || allowsViaCredit(m) || allowsViaPayg(m)
+		default:
+			// Unknown source — fail closed. Constraint should already
+			// reject this at insert time but be defensive.
+			visible = false
 		}
 
 		if !visible {

@@ -113,7 +113,7 @@ func (s *PostgresStore) UpsertAPIKey(ctx context.Context, item store.APIKey) (st
 			revoked_at = EXCLUDED.revoked_at
 		RETURNING id, genfity_user_id, genfity_tenant_id, name, key_prefix, key_hash, status, billing_source, last_used_at, expires_at, created_at, regenerated_at, revoked_at`,
 		nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.Name, item.KeyPrefix, item.KeyHash,
-		defaultString(item.Status, "active"), defaultString(item.BillingSource, "auto"),
+		defaultString(item.Status, "active"), defaultString(item.BillingSource, "subscription"),
 		item.LastUsedAt, item.ExpiresAt, defaultTime(item.CreatedAt), item.RegeneratedAt, item.RevokedAt,
 	).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.Name, &item.KeyPrefix, &item.KeyHash, &item.Status, &item.BillingSource, &item.LastUsedAt, &item.ExpiresAt, &item.CreatedAt, &item.RegeneratedAt, &item.RevokedAt)
 	if err != nil {

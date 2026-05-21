@@ -40,10 +40,13 @@ type APIKey struct {
 	KeyHash         string     `json:"-"`
 	Status          string     `json:"status"`
 	// BillingSource constrains which billing schema the key may consume.
-	// Values: "auto" (default, original 3-priority chain),
-	// "subscription" (unlimited plan only),
-	// "credit" (credit_package balance only),
-	// "payg" (payg_topup USD balance only).
+	// Values:
+	//   "subscription" (default — unlimited plan only),
+	//   "credit"       (credit_package balance only),
+	//   "payg"         (payg_topup USD balance only).
+	// The legacy "auto" value (3-priority cascade) was removed in 2026-05;
+	// no rows still carry it. Empty source is treated as "subscription"
+	// for safety, but the DB CHECK constraint should reject it.
 	BillingSource   string     `json:"billing_source"`
 	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt       *time.Time `json:"expires_at,omitempty"`

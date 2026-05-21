@@ -336,12 +336,15 @@ func defaultBillingSource(source string) string {
 	if validBillingSource(source) {
 		return source
 	}
-	return "auto"
+	// "auto" was removed in 2026-05 — fall through to subscription so
+	// keys created without an explicit source default to the safest
+	// option (no credit/PAYG debit until the user opts in).
+	return "subscription"
 }
 
 func validBillingSource(source string) bool {
 	switch source {
-	case "auto", "subscription", "credit", "payg":
+	case "subscription", "credit", "payg":
 		return true
 	}
 	return false
