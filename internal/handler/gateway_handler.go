@@ -892,7 +892,18 @@ func (h *GatewayHandler) applyPreRequestLimits(
 	if subscription != nil && subscription.Plan != nil {
 		tracker.planCode = subscription.Plan.PlanCode
 	}
-	if limits.HasMaxRequestsPerPeriod() && subscription != nil && subscription.Entitlement != nil {
+	// Only count this request against the unlimited plan's per-period and
+	// per-day caps when it will actually be billed via the unlimited
+	// subscription. A user who has both an unlimited trial AND a credit
+	// package was previously getting their credit-billed requests for
+	// paid models (e.g. claude-opus-4.7) counted against the trial's
+	// MaxRequestsPerPeriod, which banned them well below their real
+	// budget. tryPriorityBilling owns the same routing logic; we mirror
+	// the priority-1 gate here (billing_source allows subscription AND
+	// the model is covered by allowedModels) so the counter only ticks
+	// for requests the unlimited plan is actually paying for.
+	willUseUnlimited := requestWillUseUnlimited(apiKey, subscription, model)
+	if willUseUnlimited && limits.HasMaxRequestsPerPeriod() && subscription != nil && subscription.Entitlement != nil {
 		pk := periodKey(subscription.Entitlement)
 		tracker.periodKey = pk
 		_, end := activePeriod(subscription.Entitlement)
@@ -905,7 +916,7 @@ func (h *GatewayHandler) applyPreRequestLimits(
 		}
 		tracker.periodConsumed = true
 	}
-	if limits.HasRPD() && subscription != nil && subscription.Plan != nil {
+	if willUseUnlimited && limits.HasRPD() && subscription != nil && subscription.Plan != nil {
 		if err := h.rateLimit.CheckPlanRPD(ctx, apiKey.GenfityUserID, subscription.Plan.PlanCode, limits.RPD); err != nil {
 			tracker.rollback(ctx)
 			return "plan_rpd_exceeded", http.StatusTooManyRequests, tracker
@@ -1240,6 +1251,39 @@ func modelCoveredByUnlimited(subscription *service.ActiveSubscription, model *st
 		}
 	}
 	return false
+}
+
+// requestWillUseUnlimited returns true when this request will be billed
+// against the active unlimited subscription (priority 1 in
+// tryPriorityBilling). The plan-period and plan-RPD counters should
+// only tick for these requests; users with both an unlimited trial and
+// a credit_package previously had credit-billed requests for paid
+// models eat the trial's MaxRequestsPerPeriod budget — banning them
+// well below their real cap.
+//
+// Mirror tryPriorityBilling priority-1 exactly:
+//   - billing_source allows subscription ("auto" or "subscription")
+//   - subscription is unlimited (pricing_group = "unlimited"/"unlimited_plan")
+//   - model is in allowedModels (or allowedModels is empty = permissive)
+func requestWillUseUnlimited(apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel) bool {
+	if subscription == nil || subscription.Entitlement == nil || model == nil {
+		return false
+	}
+	source := apiKey.BillingSource
+	if source == "" {
+		source = "auto"
+	}
+	if source != "auto" && source != "subscription" {
+		return false
+	}
+	group := resolveSubscriptionPricingGroup(subscription)
+	if group == "" {
+		group = pricingGroup(subscription)
+	}
+	if group != "unlimited" && group != "unlimited_plan" {
+		return false
+	}
+	return modelCoveredByUnlimited(subscription, model)
 }
 
 // resolveAllowedModels reads allowedModels from the LIVE plan snapshot
