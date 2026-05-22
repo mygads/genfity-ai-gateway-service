@@ -1965,11 +1965,9 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
-		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
-		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
-		return
-	}
+	// Image models are not in the gateway's model catalog — skip the
+	// unlimited allowlist check. CLIProxyAPI validates model support
+	// on its own image registry.
 
 	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
 
