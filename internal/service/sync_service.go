@@ -377,8 +377,9 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 		count++
 	}
 
-	// Auto-cleanup: soft-delete models not in payload (set status='retired').
-	// usage_ledger joins via uuid model_id so history is preserved.
+	// Auto-cleanup: soft-delete models not in payload (set status='retired')
+	// and deactivate their associated routes and prices so billing/routing
+	// cannot reference a retired model.
 	keep := make(map[string]struct{}, len(payload))
 	for _, item := range payload {
 		keep[item.PublicModel] = struct{}{}
@@ -391,6 +392,18 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 			continue
 		}
 		_ = s.store.UpdateModelStatus(ctx, existing.ID, "retired")
+		// Retire associated route so the model cannot be routed.
+		if route, err := s.store.GetRouteByModelID(ctx, existing.ID); err == nil && route != nil && route.Status != "retired" {
+			route.Status = "retired"
+			_, _ = s.store.UpdateRoute(ctx, *route)
+		}
+		// Deactivate associated price so PAYG billing cannot reference it.
+		for _, price := range s.models.ListPrices(ctx) {
+			if price.ModelID == existing.ID && price.Active {
+				price.Active = false
+				_, _ = s.store.UpdatePrice(ctx, price)
+			}
+		}
 	}
 
 	return count, nil
