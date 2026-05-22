@@ -244,6 +244,7 @@ type ModelSyncItem struct {
 	DisplayName        string `json:"display_name"`
 	Description        string `json:"description,omitempty"`
 	Status             string `json:"status,omitempty"` // "active" | "draft"
+	ModelType          string `json:"model_type,omitempty"` // "text" | "image" | "embedding"
 	ContextWindow      *int32 `json:"context_window,omitempty"`
 	SupportsStreaming  bool   `json:"supports_streaming"`
 	SupportsTools      bool   `json:"supports_tools"`
@@ -296,6 +297,7 @@ func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (
 			DisplayName:       item.DisplayName,
 			Description:       desc,
 			Status:            status,
+			ModelType:         defaultString(item.ModelType, "text"),
 			ContextWindow:     item.ContextWindow,
 			SupportsStreaming: item.SupportsStreaming,
 			SupportsTools:     item.SupportsTools,

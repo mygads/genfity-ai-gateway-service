@@ -199,12 +199,13 @@ func (s *PostgresStore) UpdateAPIKeyLastUsedAt(ctx context.Context, id uuid.UUID
 
 func (s *PostgresStore) UpsertModel(ctx context.Context, item store.AIModel) (store.AIModel, error) {
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO ai_gateway.ai_models (id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		INSERT INTO ai_gateway.ai_models (id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 		ON CONFLICT (public_model) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
 			description = EXCLUDED.description,
 			status = EXCLUDED.status,
+			model_type = EXCLUDED.model_type,
 			context_window = EXCLUDED.context_window,
 			supports_streaming = EXCLUDED.supports_streaming,
 			supports_tools = EXCLUDED.supports_tools,
@@ -215,9 +216,9 @@ func (s *PostgresStore) UpsertModel(ctx context.Context, item store.AIModel) (st
 			free_limit_rpm = EXCLUDED.free_limit_rpm,
 			free_limit_tpd = EXCLUDED.free_limit_tpd,
 			updated_at = now()
-		RETURNING id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at`,
-		nilUUID(item.ID), item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed, item.IsFree, item.FreeLimitRPD, item.FreeLimitRPM, item.FreeLimitTPD,
-	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
+		RETURNING id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at`,
+		nilUUID(item.ID), item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), defaultString(item.ModelType, "text"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed, item.IsFree, item.FreeLimitRPD, item.FreeLimitRPM, item.FreeLimitTPD,
+	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return store.AIModel{}, err
 	}
@@ -231,20 +232,21 @@ func (s *PostgresStore) UpdateModel(ctx context.Context, item store.AIModel) (st
 			display_name = $3,
 			description = $4,
 			status = $5,
-			context_window = $6,
-			supports_streaming = $7,
-			supports_tools = $8,
-			supports_vision = $9,
-			payg_exposed = $10,
-			is_free = $11,
-			free_limit_rpd = $12,
-			free_limit_rpm = $13,
-			free_limit_tpd = $14,
+			model_type = $6,
+			context_window = $7,
+			supports_streaming = $8,
+			supports_tools = $9,
+			supports_vision = $10,
+			payg_exposed = $11,
+			is_free = $12,
+			free_limit_rpd = $13,
+			free_limit_rpm = $14,
+			free_limit_tpd = $15,
 			updated_at = now()
 		WHERE id = $1
-		RETURNING id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at`,
-		item.ID, item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed, item.IsFree, item.FreeLimitRPD, item.FreeLimitRPM, item.FreeLimitTPD,
-	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
+		RETURNING id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at`,
+		item.ID, item.PublicModel, item.DisplayName, item.Description, defaultString(item.Status, "active"), defaultString(item.ModelType, "text"), item.ContextWindow, item.SupportsStreaming, item.SupportsTools, item.SupportsVision, item.PaygExposed, item.IsFree, item.FreeLimitRPD, item.FreeLimitRPM, item.FreeLimitTPD,
+	).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return store.AIModel{}, ErrNotFound
 	}
@@ -263,7 +265,7 @@ func (s *PostgresStore) UpdateModelStatus(ctx context.Context, id uuid.UUID, sta
 }
 
 func (s *PostgresStore) ListAllModels(ctx context.Context) []store.AIModel {
-	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models ORDER BY public_model ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models ORDER BY public_model ASC`)
 	if err != nil {
 		return nil
 	}
@@ -293,7 +295,7 @@ func (s *PostgresStore) DeleteModel(ctx context.Context, id uuid.UUID) error {
 }
 
 func (s *PostgresStore) ListModels(ctx context.Context) []store.AIModel {
-	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models ORDER BY display_name ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models ORDER BY display_name ASC`)
 	if err != nil {
 		return nil
 	}
@@ -313,7 +315,7 @@ func (s *PostgresStore) ListModels(ctx context.Context) []store.AIModel {
 
 func (s *PostgresStore) GetModelByID(ctx context.Context, id uuid.UUID) (*store.AIModel, error) {
 	var item store.AIModel
-	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE id = $1 LIMIT 1`, id).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE id = $1 LIMIT 1`, id).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -322,7 +324,7 @@ func (s *PostgresStore) GetModelByID(ctx context.Context, id uuid.UUID) (*store.
 
 func (s *PostgresStore) GetModelByPublicName(ctx context.Context, publicModel string) (*store.AIModel, error) {
 	var item store.AIModel
-	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE public_model = $1 LIMIT 1`, publicModel).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE public_model = $1 LIMIT 1`, publicModel).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -1374,7 +1376,7 @@ func scanAPIKey(row pgx.Row, item *store.APIKey) error {
 }
 
 func scanModel(row pgx.Row, item *store.AIModel) error {
-	return row.Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
+	return row.Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 }
 
 func scanRoute(row pgx.Row, item *store.AIModelRoute) error {

@@ -1965,9 +1965,6 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 		respondError(w, http.StatusPaymentRequired, ec)
 		return
 	}
-	// Image models are not in the gateway's model catalog — skip the
-	// unlimited allowlist check. CLIProxyAPI validates model support
-	// on its own image registry.
 
 	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
 
@@ -1979,9 +1976,34 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// Image generation bypasses model route resolution — the model string
-	// is forwarded as-is to CLIProxyAPI which handles provider routing via
-	// its own image registry.
+	// Soft-lookup model in catalog for billing enforcement.
+	// If the model is not in the catalog, we pass through without billing
+	// (backward compat for models not yet seeded).
+	var model *store.AIModel
+	if m, lookupErr := h.models.GetModelByPublicName(ctx, publicModel); lookupErr == nil {
+		model = m
+	}
+
+	var reservation runtimeReservation
+	if model != nil && model.Status == "active" {
+		estimate := tokenReservationEstimate{TotalTokens: 0, Bounded: true}
+		res, billingStatus, billingCode := h.tryPriorityBilling(ctx, apiKey, subscription, payload, model, estimate)
+		if billingStatus != 0 {
+			h.recordFailedRequest(ctx, apiKey, publicModel, billingCode, billingStatus, started)
+			respondError(w, billingStatus, billingCode)
+			return
+		}
+		reservation = res
+	}
+	settled := false
+	defer func() {
+		if settled || reservation.BillingMode == "" {
+			return
+		}
+		bgCtx := context.Background()
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+	}()
+
 	client, ok := h.clientForRouter(ctx, "")
 	if !ok {
 		respondError(w, http.StatusBadGateway, "router_unavailable")
@@ -1996,14 +2018,25 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
+	success := resp.StatusCode >= 200 && resp.StatusCode < 400
+	if success && reservation.BillingMode != "" {
+		settled = true
+		bgCtx := context.Background()
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, true, true)
+	}
+
 	finished := time.Now().UTC()
 	latencyMs := int32(finished.Sub(started).Milliseconds())
-	status := "success"
+	usageStatus := "success"
 	var ec *string
 	if resp.StatusCode >= 400 {
-		status = "failed"
+		usageStatus = "failed"
 		code := "upstream_error"
 		ec = &code
+	}
+	totalCost := "0"
+	if success && reservation.RequestCredits > 0 {
+		totalCost = strconv.FormatFloat(reservation.RequestCredits, 'f', 4, 64)
 	}
 	apiKeyID := apiKey.ID
 	entry := store.UsageLedgerEntry{
@@ -2013,14 +2046,14 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 		GenfityTenantID: apiKey.GenfityTenantID,
 		APIKeyID:        &apiKeyID,
 		PublicModel:     publicModel,
-		Status:          status,
+		Status:          usageStatus,
 		ErrorCode:       ec,
 		LatencyMS:       &latencyMs,
 		StartedAt:       started,
 		FinishedAt:      &finished,
 		InputCost:       "0",
 		OutputCost:      "0",
-		TotalCost:       "0",
+		TotalCost:       totalCost,
 	}
 	if _, recordErr := h.usage.Record(ctx, entry); recordErr != nil {
 		zerolog.Ctx(ctx).Warn().Err(recordErr).Msg("failed to record image generation usage")
@@ -2063,6 +2096,31 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var model *store.AIModel
+	if m, lookupErr := h.models.GetModelByPublicName(ctx, publicModel); lookupErr == nil {
+		model = m
+	}
+
+	var reservation runtimeReservation
+	if model != nil && model.Status == "active" {
+		estimate := tokenReservationEstimate{TotalTokens: 0, Bounded: true}
+		res, billingStatus, billingCode := h.tryPriorityBilling(ctx, apiKey, subscription, payload, model, estimate)
+		if billingStatus != 0 {
+			h.recordFailedRequest(ctx, apiKey, publicModel, billingCode, billingStatus, started)
+			respondError(w, billingStatus, billingCode)
+			return
+		}
+		reservation = res
+	}
+	settled := false
+	defer func() {
+		if settled || reservation.BillingMode == "" {
+			return
+		}
+		bgCtx := context.Background()
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+	}()
+
 	client, ok := h.clientForRouter(ctx, "")
 	if !ok {
 		respondError(w, http.StatusBadGateway, "router_unavailable")
@@ -2077,14 +2135,25 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
+	success := resp.StatusCode >= 200 && resp.StatusCode < 400
+	if success && reservation.BillingMode != "" {
+		settled = true
+		bgCtx := context.Background()
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, true, true)
+	}
+
 	finished := time.Now().UTC()
 	latencyMs := int32(finished.Sub(started).Milliseconds())
-	status := "success"
+	usageStatus := "success"
 	var ec2 *string
 	if resp.StatusCode >= 400 {
-		status = "failed"
+		usageStatus = "failed"
 		code := "upstream_error"
 		ec2 = &code
+	}
+	totalCost := "0"
+	if success && reservation.RequestCredits > 0 {
+		totalCost = strconv.FormatFloat(reservation.RequestCredits, 'f', 4, 64)
 	}
 	apiKeyID := apiKey.ID
 	entry := store.UsageLedgerEntry{
@@ -2094,14 +2163,14 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 		GenfityTenantID: apiKey.GenfityTenantID,
 		APIKeyID:        &apiKeyID,
 		PublicModel:     publicModel,
-		Status:          status,
+		Status:          usageStatus,
 		ErrorCode:       ec2,
 		LatencyMS:       &latencyMs,
 		StartedAt:       started,
 		FinishedAt:      &finished,
 		InputCost:       "0",
 		OutputCost:      "0",
-		TotalCost:       "0",
+		TotalCost:       totalCost,
 	}
 	if _, recordErr := h.usage.Record(ctx, entry); recordErr != nil {
 		zerolog.Ctx(ctx).Warn().Err(recordErr).Msg("failed to record image edit usage")

@@ -116,6 +116,7 @@ func (h *AdminHandler) UpdateModel(w http.ResponseWriter, r *http.Request) {
 		DisplayName       *string `json:"display_name"`
 		Description       *string `json:"description"`
 		Status            *string `json:"status"`
+		ModelType         *string `json:"model_type"`
 		ContextWindow     *int32  `json:"context_window"`
 		SupportsStreaming *bool   `json:"supports_streaming"`
 		SupportsTools     *bool   `json:"supports_tools"`
@@ -136,6 +137,9 @@ func (h *AdminHandler) UpdateModel(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.Status != nil {
 		current.Status = *payload.Status
+	}
+	if payload.ModelType != nil {
+		current.ModelType = *payload.ModelType
 	}
 	if payload.ContextWindow != nil {
 		current.ContextWindow = payload.ContextWindow

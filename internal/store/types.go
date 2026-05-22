@@ -61,6 +61,7 @@ type AIModel struct {
 	DisplayName       string    `json:"display_name"`
 	Description       string    `json:"description,omitempty"`
 	Status            string    `json:"status"`
+	ModelType         string    `json:"model_type"`
 	ContextWindow     *int32    `json:"context_window,omitempty"`
 	SupportsStreaming bool      `json:"supports_streaming"`
 	SupportsTools     bool      `json:"supports_tools"`

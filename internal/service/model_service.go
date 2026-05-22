@@ -59,6 +59,10 @@ func (s *ModelService) GetModel(ctx context.Context, id uuid.UUID) (*store.AIMod
 	return s.store.GetModelByID(ctx, id)
 }
 
+func (s *ModelService) GetModelByPublicName(ctx context.Context, publicModel string) (*store.AIModel, error) {
+	return s.store.GetModelByPublicName(ctx, publicModel)
+}
+
 func (s *ModelService) UpdateModel(ctx context.Context, model store.AIModel) (store.AIModel, error) {
 	if model.ID == uuid.Nil {
 		return store.AIModel{}, fmt.Errorf("model_id is required")
