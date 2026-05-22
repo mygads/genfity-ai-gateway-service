@@ -94,6 +94,8 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/messages", gatewayHandler.Messages)
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/messages/count_tokens", gatewayHandler.CountMessageTokens)
 		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/embeddings", gatewayHandler.Embeddings)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/images/generations", gatewayHandler.ImagesGenerations)
+		r.With(globalRateLimitMiddleware.Limit, apiKeyMiddleware.RequireAPIKey).Post("/images/edits", gatewayHandler.ImagesEdits)
 	})
 
 	r.Route("/customer", func(r chi.Router) {

@@ -102,6 +102,16 @@ func (c *CLIProxyClient) Embeddings(ctx context.Context, payload map[string]any)
 	return c.forwardJSON(ctx, "/v1/embeddings", payload)
 }
 
+// ImagesGenerations forwards an image generation request.
+func (c *CLIProxyClient) ImagesGenerations(ctx context.Context, payload map[string]any) (*http.Response, error) {
+	return c.forwardJSON(ctx, "/v1/images/generations", payload)
+}
+
+// ImagesEdits forwards an image edit request.
+func (c *CLIProxyClient) ImagesEdits(ctx context.Context, payload map[string]any) (*http.Response, error) {
+	return c.forwardJSON(ctx, "/v1/images/edits", payload)
+}
+
 // ListAuthFiles fetches /v0/management/auth-files using the management key.
 // Returns the raw JSON map containing the "files" array.
 func (c *CLIProxyClient) ListAuthFiles(ctx context.Context) (map[string]any, error) {

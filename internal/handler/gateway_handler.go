@@ -1938,6 +1938,180 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	h.writeUpstreamResponse(w, resp, body)
 }
 
+// --- Image Generation ---
+
+func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Request) {
+	apiKey := middleware.GetAPIKey(r.Context())
+	ctx := r.Context()
+	started := time.Now().UTC()
+
+	var payload map[string]any
+	if err := decodeRuntimePayload(w, r, &payload); err != nil {
+		h.recordFailedRequest(ctx, apiKey, "", "invalid_json", http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	publicModel, _ := payload["model"].(string)
+	if publicModel == "" {
+		h.recordFailedRequest(ctx, apiKey, "", "missing_model", http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, "missing_model")
+		return
+	}
+
+	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
+	if err != nil {
+		ec := mapSubscriptionError(ctx, err)
+		h.recordFailedRequest(ctx, apiKey, publicModel, ec, http.StatusPaymentRequired, started)
+		respondError(w, http.StatusPaymentRequired, ec)
+		return
+	}
+	if shouldEnforceUnlimitedAllowlist(apiKey) && isUnlimitedSubscription(subscription) && !entitlementAllowsModel(subscription, publicModel) {
+		h.recordFailedRequest(ctx, apiKey, publicModel, "model_not_in_unlimited_plan", http.StatusPaymentRequired, started)
+		respondError(w, http.StatusPaymentRequired, "model_not_in_unlimited_plan")
+		return
+	}
+
+	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
+
+	if h.rateLimit != nil && limits.HasRPM() {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
+			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			return
+		}
+	}
+
+	// Image generation bypasses model route resolution — the model string
+	// is forwarded as-is to CLIProxyAPI which handles provider routing via
+	// its own image registry.
+	client, ok := h.clientForRouter(ctx, "")
+	if !ok {
+		respondError(w, http.StatusBadGateway, "router_unavailable")
+		return
+	}
+	resp, err := client.ImagesGenerations(ctx, payload)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("image generation upstream failed")
+		respondError(w, http.StatusBadGateway, "upstream_error")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	finished := time.Now().UTC()
+	latencyMs := int32(finished.Sub(started).Milliseconds())
+	status := "success"
+	var ec *string
+	if resp.StatusCode >= 400 {
+		status = "failed"
+		code := "upstream_error"
+		ec = &code
+	}
+	apiKeyID := apiKey.ID
+	entry := store.UsageLedgerEntry{
+		ID:              uuid.New(),
+		RequestID:       uuid.New().String(),
+		GenfityUserID:   apiKey.GenfityUserID,
+		GenfityTenantID: apiKey.GenfityTenantID,
+		APIKeyID:        &apiKeyID,
+		PublicModel:     publicModel,
+		Status:          status,
+		ErrorCode:       ec,
+		LatencyMS:       &latencyMs,
+		StartedAt:       started,
+		FinishedAt:      &finished,
+		InputCost:       "0",
+		OutputCost:      "0",
+		TotalCost:       "0",
+	}
+	if _, recordErr := h.usage.Record(ctx, entry); recordErr != nil {
+		zerolog.Ctx(ctx).Warn().Err(recordErr).Msg("failed to record image generation usage")
+	}
+
+	h.writeUpstreamResponse(w, resp, body)
+}
+
+func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
+	apiKey := middleware.GetAPIKey(r.Context())
+	ctx := r.Context()
+	started := time.Now().UTC()
+
+	var payload map[string]any
+	if err := decodeRuntimePayload(w, r, &payload); err != nil {
+		h.recordFailedRequest(ctx, apiKey, "", "invalid_json", http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, "invalid_json")
+		return
+	}
+	publicModel, _ := payload["model"].(string)
+	if publicModel == "" {
+		publicModel = "gpt-image-2"
+	}
+
+	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
+	if err != nil {
+		ec := mapSubscriptionError(ctx, err)
+		h.recordFailedRequest(ctx, apiKey, publicModel, ec, http.StatusPaymentRequired, started)
+		respondError(w, http.StatusPaymentRequired, ec)
+		return
+	}
+
+	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
+
+	if h.rateLimit != nil && limits.HasRPM() {
+		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
+			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
+			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			return
+		}
+	}
+
+	client, ok := h.clientForRouter(ctx, "")
+	if !ok {
+		respondError(w, http.StatusBadGateway, "router_unavailable")
+		return
+	}
+	resp, err := client.ImagesEdits(ctx, payload)
+	if err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("image edit upstream failed")
+		respondError(w, http.StatusBadGateway, "upstream_error")
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	finished := time.Now().UTC()
+	latencyMs := int32(finished.Sub(started).Milliseconds())
+	status := "success"
+	var ec2 *string
+	if resp.StatusCode >= 400 {
+		status = "failed"
+		code := "upstream_error"
+		ec2 = &code
+	}
+	apiKeyID := apiKey.ID
+	entry := store.UsageLedgerEntry{
+		ID:              uuid.New(),
+		RequestID:       uuid.New().String(),
+		GenfityUserID:   apiKey.GenfityUserID,
+		GenfityTenantID: apiKey.GenfityTenantID,
+		APIKeyID:        &apiKeyID,
+		PublicModel:     publicModel,
+		Status:          status,
+		ErrorCode:       ec2,
+		LatencyMS:       &latencyMs,
+		StartedAt:       started,
+		FinishedAt:      &finished,
+		InputCost:       "0",
+		OutputCost:      "0",
+		TotalCost:       "0",
+	}
+	if _, recordErr := h.usage.Record(ctx, entry); recordErr != nil {
+		zerolog.Ctx(ctx).Warn().Err(recordErr).Msg("failed to record image edit usage")
+	}
+
+	h.writeUpstreamResponse(w, resp, body)
+}
+
 // --- Anthropic-compatible Messages with virtual combo fallback ---
 
 func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
