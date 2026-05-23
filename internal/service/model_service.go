@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -187,12 +186,7 @@ func (s *ModelService) DeleteRoute(ctx context.Context, id uuid.UUID) error {
 func (s *ModelService) ResolveRouteByPublicModel(ctx context.Context, publicModel string) (*store.AIModelRoute, *store.AIModel, error) {
 	model, err := s.store.GetModelByPublicName(ctx, publicModel)
 	if err != nil {
-		if !strings.Contains(publicModel, "/") {
-			model, err = s.store.GetModelByPublicName(ctx, "genfity/"+publicModel)
-		}
-		if err != nil {
-			return nil, nil, err
-		}
+		return nil, nil, err
 	}
 	if model.Status == "retired" {
 		return nil, nil, ErrModelRetired
