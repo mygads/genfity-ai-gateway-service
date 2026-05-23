@@ -1892,6 +1892,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, code)
 		return
 	}
+	publicModel = model.PublicModel
 	// Enforce the same plan/free-model caps as Messages/ChatCompletions.
 	// Without this, an embeddings-only key could blow past max_requests
 	// _per_period and free_model_rpd because the dashboard count + the
@@ -2230,6 +2231,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, code)
 		return
 	}
+	publicModel = model.PublicModel
 
 	if h.rateLimit != nil && limits.HasRPM() {
 		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
@@ -2507,7 +2509,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	route, _, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
+	route, resolvedModel, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
 		code := "model_not_allowed"
 		if errors.Is(err, service.ErrModelRetired) {
@@ -2516,6 +2518,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusBadRequest, code)
 		return
 	}
+	publicModel = resolvedModel.PublicModel
 	upstreamPayload, err := clonePayload(payload)
 	if err != nil {
 		zerolog.Ctx(ctx).Error().Err(err).Msg("clone count tokens payload failed")
@@ -2590,6 +2593,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusBadRequest, code)
 		return
 	}
+	publicModel = model.PublicModel
 
 	if h.rateLimit != nil && limits.HasRPM() {
 		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
