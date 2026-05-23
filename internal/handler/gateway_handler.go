@@ -101,6 +101,9 @@ func entitlementAllowsModel(entitlement any, publicModel string) bool {
 		if strings.EqualFold(modelName, publicModel) {
 			return true
 		}
+		if !strings.Contains(publicModel, "/") && strings.EqualFold(modelName, "genfity/"+publicModel) {
+			return true
+		}
 	}
 	return false
 }
@@ -1224,6 +1227,9 @@ func modelCoveredByUnlimited(subscription *service.ActiveSubscription, model *st
 	}
 	for _, s := range allowed {
 		if s == model.PublicModel {
+			return true
+		}
+		if !strings.Contains(model.PublicModel, "/") && strings.EqualFold(s, "genfity/"+model.PublicModel) {
 			return true
 		}
 	}
