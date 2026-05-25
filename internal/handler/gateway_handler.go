@@ -757,11 +757,19 @@ func formatAmount(value float64) string {
 }
 
 func (h *GatewayHandler) writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
+	// Sanitize error bodies so internal provider/router details (litellm,
+	// "All credentials for model X are cooling down", "via provider Y", etc.)
+	// never reach the customer. Successful 2xx/3xx responses pass through.
+	sanitized := sanitizeErrorBody(body, resp.StatusCode)
+
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
+	if len(sanitized) != len(body) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(sanitized)))
+	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(body)
+	_, _ = w.Write(sanitized)
 }
 
 func isStreamingPayload(payload map[string]any) bool {
@@ -1599,7 +1607,11 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			_, _ = w.Write(chunk)
+			// Sanitize each SSE chunk so internal provider errors
+			// (litellm, model names, cooldown messages) never reach
+			// the customer even in streaming responses.
+			safe := sanitizeSSEChunk(chunk)
+			_, _ = w.Write(safe)
 			_, _ = captured.Write(chunk)
 			if flusher != nil {
 				flusher.Flush()
@@ -2426,11 +2438,15 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			if shouldCountAsSuccess(statusCode, body) {
 				preCounters.commit()
 			}
+			safeBody := sanitizeErrorBody(body, statusCode)
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
+			if len(safeBody) != len(body) {
+				w.Header().Set("Content-Length", strconv.Itoa(len(safeBody)))
+			}
 			w.WriteHeader(statusCode)
-			_, _ = w.Write(body)
+			_, _ = w.Write(safeBody)
 			return
 		}
 
@@ -2451,11 +2467,15 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		if shouldCountAsSuccess(lastStatusCode, lastBody) {
 			preCounters.commit()
 		}
+		safeLastBody := sanitizeErrorBody(lastBody, lastStatusCode)
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
+		if len(safeLastBody) != len(lastBody) {
+			w.Header().Set("Content-Length", strconv.Itoa(len(safeLastBody)))
+		}
 		w.WriteHeader(lastStatusCode)
-		_, _ = w.Write(lastBody)
+		_, _ = w.Write(safeLastBody)
 		return
 	}
 
@@ -2800,11 +2820,15 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		if shouldCountAsSuccess(lastStatusCode, lastBody) {
 			preCounters.commit()
 		}
+		safeLastBody := sanitizeErrorBody(lastBody, lastStatusCode)
 		for k, v := range lastResp.Header {
 			w.Header()[k] = v
 		}
+		if len(safeLastBody) != len(lastBody) {
+			w.Header().Set("Content-Length", strconv.Itoa(len(safeLastBody)))
+		}
 		w.WriteHeader(lastStatusCode)
-		_, _ = w.Write(lastBody)
+		_, _ = w.Write(safeLastBody)
 		h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, lastStatusCode, lastBody, publicModel)
 		return
 	}
