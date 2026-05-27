@@ -914,7 +914,14 @@ func (h *GatewayHandler) applyPreRequestLimits(
 	// the model is covered by allowedModels) so the counter only ticks
 	// for requests the unlimited plan is actually paying for.
 	willUseUnlimited := requestWillUseUnlimited(apiKey, subscription, model)
-	if willUseUnlimited && limits.HasMaxRequestsPerPeriod() && subscription != nil && subscription.Entitlement != nil {
+	// Free models are governed by their per-(user, model) free_model
+	// limits below — they must NOT consume the plan's MaxRequestsPerPeriod
+	// or RPD slot. Letting a free :free model burn the unlimited plan's
+	// daily/period quota would mean the same plan that advertises
+	// "unlimited paid models" also caps free-model usage at the same
+	// number, which surprises users and burns slots they paid for.
+	willConsumePlanCounters := willUseUnlimited && (model == nil || !model.IsFree)
+	if willConsumePlanCounters && limits.HasMaxRequestsPerPeriod() && subscription != nil && subscription.Entitlement != nil {
 		pk := periodKey(subscription.Entitlement)
 		tracker.periodKey = pk
 		_, end := activePeriod(subscription.Entitlement)
@@ -927,7 +934,7 @@ func (h *GatewayHandler) applyPreRequestLimits(
 		}
 		tracker.periodConsumed = true
 	}
-	if willUseUnlimited && limits.HasRPD() && subscription != nil && subscription.Plan != nil {
+	if willConsumePlanCounters && limits.HasRPD() && subscription != nil && subscription.Plan != nil {
 		if err := h.rateLimit.CheckPlanRPD(ctx, apiKey.GenfityUserID, subscription.Plan.PlanCode, limits.RPD); err != nil {
 			tracker.rollback(ctx)
 			return "plan_rpd_exceeded", http.StatusTooManyRequests, tracker
@@ -3083,8 +3090,15 @@ func (h *GatewayHandler) recordUsageWithLegacyBilling(ctx context.Context, apiKe
 		return
 	}
 	if statusCode < 400 && settlement.TotalTokens > 0 && subscription != nil && subscription.Entitlement != nil {
-		periodStart, periodEnd := activePeriod(subscription.Entitlement)
-		_ = h.usage.IncrementQuotaCounter(ctx, apiKey.GenfityUserID, apiKey.GenfityTenantID, periodStart, periodEnd, settlement.TotalTokens)
+		// Mirror the pre-request gate: free models don't burn the
+		// subscription's token quota or RPD. Without this, a free model
+		// running through an unlimited plan would silently chip away at
+		// quota_tokens_monthly (visible on the dashboard's "Token
+		// terpakai" bar) even though no paid request occurred.
+		if model == nil || !model.IsFree {
+			periodStart, periodEnd := activePeriod(subscription.Entitlement)
+			_ = h.usage.IncrementQuotaCounter(ctx, apiKey.GenfityUserID, apiKey.GenfityTenantID, periodStart, periodEnd, settlement.TotalTokens)
+		}
 	}
 	if statusCode < 400 && settlement.TotalCostUSD > 0 && pricingGroup(subscription) == "credit_package" && subscription != nil && subscription.Entitlement != nil {
 		_ = h.usage.DebitCreditBalance(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, settlement.TotalCostUSD)
