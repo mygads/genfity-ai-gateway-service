@@ -953,12 +953,12 @@ func (s *PostgresStore) ReserveCreditBalance(ctx context.Context, userID string,
 	// 'credit_package') is unambiguous and survives plan_code changes.
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_reserved = COALESCE(balance_reserved, 0) + $2,
+			 SET credit_balance_reserved = COALESCE(credit_balance_reserved, 0) + $2,
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
 			   AND status = 'active'
 			   AND pricing_group = 'credit_package'
-			   AND COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0) >= $2`,
+			   AND COALESCE(credit_balance, 0) - COALESCE(credit_balance_reserved, 0) >= $2`,
 		userID, amountUsd)
 	if err != nil {
 		return err
@@ -989,7 +989,8 @@ func (s *PostgresStore) FinalizeCreditBalance(ctx context.Context, userID string
 	// still finalizes against the same row.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_reserved = GREATEST(COALESCE(balance_reserved, 0) - $2, 0),
+			 SET credit_balance_reserved = GREATEST(COALESCE(credit_balance_reserved, 0) - $2, 0),
+			     credit_balance = GREATEST(COALESCE(credit_balance, 0) - LEAST($3, COALESCE(credit_balance, 0)), 0),
 			     balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - LEAST($3, COALESCE(balance_snapshot, 0)), 0),
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
@@ -1269,20 +1270,21 @@ func (s *PostgresStore) ReleaseStaleReservations(ctx context.Context, olderThan 
 	if olderThan <= 0 {
 		olderThan = 5 * time.Minute
 	}
-	// Release credit reservations whose row hasn't been touched within
-	// the threshold. A live in-flight request bumps updated_at on every
+	// Release reservations whose row hasn't been touched within the
+	// threshold. A live in-flight request bumps updated_at on every
 	// reserve/finalize, so anything older is by definition orphaned —
 	// either the process panicked, was killed, or the client
-	// disconnected before the deferred rollback fired. Includes the
-	// legacy balance_reserved column (USD-quoted credit_package) and
-	// the newer credit_balance_reserved column.
+	// disconnected before the deferred rollback fired. Targets both
+	// credit_balance_reserved (credit_package) and
+	// payg_usd_balance_reserved (payg_topup) since both pricing groups
+	// can hold stuck reservations.
 	cmd, err := s.pool.Exec(ctx, `
 		UPDATE ai_gateway.customer_entitlements
 		   SET credit_balance_reserved = 0,
-		       balance_reserved = 0,
+		       payg_usd_balance_reserved = 0,
 		       updated_at = now()
 		 WHERE status = 'active'
-		   AND (credit_balance_reserved > 0 OR COALESCE(balance_reserved, 0) > 0)
+		   AND (COALESCE(credit_balance_reserved, 0) > 0 OR COALESCE(payg_usd_balance_reserved, 0) > 0)
 		   AND updated_at < now() - ($1::bigint || ' milliseconds')::interval`,
 		olderThan.Milliseconds())
 	if err != nil {
@@ -1298,12 +1300,13 @@ func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, p
 	// filter would silently no-op the debit.
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - $2, 0),
+			 SET credit_balance = GREATEST(COALESCE(credit_balance, 0) - $2, 0),
+			     balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - $2, 0),
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
 			   AND status = 'active'
 			   AND pricing_group = 'credit_package'
-			   AND GREATEST(COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0), 0) >= $2`,
+			   AND GREATEST(COALESCE(credit_balance, 0) - COALESCE(credit_balance_reserved, 0), 0) >= $2`,
 		userID, debitUsd)
 	if err != nil {
 		return err
