@@ -1160,6 +1160,30 @@ func (s *MemoryStore) ListProviderStats(_ context.Context, _ time.Time) []store.
 	return nil
 }
 
+func (s *MemoryStore) ListUsageTimeseries(_ context.Context, _ time.Time, _ string) []store.UsageTimeseriesPoint {
+	return nil
+}
+
+func (s *MemoryStore) ListTopModels(_ context.Context, _ time.Time, _ int) []store.TopModelRow {
+	return nil
+}
+
+func (s *MemoryStore) ListBillingModeBreakdown(_ context.Context, _ time.Time) []store.BillingModeBreakdownRow {
+	return nil
+}
+
+func (s *MemoryStore) ListStatusBreakdown(_ context.Context, _ time.Time) []store.StatusBreakdownRow {
+	return nil
+}
+
+func (s *MemoryStore) ListErrorCodeBreakdown(_ context.Context, _ time.Time, _ int) []store.StatusBreakdownRow {
+	return nil
+}
+
+func (s *MemoryStore) LatencyStats(_ context.Context, _ time.Time) store.LatencyStats {
+	return store.LatencyStats{}
+}
+
 func (s *MemoryStore) ListCreditBalances(_ context.Context) []store.CreditBalanceRow {
 	return nil
 }

@@ -112,6 +112,29 @@ type Store interface {
 	// ListProviderStats aggregates usage_ledger rows since `since` by
 	// router_model prefix. Used by the admin Provider Stats page.
 	ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow
+	// ListUsageTimeseries returns usage_ledger aggregated into time
+	// buckets (caller-controlled bucket width) for the admin usage
+	// charts. `since` is inclusive; passing the zero time disables the
+	// time filter. `bucket` accepts "hour" or "day" — anything else
+	// falls back to "day".
+	ListUsageTimeseries(ctx context.Context, since time.Time, bucket string) []store.UsageTimeseriesPoint
+	// ListTopModels returns the highest-cost public_model entries since
+	// `since`, ordered by total_cost desc. `limit` caps the result; 0
+	// applies a sane default (10).
+	ListTopModels(ctx context.Context, since time.Time, limit int) []store.TopModelRow
+	// ListBillingModeBreakdown groups usage_ledger by the billing_mode
+	// column. NULL is reported as "subscription_unmetered" so the admin
+	// chart can label rows that bypassed the priority-billing chain.
+	ListBillingModeBreakdown(ctx context.Context, since time.Time) []store.BillingModeBreakdownRow
+	// ListStatusBreakdown reports request counts by status (success vs
+	// error) along with the top error_code values for the same window.
+	ListStatusBreakdown(ctx context.Context, since time.Time) []store.StatusBreakdownRow
+	// ListErrorCodeBreakdown reports the top error_code values so the
+	// admin can spot misbehaving providers without scrolling the logs.
+	ListErrorCodeBreakdown(ctx context.Context, since time.Time, limit int) []store.StatusBreakdownRow
+	// LatencyStats computes aggregate latency_ms statistics over the
+	// requested window. Skips rows where latency_ms is NULL.
+	LatencyStats(ctx context.Context, since time.Time) store.LatencyStats
 	ListCreditBalances(ctx context.Context) []store.CreditBalanceRow
 	ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry
 	SumUsageTokensByUserSince(context.Context, string, time.Time) int64

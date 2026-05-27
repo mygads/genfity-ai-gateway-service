@@ -736,6 +736,61 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// ListUsageAnalytics returns aggregated time-series and breakdowns for
+// the admin usage page charts. One round-trip surfaces:
+//
+//	timeseries          — request/token/cost time buckets (hour/day)
+//	top_models          — public_model leaderboard sorted by total_cost
+//	billing_modes       — billing_mode pie/donut data
+//	status_breakdown    — success vs error counts (donut)
+//	error_codes         — top error_code values (bar)
+//	providers           — router_model prefix volume + error rate
+//	latency             — avg + p50/p95/p99 over the same window
+//
+// Rationale for the single endpoint: each individual aggregation is
+// cheap (uses the (started_at) index) and the admin page renders them
+// together, so issuing one request keeps the UI loading cleaner and
+// avoids 7× the round-trips on a slow connection.
+func (h *AdminHandler) ListUsageAnalytics(w http.ResponseWriter, r *http.Request) {
+	rangeParam := r.URL.Query().Get("range")
+	var since time.Time
+	bucket := "day"
+	switch rangeParam {
+	case "1d":
+		since = time.Now().UTC().Add(-24 * time.Hour)
+		bucket = "hour"
+	case "7d":
+		since = time.Now().UTC().Add(-7 * 24 * time.Hour)
+	case "90d":
+		since = time.Now().UTC().Add(-90 * 24 * time.Hour)
+	case "all":
+		// zero time = no filter, default daily bucket
+	default:
+		// 30d default
+		since = time.Now().UTC().Add(-30 * 24 * time.Hour)
+	}
+
+	limit := 10
+	if v := r.URL.Query().Get("top_limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 50 {
+			limit = n
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"range":             rangeParam,
+		"since":             since,
+		"bucket":            bucket,
+		"timeseries":        h.usage.Timeseries(r.Context(), since, bucket),
+		"top_models":        h.usage.TopModels(r.Context(), since, limit),
+		"billing_modes":     h.usage.BillingModeBreakdown(r.Context(), since),
+		"status_breakdown":  h.usage.StatusBreakdown(r.Context(), since),
+		"error_codes":       h.usage.ErrorCodeBreakdown(r.Context(), since, limit),
+		"providers":         h.usage.ProviderStats(r.Context(), since),
+		"latency":           h.usage.LatencyStats(r.Context(), since),
+	})
+}
+
 func (h *AdminHandler) DeleteModel(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {

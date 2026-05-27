@@ -135,6 +135,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		r.Delete("/router-instances/{id}", adminHandler.DeleteRouterInstance)
 		r.Get("/usage", adminHandler.ListAllUsage)
 		r.Get("/usage/dashboard", adminHandler.ListUsageDashboard)
+		r.Get("/usage/analytics", adminHandler.ListUsageAnalytics)
 		r.Get("/usage/logs", adminHandler.ListUsageLogs)
 
 		r.Get("/routers/{code}/health", routerProxyHandler.Health)

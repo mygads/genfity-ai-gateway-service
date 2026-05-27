@@ -1309,6 +1309,220 @@ func (s *PostgresStore) ListProviderStats(ctx context.Context, since time.Time) 
 	return items
 }
 
+// ListUsageTimeseries buckets usage_ledger into hour or day windows
+// depending on `bucket`. Anything other than "hour" falls back to
+// "day". The result is empty (not nil) when no rows match.
+func (s *PostgresStore) ListUsageTimeseries(ctx context.Context, since time.Time, bucket string) []store.UsageTimeseriesPoint {
+	trunc := "day"
+	if bucket == "hour" {
+		trunc = "hour"
+	}
+	query := `
+		SELECT
+			date_trunc('` + trunc + `', started_at) AS bucket,
+			COUNT(*)::bigint AS request_count,
+			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count,
+			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
+			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
+			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+			COALESCE(SUM(total_cost), 0)::text AS total_cost
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		GROUP BY bucket
+		ORDER BY bucket ASC`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	rows, err := s.pool.Query(ctx, query, sinceArg)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.UsageTimeseriesPoint{}
+	for rows.Next() {
+		var item store.UsageTimeseriesPoint
+		if rows.Scan(&item.Bucket, &item.RequestCount, &item.SuccessCount, &item.ErrorCount, &item.InputTokens, &item.OutputTokens, &item.TotalTokens, &item.TotalCost) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// ListTopModels returns the highest-cost public_model entries since
+// `since`, ordered by total_cost desc. Limit defaults to 10 when 0.
+func (s *PostgresStore) ListTopModels(ctx context.Context, since time.Time, limit int) []store.TopModelRow {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `
+		SELECT
+			public_model,
+			COUNT(*)::bigint AS request_count,
+			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
+			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
+			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+			COALESCE(SUM(total_cost), 0)::text AS total_cost,
+			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		GROUP BY public_model
+		ORDER BY COALESCE(SUM(total_cost), 0) DESC, COUNT(*) DESC
+		LIMIT $2`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	rows, err := s.pool.Query(ctx, query, sinceArg, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.TopModelRow{}
+	for rows.Next() {
+		var item store.TopModelRow
+		if rows.Scan(&item.PublicModel, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalTokens, &item.TotalCost, &item.SuccessCount, &item.ErrorCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// ListBillingModeBreakdown groups usage_ledger by billing_mode. NULL
+// values are reported as "subscription_unmetered" so the admin chart
+// can clearly distinguish them from rows that explicitly went through
+// a priority-billing path.
+func (s *PostgresStore) ListBillingModeBreakdown(ctx context.Context, since time.Time) []store.BillingModeBreakdownRow {
+	query := `
+		SELECT
+			COALESCE(NULLIF(billing_mode, ''), 'subscription_unmetered') AS billing_mode,
+			COUNT(*)::bigint AS request_count,
+			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+			COALESCE(SUM(total_cost), 0)::text AS total_cost
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		GROUP BY billing_mode
+		ORDER BY COUNT(*) DESC`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	rows, err := s.pool.Query(ctx, query, sinceArg)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.BillingModeBreakdownRow{}
+	for rows.Next() {
+		var item store.BillingModeBreakdownRow
+		if rows.Scan(&item.BillingMode, &item.RequestCount, &item.TotalTokens, &item.TotalCost) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// ListStatusBreakdown returns request counts grouped by the `status`
+// column. Used to render the success/error donut.
+func (s *PostgresStore) ListStatusBreakdown(ctx context.Context, since time.Time) []store.StatusBreakdownRow {
+	query := `
+		SELECT
+			COALESCE(NULLIF(status, ''), 'unknown') AS bucket,
+			COUNT(*)::bigint AS request_count
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		GROUP BY bucket
+		ORDER BY COUNT(*) DESC`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	rows, err := s.pool.Query(ctx, query, sinceArg)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.StatusBreakdownRow{}
+	for rows.Next() {
+		var item store.StatusBreakdownRow
+		if rows.Scan(&item.Bucket, &item.RequestCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// ListErrorCodeBreakdown returns the top error_code values for the
+// time window. Skips rows that succeeded or have a null error_code.
+func (s *PostgresStore) ListErrorCodeBreakdown(ctx context.Context, since time.Time, limit int) []store.StatusBreakdownRow {
+	if limit <= 0 {
+		limit = 10
+	}
+	query := `
+		SELECT
+			COALESCE(NULLIF(error_code, ''), 'unknown') AS bucket,
+			COUNT(*)::bigint AS request_count
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		  AND status != 'success'
+		  AND error_code IS NOT NULL
+		GROUP BY bucket
+		ORDER BY COUNT(*) DESC
+		LIMIT $2`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	rows, err := s.pool.Query(ctx, query, sinceArg, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.StatusBreakdownRow{}
+	for rows.Next() {
+		var item store.StatusBreakdownRow
+		if rows.Scan(&item.Bucket, &item.RequestCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// LatencyStats computes aggregate latency_ms statistics. Postgres
+// percentile_cont is used for p50/p95/p99. Returns the zero struct
+// when no rows have a non-null latency_ms.
+func (s *PostgresStore) LatencyStats(ctx context.Context, since time.Time) store.LatencyStats {
+	query := `
+		SELECT
+			COUNT(*)::bigint AS sample_size,
+			COALESCE(AVG(latency_ms)::float8, 0) AS avg_ms,
+			COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms)::float8, 0) AS p50_ms,
+			COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)::float8, 0) AS p95_ms,
+			COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms)::float8, 0) AS p99_ms,
+			COALESCE(MAX(latency_ms)::float8, 0) AS max_ms
+		FROM ai_gateway.usage_ledger
+		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		  AND latency_ms IS NOT NULL`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	row := s.pool.QueryRow(ctx, query, sinceArg)
+	var stats store.LatencyStats
+	if err := row.Scan(&stats.SampleSize, &stats.AvgMS, &stats.P50MS, &stats.P95MS, &stats.P99MS, &stats.MaxMS); err != nil {
+		return store.LatencyStats{}
+	}
+	return stats
+}
+
 func (s *PostgresStore) ListCreditBalances(ctx context.Context) []store.CreditBalanceRow {
 	query := `
 		SELECT

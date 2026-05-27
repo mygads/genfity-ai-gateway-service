@@ -140,6 +140,36 @@ func (s *UsageService) CreditBalances(ctx context.Context) []store.CreditBalance
 	return s.store.ListCreditBalances(ctx)
 }
 
+// Analytics facades — power the admin /admin/usage/analytics endpoint.
+// Each one is a thin pass-through; the heavy lifting is in the store.
+func (s *UsageService) Timeseries(ctx context.Context, since time.Time, bucket string) []store.UsageTimeseriesPoint {
+	return s.store.ListUsageTimeseries(ctx, since, bucket)
+}
+
+func (s *UsageService) TopModels(ctx context.Context, since time.Time, limit int) []store.TopModelRow {
+	return s.store.ListTopModels(ctx, since, limit)
+}
+
+func (s *UsageService) BillingModeBreakdown(ctx context.Context, since time.Time) []store.BillingModeBreakdownRow {
+	return s.store.ListBillingModeBreakdown(ctx, since)
+}
+
+func (s *UsageService) StatusBreakdown(ctx context.Context, since time.Time) []store.StatusBreakdownRow {
+	return s.store.ListStatusBreakdown(ctx, since)
+}
+
+func (s *UsageService) ErrorCodeBreakdown(ctx context.Context, since time.Time, limit int) []store.StatusBreakdownRow {
+	return s.store.ListErrorCodeBreakdown(ctx, since, limit)
+}
+
+func (s *UsageService) ProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow {
+	return s.store.ListProviderStats(ctx, since)
+}
+
+func (s *UsageService) LatencyStats(ctx context.Context, since time.Time) store.LatencyStats {
+	return s.store.LatencyStats(ctx, since)
+}
+
 func (s *UsageService) ListByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry {
 	return s.store.ListUsageByAPIKey(ctx, apiKeyID, limit)
 }

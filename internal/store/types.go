@@ -239,6 +239,67 @@ type ProviderStatsRow struct {
 	ErrorCount   int64  `json:"error_count"`
 }
 
+// UsageTimeseriesPoint is a single time bucket of aggregated usage.
+// Bucket size is decided by the handler based on the requested range
+// (hourly for 1d, daily for longer windows). Cost is rendered as a
+// string so JSON consumers don't lose precision on the numeric(18,6).
+type UsageTimeseriesPoint struct {
+	Bucket       time.Time `json:"bucket"`
+	RequestCount int64     `json:"request_count"`
+	SuccessCount int64     `json:"success_count"`
+	ErrorCount   int64     `json:"error_count"`
+	InputTokens  int64     `json:"input_tokens"`
+	OutputTokens int64     `json:"output_tokens"`
+	TotalTokens  int64     `json:"total_tokens"`
+	TotalCost    string    `json:"total_cost"`
+}
+
+// TopModelRow is one row of the "Top Models" leaderboard the admin
+// usage page renders. Surfaces both volume (requests, tokens) and
+// economics (total cost) so admins can spot the most expensive models
+// even when their request count is small (e.g. claude-opus calls).
+type TopModelRow struct {
+	PublicModel  string `json:"public_model"`
+	RequestCount int64  `json:"request_count"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	TotalCost    string `json:"total_cost"`
+	SuccessCount int64  `json:"success_count"`
+	ErrorCount   int64  `json:"error_count"`
+}
+
+// BillingModeBreakdownRow groups usage_ledger by the billing_mode
+// column (subscription / credit_package / payg_topup / null). Used by
+// the admin "Billing Mode" pie/donut chart so admins can see what
+// share of traffic each pricing scheme handles.
+type BillingModeBreakdownRow struct {
+	BillingMode  string `json:"billing_mode"`
+	RequestCount int64  `json:"request_count"`
+	TotalTokens  int64  `json:"total_tokens"`
+	TotalCost    string `json:"total_cost"`
+}
+
+// StatusBreakdownRow surfaces success/error counts plus an explicit
+// error_code histogram so admins can scan for misbehaving providers
+// or auth/quota issues without paging through the logs modal.
+type StatusBreakdownRow struct {
+	Bucket       string `json:"bucket"`
+	RequestCount int64  `json:"request_count"`
+}
+
+// LatencyStats reports aggregate latency over the requested window.
+// p50/p95/p99 are computed via Postgres percentile_cont so admins can
+// flag regressions in router performance.
+type LatencyStats struct {
+	SampleSize int64   `json:"sample_size"`
+	AvgMS      float64 `json:"avg_ms"`
+	P50MS      float64 `json:"p50_ms"`
+	P95MS      float64 `json:"p95_ms"`
+	P99MS      float64 `json:"p99_ms"`
+	MaxMS      float64 `json:"max_ms"`
+}
+
 // UsageLogFilter scopes the admin "Logs" modal query.
 //
 // Limit/Offset drive offset-based pagination so the modal can deep-link
