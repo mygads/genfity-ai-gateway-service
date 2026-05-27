@@ -33,8 +33,24 @@ func (s *UsageService) SummaryByUser(ctx context.Context, userID string) map[str
 }
 
 func (s *UsageService) SummaryByUser30d(ctx context.Context, userID string) map[string]any {
-	entries := s.store.ListUsageByUserSince(ctx, userID, time.Now().UTC().Add(-30*24*time.Hour))
-	return s.summaryForEntries(entries)
+	now := time.Now().UTC()
+	entries := s.store.ListUsageByUserSince(ctx, userID, now.Add(-30*24*time.Hour))
+	summary := s.summaryForEntries(entries)
+	// Dashboard "Request hari ini" needs a UTC-day count, not the 30d
+	// total. Compute it from the same slice (already filtered to last
+	// 30d, so the day boundary is always inside it). Also expose the
+	// 30d count under both `request_count` (legacy) and `requests` so
+	// frontends that read either field land on the right number.
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	requestsToday := 0
+	for _, item := range entries {
+		if !item.StartedAt.Before(startOfDay) {
+			requestsToday++
+		}
+	}
+	summary["requests_today"] = requestsToday
+	summary["requests"] = summary["request_count"]
+	return summary
 }
 
 func (s *UsageService) summaryForEntries(entries []store.UsageLedgerEntry) map[string]any {
