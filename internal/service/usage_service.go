@@ -50,16 +50,19 @@ func (s *UsageService) SummaryByUser30d(ctx context.Context, userID string) map[
 	// disagree with the actual cap the gateway enforces.
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	requestsToday := 0
+	requestsTodayFree := 0
 	for _, item := range entries {
 		if item.StartedAt.Before(startOfDay) {
 			continue
 		}
 		if isFreeModelEntry(item) {
+			requestsTodayFree++
 			continue
 		}
 		requestsToday++
 	}
 	summary["requests_today"] = requestsToday
+	summary["requests_today_free"] = requestsTodayFree
 	summary["requests"] = summary["request_count"]
 	return summary
 }
