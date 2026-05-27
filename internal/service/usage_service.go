@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,16 +42,41 @@ func (s *UsageService) SummaryByUser30d(ctx context.Context, userID string) map[
 	// 30d, so the day boundary is always inside it). Also expose the
 	// 30d count under both `request_count` (legacy) and `requests` so
 	// frontends that read either field land on the right number.
+	//
+	// Free-model traffic (public_model suffixed `:free`) is excluded —
+	// the plan-level "Request hari ini" bar must mirror the same gate
+	// the rate limiter uses (free models don't burn the plan's RPD or
+	// MaxRequestsPerPeriod). Counting them here would make the dashboard
+	// disagree with the actual cap the gateway enforces.
 	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	requestsToday := 0
 	for _, item := range entries {
-		if !item.StartedAt.Before(startOfDay) {
-			requestsToday++
+		if item.StartedAt.Before(startOfDay) {
+			continue
 		}
+		if isFreeModelEntry(item) {
+			continue
+		}
+		requestsToday++
 	}
 	summary["requests_today"] = requestsToday
 	summary["requests"] = summary["request_count"]
 	return summary
+}
+
+// isFreeModelEntry returns true when a usage_ledger row was served by a
+// free-tier model. The convention across the catalog is a `:free`
+// suffix on public_model (e.g. `genfity/gpt-5.5:free`); the
+// router_model carries the same marker for entries logged before the
+// public_model column was populated.
+func isFreeModelEntry(item store.UsageLedgerEntry) bool {
+	if strings.HasSuffix(item.PublicModel, ":free") {
+		return true
+	}
+	if item.RouterModel != nil && strings.HasSuffix(*item.RouterModel, ":free") {
+		return true
+	}
+	return false
 }
 
 func (s *UsageService) summaryForEntries(entries []store.UsageLedgerEntry) map[string]any {
