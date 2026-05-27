@@ -594,6 +594,33 @@ func (s *MemoryStore) FinalizePaygUsdBalance(_ context.Context, userID string, r
 // Model credit cost — synced catalog from genfity-app. MemoryStore
 // holds a simple map keyed by fullModelID.
 
+func (s *MemoryStore) ReleaseStaleReservations(_ context.Context, olderThan time.Duration) (int64, error) {
+	// MemoryStore is test-only and doesn't track per-row updated_at,
+	// so we treat every reserved row as eligible for release. The
+	// PostgresStore implementation has the real age-gating logic.
+	_ = olderThan
+	var released int64
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, item := range s.entitlements {
+		zero := "0"
+		hadReserved := false
+		if item.CreditBalanceReserved != nil && *item.CreditBalanceReserved != "0" && *item.CreditBalanceReserved != "" {
+			item.CreditBalanceReserved = &zero
+			hadReserved = true
+		}
+		if item.BalanceReserved != nil && *item.BalanceReserved != "0" && *item.BalanceReserved != "" {
+			item.BalanceReserved = &zero
+			hadReserved = true
+		}
+		if hadReserved {
+			s.entitlements[id] = item
+			released++
+		}
+	}
+	return released, nil
+}
+
 func (s *MemoryStore) UpsertModelCreditCost(_ context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1182,6 +1209,18 @@ func (s *MemoryStore) ListErrorCodeBreakdown(_ context.Context, _ time.Time, _ i
 
 func (s *MemoryStore) LatencyStats(_ context.Context, _ time.Time) store.LatencyStats {
 	return store.LatencyStats{}
+}
+
+func (s *MemoryStore) ListPrefixHourlyStats(_ context.Context, _ string, _ time.Time) []store.PrefixHourlyPoint {
+	return nil
+}
+
+func (s *MemoryStore) ListPrefixModelStats(_ context.Context, _ string, _ time.Time, _ int) []store.PrefixModelRow {
+	return nil
+}
+
+func (s *MemoryStore) ListPrefixErrorCodes(_ context.Context, _ string, _ time.Time, _ int) []store.StatusBreakdownRow {
+	return nil
 }
 
 func (s *MemoryStore) ListCreditBalances(_ context.Context) []store.CreditBalanceRow {

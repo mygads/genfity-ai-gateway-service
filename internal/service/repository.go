@@ -84,6 +84,17 @@ type Store interface {
 	ReservePaygUsdBalance(ctx context.Context, userID string, amount float64) error
 	FinalizePaygUsdBalance(ctx context.Context, userID string, reservedAmount, actualAmount float64) error
 
+	// ReleaseStaleReservations zeroes out credit_balance_reserved /
+	// payg_usd_balance_reserved on rows whose updated_at is older than
+	// the supplied threshold. Called by the background sweeper to undo
+	// orphan reservations left behind by panics, crashes, or in-flight
+	// requests killed by client disconnect before the deferred rollback
+	// could run. Returns the number of rows touched. Safe to call with
+	// an aggressive interval — only rows that haven't been touched
+	// recently are released, so live in-flight reservations are not
+	// disturbed.
+	ReleaseStaleReservations(ctx context.Context, olderThan time.Duration) (int64, error)
+
 	// UpsertModelCreditCost installs/refreshes the per-model credit
 	// cost row. Called by the sync worker when genfity-app publishes a
 	// new pricing decision.
@@ -135,6 +146,19 @@ type Store interface {
 	// LatencyStats computes aggregate latency_ms statistics over the
 	// requested window. Skips rows where latency_ms is NULL.
 	LatencyStats(ctx context.Context, since time.Time) store.LatencyStats
+	// ListPrefixHourlyStats buckets one prefix's usage_ledger rows into
+	// hourly windows. Used for the OAuth quota dashboard chart and the
+	// provider-stats drill-down. `prefix == ""` matches NULL/empty
+	// router_model rows (the "unknown" bucket — pre-upstream failures).
+	ListPrefixHourlyStats(ctx context.Context, prefix string, since time.Time) []store.PrefixHourlyPoint
+	// ListPrefixModelStats returns per-model success/error counts inside
+	// a single prefix. Reveals which combo children carry traffic for
+	// "genfity" or which model failed for "unknown" rows.
+	ListPrefixModelStats(ctx context.Context, prefix string, since time.Time, limit int) []store.PrefixModelRow
+	// ListPrefixErrorCodes returns the top error_code values for a given
+	// prefix (or NULL/empty for the unknown bucket). Helps admins
+	// understand why a prefix has a high error rate.
+	ListPrefixErrorCodes(ctx context.Context, prefix string, since time.Time, limit int) []store.StatusBreakdownRow
 	ListCreditBalances(ctx context.Context) []store.CreditBalanceRow
 	ListUsageByAPIKey(ctx context.Context, apiKeyID uuid.UUID, limit int) []store.UsageLedgerEntry
 	SumUsageTokensByUserSince(context.Context, string, time.Time) int64

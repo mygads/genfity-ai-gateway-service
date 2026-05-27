@@ -145,8 +145,10 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 
 		// OAuth account monitoring + provider stats (PRD: admin monitoring pages).
 		r.Get("/oauth-accounts", monitoringHandler.ListOAuthAccounts)
+		r.Get("/oauth-accounts/bulk-quota", monitoringHandler.ListOAuthAccountsBulkQuota)
 		r.Get("/oauth-accounts/{authIndex}/quota", monitoringHandler.GetOAuthAccountQuota)
 		r.Get("/provider-stats", monitoringHandler.GetProviderStats)
+		r.Get("/provider-stats/{prefix}", monitoringHandler.GetProviderStatsDetail)
 	})
 
 	r.Route("/internal", func(r chi.Router) {

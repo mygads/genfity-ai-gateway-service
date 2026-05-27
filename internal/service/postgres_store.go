@@ -490,14 +490,153 @@ func (s *PostgresStore) UpsertEntitlementByUser(ctx context.Context, item store.
 }
 
 func (s *PostgresStore) upsertEntitlement(ctx context.Context, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
+	// PRD v3 Phase 4 — credit_package and payg_topup are upserted as
+	// SINGLE active row per user, keyed on (genfity_user_id, status,
+	// pricing_group) via partial unique indexes (migration 00018).
+	//
+	// Why split paths instead of a single ON CONFLICT clause: postgres
+	// requires the ON CONFLICT target to be a single index. Subscription
+	// rows (unlimited_plan etc.) still use the legacy
+	// (genfity_user_id, plan_code) unique key so the same user can hold
+	// multiple subscription rows for history (active + replaced). Credit
+	// and PAYG rows must NOT — they would split the user's balance and
+	// non-deterministically debit one row while the app tracked the
+	// other. So we route by pricing_group:
+	//
+	//   pricing_group='credit_package' or 'payg_topup' → upsert by
+	//     (genfity_user_id) WHERE pricing_group=X AND status='active'
+	//     This lets a top-up that switches plan_code (starter→developer)
+	//     stack onto the existing single credit row instead of creating
+	//     a parallel row.
+	//
+	//   anything else (subscription / unlimited_plan) → upsert by
+	//     (genfity_user_id, plan_code), preserving legacy behavior so
+	//     an unlimited renewal updates in place and a replacement
+	//     leaves the old row at status='replaced'.
+	pg := ""
+	if item.PricingGroup != nil {
+		pg = strings.TrimSpace(*item.PricingGroup)
+	}
+	status := strings.TrimSpace(defaultString(item.Status, "active"))
+	if status == "active" && (pg == "credit_package" || pg == "payg_topup") {
+		return s.upsertSingleRowEntitlement(ctx, item, pg)
+	}
+	return s.upsertEntitlementByPlanCode(ctx, item)
+}
+
+// upsertSingleRowEntitlement enforces the "one active row" invariant
+// for credit_package and payg_topup by checking for an existing active
+// row first and updating it (even when plan_code changed) instead of
+// inserting a new one. The unique partial index from migration 00018
+// is the safety net — if a race between two concurrent upserts both
+// pass the SELECT, one INSERT will fail with 23505 and we retry the
+// update path.
+func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item store.CustomerEntitlement, pricingGroup string) (store.CustomerEntitlement, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return store.CustomerEntitlement{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var existingID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM ai_gateway.customer_entitlements
+		WHERE genfity_user_id = $1
+		  AND status = 'active'
+		  AND pricing_group = $2
+		FOR UPDATE`,
+		item.GenfityUserID, pricingGroup,
+	).Scan(&existingID)
+
 	var metadata json.RawMessage
-	// PRD v3 Phase 2C — upsert now includes credit_balance,
-	// credit_expires_at, payg_usd_balance, pricing_group. Gateway's
-	// local snapshot tracks the user's real-time balance without a
-	// round-trip to genfity-app on every request. Reserved fields
-	// (credit_balance_reserved, payg_usd_balance_reserved) are NOT
-	// touched by sync — they belong to in-flight requests on the
-	// gateway side.
+	if errors.Is(err, pgx.ErrNoRows) {
+		// No existing active row — insert. The partial unique index
+		// guards against a concurrent insert; if it triggers we fall
+		// through to the update path below.
+		err := tx.QueryRow(ctx, `
+			INSERT INTO ai_gateway.customer_entitlements (
+				id, genfity_user_id, genfity_tenant_id, plan_code, status,
+				period_start, period_end, quota_tokens_monthly, balance_snapshot,
+				credit_balance, credit_expires_at, payg_usd_balance, pricing_group,
+				metadata, updated_from_genfity_at
+			)
+			VALUES ($1,$2,$3,$4,'active',$5,$6,$7,$8,COALESCE($9::numeric,0),$10,COALESCE($11::numeric,0),$12,$13,$14)
+			RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status,
+				period_start, period_end, quota_tokens_monthly, balance_snapshot::text,
+				credit_balance::text, credit_expires_at, payg_usd_balance::text,
+				pricing_group, metadata, updated_from_genfity_at`,
+			nilUUID(item.ID), item.GenfityUserID, item.GenfityTenantID, item.PlanCode,
+			item.PeriodStart, item.PeriodEnd, item.QuotaTokensMonthly, item.BalanceSnapshot,
+			item.CreditBalance, item.CreditExpiresAt, item.PaygUsdBalance, &pricingGroup,
+			rawJSON(item.Metadata), defaultTime(item.UpdatedFromGenfityAt),
+		).Scan(
+			&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
+			&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot,
+			&item.CreditBalance, &item.CreditExpiresAt, &item.PaygUsdBalance, &item.PricingGroup,
+			&metadata, &item.UpdatedFromGenfityAt,
+		)
+		if err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+		item.Metadata = metadata
+		return item, nil
+	}
+	if err != nil {
+		return store.CustomerEntitlement{}, err
+	}
+
+	// Existing active row found — UPDATE in place. plan_code is allowed
+	// to change (starter → developer top-up) so the user's current plan
+	// label always reflects the latest top-up. Reserved field is left
+	// alone (in-flight reservations belong to gateway runtime, not sync).
+	err = tx.QueryRow(ctx, `
+		UPDATE ai_gateway.customer_entitlements SET
+			genfity_tenant_id = $2,
+			plan_code = $3,
+			period_start = $4,
+			period_end = $5,
+			quota_tokens_monthly = $6,
+			balance_snapshot = $7,
+			credit_balance = COALESCE($8::numeric, credit_balance),
+			credit_expires_at = $9,
+			payg_usd_balance = COALESCE($10::numeric, payg_usd_balance),
+			pricing_group = $11,
+			metadata = $12,
+			updated_from_genfity_at = $13,
+			updated_at = now()
+		WHERE id = $1
+		RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status,
+			period_start, period_end, quota_tokens_monthly, balance_snapshot::text,
+			credit_balance::text, credit_expires_at, payg_usd_balance::text,
+			pricing_group, metadata, updated_from_genfity_at`,
+		existingID, item.GenfityTenantID, item.PlanCode,
+		item.PeriodStart, item.PeriodEnd, item.QuotaTokensMonthly, item.BalanceSnapshot,
+		item.CreditBalance, item.CreditExpiresAt, item.PaygUsdBalance, &pricingGroup,
+		rawJSON(item.Metadata), defaultTime(item.UpdatedFromGenfityAt),
+	).Scan(
+		&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status,
+		&item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot,
+		&item.CreditBalance, &item.CreditExpiresAt, &item.PaygUsdBalance, &item.PricingGroup,
+		&metadata, &item.UpdatedFromGenfityAt,
+	)
+	if err != nil {
+		return store.CustomerEntitlement{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.CustomerEntitlement{}, err
+	}
+	item.Metadata = metadata
+	return item, nil
+}
+
+func (s *PostgresStore) upsertEntitlementByPlanCode(ctx context.Context, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
+	var metadata json.RawMessage
+	// Subscription / unlimited_plan path: keep legacy upsert by
+	// (user, plan_code). Same user may hold multiple rows here for
+	// history (active + replaced) — that's intentional and audited.
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO ai_gateway.customer_entitlements (
 			id, genfity_user_id, genfity_tenant_id, plan_code, status,
@@ -805,16 +944,22 @@ func (s *PostgresStore) ReserveCreditBalance(ctx context.Context, userID string,
 	if amountUsd <= 0 {
 		return nil
 	}
+	// PRD v3 Phase 4: don't filter by plan_code. The user's plan_code
+	// can change at runtime when they top up to a higher tier
+	// (starter→developer); a reserve held against the OLD plan_code
+	// would silently fail to lock balance after the sync. Migration
+	// 00018 guarantees a single active credit_package row per user, so
+	// targeting (genfity_user_id, status='active', pricing_group=
+	// 'credit_package') is unambiguous and survives plan_code changes.
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_reserved = COALESCE(balance_reserved, 0) + $3,
+			 SET balance_reserved = COALESCE(balance_reserved, 0) + $2,
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
-			   AND plan_code = $2
-			   AND metadata->>'pricingGroup' = 'credit_package'
 			   AND status = 'active'
-			   AND COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0) >= $3`,
-		userID, planCode, amountUsd)
+			   AND pricing_group = 'credit_package'
+			   AND COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0) >= $2`,
+		userID, amountUsd)
 	if err != nil {
 		return err
 	}
@@ -839,16 +984,18 @@ func (s *PostgresStore) FinalizeCreditBalance(ctx context.Context, userID string
 	if reservedUsd < 0 {
 		reservedUsd = 0
 	}
+	// Same single-row targeting as ReserveCreditBalance — plan_code is
+	// not part of the key so a topup that bumps plan_code mid-flight
+	// still finalizes against the same row.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_reserved = GREATEST(COALESCE(balance_reserved, 0) - $3, 0),
-			     balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - LEAST($4, COALESCE(balance_snapshot, 0)), 0),
+			 SET balance_reserved = GREATEST(COALESCE(balance_reserved, 0) - $2, 0),
+			     balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - LEAST($3, COALESCE(balance_snapshot, 0)), 0),
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
-			   AND plan_code = $2
-			   AND metadata->>'pricingGroup' = 'credit_package'
-			   AND status = 'active'`,
-		userID, planCode, reservedUsd, actualUsd)
+			   AND status = 'active'
+			   AND pricing_group = 'credit_package'`,
+		userID, reservedUsd, actualUsd)
 	return err
 }
 
@@ -875,18 +1022,19 @@ func (s *PostgresStore) ReserveRequestCredits(ctx context.Context, userID string
 	if amount <= 0 {
 		return nil
 	}
+	// Migration 00018 enforces "one active credit_package row per user"
+	// (partial unique index). Lookup is deterministic — no ORDER BY +
+	// LIMIT 1 over multiple rows that could race or pick the wrong row.
+	// The CHECK constraint customer_entitlements_credit_balance_nonneg
+	// + the WHERE clause make this a single atomic operation.
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
 			 SET credit_balance_reserved = credit_balance_reserved + $2,
 			     updated_at = now()
-			 WHERE id = (
-			     SELECT id FROM ai_gateway.customer_entitlements
-			     WHERE genfity_user_id = $1
-			       AND status = 'active'
-			       AND credit_balance - credit_balance_reserved >= $2
-			     ORDER BY credit_balance DESC
-			     LIMIT 1
-			 )`,
+			 WHERE genfity_user_id = $1
+			   AND status = 'active'
+			   AND pricing_group = 'credit_package'
+			   AND credit_balance - credit_balance_reserved >= $2`,
 		userID, amount)
 	if err != nil {
 		return err
@@ -907,19 +1055,20 @@ func (s *PostgresStore) FinalizeRequestCredits(ctx context.Context, userID strin
 	if actualAmount < 0 {
 		actualAmount = 0
 	}
+	// Same single-row guarantee as ReserveRequestCredits — finalize
+	// always touches the row that was just reserved against, not
+	// "whichever row has the highest balance" (the legacy ORDER BY
+	// could pick a different row when multiple credit_package rows
+	// existed, leaving reservations orphaned on one row and debits
+	// landing on another).
 	_, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
 			 SET credit_balance_reserved = GREATEST(credit_balance_reserved - $2, 0),
 			     credit_balance = GREATEST(credit_balance - LEAST($3, credit_balance), 0),
 			     updated_at = now()
-			 WHERE id = (
-			     SELECT id FROM ai_gateway.customer_entitlements
-			     WHERE genfity_user_id = $1
-			       AND status = 'active'
-			       AND credit_balance_reserved > 0
-			     ORDER BY credit_balance DESC
-			     LIMIT 1
-			 )`,
+			 WHERE genfity_user_id = $1
+			   AND status = 'active'
+			   AND pricing_group = 'credit_package'`,
 		userID, reservedAmount, actualAmount)
 	return err
 }
@@ -928,18 +1077,16 @@ func (s *PostgresStore) ReservePaygUsdBalance(ctx context.Context, userID string
 	if amount <= 0 {
 		return nil
 	}
+	// Single-row guarantee from migration 00018: at most one active
+	// payg_topup row per user.
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
 			 SET payg_usd_balance_reserved = payg_usd_balance_reserved + $2,
 			     updated_at = now()
-			 WHERE id = (
-			     SELECT id FROM ai_gateway.customer_entitlements
-			     WHERE genfity_user_id = $1
-			       AND status = 'active'
-			       AND payg_usd_balance - payg_usd_balance_reserved >= $2
-			     ORDER BY created_at ASC
-			     LIMIT 1
-			 )`,
+			 WHERE genfity_user_id = $1
+			   AND status = 'active'
+			   AND pricing_group = 'payg_topup'
+			   AND payg_usd_balance - payg_usd_balance_reserved >= $2`,
 		userID, amount)
 	if err != nil {
 		return err
@@ -965,14 +1112,9 @@ func (s *PostgresStore) FinalizePaygUsdBalance(ctx context.Context, userID strin
 			 SET payg_usd_balance_reserved = GREATEST(payg_usd_balance_reserved - $2, 0),
 			     payg_usd_balance = GREATEST(payg_usd_balance - LEAST($3, payg_usd_balance), 0),
 			     updated_at = now()
-			 WHERE id = (
-			     SELECT id FROM ai_gateway.customer_entitlements
-			     WHERE genfity_user_id = $1
-			       AND status = 'active'
-			       AND payg_usd_balance_reserved > 0
-			     ORDER BY created_at ASC
-			     LIMIT 1
-			 )`,
+			 WHERE genfity_user_id = $1
+			   AND status = 'active'
+			   AND pricing_group = 'payg_topup'`,
 		userID, reservedAmount, actualAmount)
 	return err
 }
@@ -1123,17 +1265,46 @@ func (s *PostgresStore) IncrementQuotaCounter(ctx context.Context, userID string
 	return err
 }
 
+func (s *PostgresStore) ReleaseStaleReservations(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		olderThan = 5 * time.Minute
+	}
+	// Release credit reservations whose row hasn't been touched within
+	// the threshold. A live in-flight request bumps updated_at on every
+	// reserve/finalize, so anything older is by definition orphaned —
+	// either the process panicked, was killed, or the client
+	// disconnected before the deferred rollback fired. Includes the
+	// legacy balance_reserved column (USD-quoted credit_package) and
+	// the newer credit_balance_reserved column.
+	cmd, err := s.pool.Exec(ctx, `
+		UPDATE ai_gateway.customer_entitlements
+		   SET credit_balance_reserved = 0,
+		       balance_reserved = 0,
+		       updated_at = now()
+		 WHERE status = 'active'
+		   AND (credit_balance_reserved > 0 OR COALESCE(balance_reserved, 0) > 0)
+		   AND updated_at < now() - ($1::bigint || ' milliseconds')::interval`,
+		olderThan.Milliseconds())
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
+}
+
 func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
+	// PRD v3 Phase 4: target by (user, pricing_group='credit_package',
+	// status='active') instead of plan_code. plan_code may have changed
+	// between reservation and callback (top-up upgrade) and the legacy
+	// filter would silently no-op the debit.
 	cmd, err := s.pool.Exec(ctx,
 		`UPDATE ai_gateway.customer_entitlements
-			 SET balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - $3, 0),
+			 SET balance_snapshot = GREATEST(COALESCE(balance_snapshot, 0) - $2, 0),
 			     updated_at = now()
 			 WHERE genfity_user_id = $1
-			   AND plan_code = $2
-			   AND metadata->>'pricingGroup' = 'credit_package'
 			   AND status = 'active'
-			   AND GREATEST(COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0), 0) >= $3`,
-		userID, planCode, debitUsd)
+			   AND pricing_group = 'credit_package'
+			   AND GREATEST(COALESCE(balance_snapshot, 0) - COALESCE(balance_reserved, 0), 0) >= $2`,
+		userID, debitUsd)
 	if err != nil {
 		return err
 	}
@@ -1521,6 +1692,177 @@ func (s *PostgresStore) LatencyStats(ctx context.Context, since time.Time) store
 		return store.LatencyStats{}
 	}
 	return stats
+}
+
+// ListPrefixHourlyStats buckets one prefix's usage_ledger rows into
+// hourly windows. Empty prefix matches NULL/empty router_model rows
+// (pre-upstream failures — model_not_allowed, billing_failed, etc.).
+func (s *PostgresStore) ListPrefixHourlyStats(ctx context.Context, prefix string, since time.Time) []store.PrefixHourlyPoint {
+	var query string
+	args := []any{}
+	args = append(args, nullableTime(since))
+
+	if prefix == "" || prefix == "unknown" {
+		query = `
+			SELECT
+				date_trunc('hour', started_at) AS bucket,
+				COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND (router_model IS NULL OR router_model = '' OR split_part(router_model, '/', 1) = '')
+			GROUP BY bucket
+			ORDER BY bucket ASC`
+	} else {
+		query = `
+			SELECT
+				date_trunc('hour', started_at) AS bucket,
+				COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND split_part(router_model, '/', 1) = $2
+			GROUP BY bucket
+			ORDER BY bucket ASC`
+		args = append(args, prefix)
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.PrefixHourlyPoint{}
+	for rows.Next() {
+		var item store.PrefixHourlyPoint
+		if rows.Scan(&item.Bucket, &item.SuccessCount, &item.ErrorCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// ListPrefixModelStats returns per-model success/error counts within a
+// prefix. For the genfity combo prefix this surfaces the actual child
+// model that handled each request (claude-opus-4-7, gemini-2.5-pro,
+// etc.). For "unknown" rows it shows which public_model the customer
+// asked for when the request was rejected pre-upstream.
+func (s *PostgresStore) ListPrefixModelStats(ctx context.Context, prefix string, since time.Time, limit int) []store.PrefixModelRow {
+	if limit <= 0 {
+		limit = 50
+	}
+	var query string
+	args := []any{nullableTime(since)}
+
+	if prefix == "" || prefix == "unknown" {
+		query = `
+			SELECT
+				COALESCE(NULLIF(router_model, ''), '—') AS router_model,
+				public_model,
+				COUNT(*)::bigint AS total_count,
+				COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND (router_model IS NULL OR router_model = '' OR split_part(router_model, '/', 1) = '')
+			GROUP BY router_model, public_model
+			ORDER BY total_count DESC
+			LIMIT $2`
+		args = append(args, limit)
+	} else {
+		query = `
+			SELECT
+				router_model,
+				public_model,
+				COUNT(*)::bigint AS total_count,
+				COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND split_part(router_model, '/', 1) = $2
+			GROUP BY router_model, public_model
+			ORDER BY total_count DESC
+			LIMIT $3`
+		args = append(args, prefix, limit)
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.PrefixModelRow{}
+	for rows.Next() {
+		var item store.PrefixModelRow
+		if rows.Scan(&item.RouterModel, &item.PublicModel, &item.TotalCount, &item.SuccessCount, &item.ErrorCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// ListPrefixErrorCodes returns the top error_code values for a given
+// prefix. Skips rows where status is success or error_code is NULL.
+func (s *PostgresStore) ListPrefixErrorCodes(ctx context.Context, prefix string, since time.Time, limit int) []store.StatusBreakdownRow {
+	if limit <= 0 {
+		limit = 10
+	}
+	var query string
+	args := []any{nullableTime(since)}
+
+	if prefix == "" || prefix == "unknown" {
+		query = `
+			SELECT
+				COALESCE(NULLIF(error_code, ''), 'unknown') AS bucket,
+				COUNT(*)::bigint AS request_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND (router_model IS NULL OR router_model = '' OR split_part(router_model, '/', 1) = '')
+			  AND status != 'success'
+			  AND error_code IS NOT NULL
+			GROUP BY bucket
+			ORDER BY COUNT(*) DESC
+			LIMIT $2`
+		args = append(args, limit)
+	} else {
+		query = `
+			SELECT
+				COALESCE(NULLIF(error_code, ''), 'unknown') AS bucket,
+				COUNT(*)::bigint AS request_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND split_part(router_model, '/', 1) = $2
+			  AND status != 'success'
+			  AND error_code IS NOT NULL
+			GROUP BY bucket
+			ORDER BY COUNT(*) DESC
+			LIMIT $3`
+		args = append(args, prefix, limit)
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	items := []store.StatusBreakdownRow{}
+	for rows.Next() {
+		var item store.StatusBreakdownRow
+		if rows.Scan(&item.Bucket, &item.RequestCount) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// nullableTime returns nil for the zero Time value so the SQL
+// `$1::timestamptz IS NULL OR started_at >= $1` predicate works
+// correctly when the caller wants no time filter.
+func nullableTime(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }
 
 func (s *PostgresStore) ListCreditBalances(ctx context.Context) []store.CreditBalanceRow {

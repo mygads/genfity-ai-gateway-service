@@ -300,6 +300,26 @@ type LatencyStats struct {
 	MaxMS      float64 `json:"max_ms"`
 }
 
+// PrefixHourlyPoint is one hourly bucket for a given router_model prefix.
+// Used to render the "today by hour" stacked bar on the OAuth quota
+// dashboard and the per-prefix drill-down on provider-stats.
+type PrefixHourlyPoint struct {
+	Bucket       time.Time `json:"bucket"`
+	SuccessCount int64     `json:"success_count"`
+	ErrorCount   int64     `json:"error_count"`
+}
+
+// PrefixModelRow shows a model breakdown within a single prefix
+// (e.g. for the "genfity" prefix this tells the admin which combo
+// children received traffic — claude-opus, gemini, etc.).
+type PrefixModelRow struct {
+	RouterModel  string `json:"router_model"`
+	PublicModel  string `json:"public_model"`
+	TotalCount   int64  `json:"total_count"`
+	SuccessCount int64  `json:"success_count"`
+	ErrorCount   int64  `json:"error_count"`
+}
+
 // UsageLogFilter scopes the admin "Logs" modal query.
 //
 // Limit/Offset drive offset-based pagination so the modal can deep-link
