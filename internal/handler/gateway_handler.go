@@ -1893,7 +1893,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
@@ -2231,7 +2231,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
 
 	route, model, err := h.models.ResolveRouteByPublicModel(ctx, publicModel)
 	if err != nil {
@@ -2521,7 +2521,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 	// Enforce RPM only — count_tokens is a preflight helper, so charging
 	// it against the period cap would punish well-behaved clients that
 	// pre-size their context. RPM still protects the upstream from spam.
-	limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+	limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
 	if h.rateLimit != nil && limits.HasRPM() {
 		if err := h.rateLimit.CheckRPM(ctx, apiKey.GenfityUserID, limits.RPM); err != nil {
 			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")

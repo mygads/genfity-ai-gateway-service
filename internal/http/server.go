@@ -72,6 +72,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 
 	r := chi.NewRouter()
 	r.Use(mw.RequestID)
+	r.Use(mw.Recover(logger))
 	r.Use(mw.Logging(logger))
 	allowedOrigins := []string{"https://genfity.com", "https://www.genfity.com"}
 	if cfg.AppEnv == "development" || cfg.AppEnv == "dev" || cfg.AppEnv == "local" {
