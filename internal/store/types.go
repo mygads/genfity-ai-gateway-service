@@ -351,3 +351,28 @@ type AuthUser struct {
 	TenantID  *string `json:"tenant_id,omitempty"`
 	SessionID string  `json:"session_id,omitempty"`
 }
+
+// PendingCallback is the durable retry queue row for a usage-debit
+// callback to genfity-app that the in-process retry path could not
+// deliver. Mirror of ai_gateway.pending_callbacks (migration 00019).
+//
+// Idempotency: enqueue is keyed on (RequestID, BillingMode) — the
+// queue tolerates the same callback being submitted from multiple
+// retry sites (e.g., the in-process attempt and a future re-attempt
+// from the same finalizer) without creating duplicates.
+type PendingCallback struct {
+	ID             uuid.UUID `json:"id"`
+	RequestID      string    `json:"request_id"`
+	UserID         string    `json:"user_id"`
+	BillingMode    string    `json:"billing_mode"`
+	AmountCredits  *string   `json:"amount_credits,omitempty"`
+	AmountUSD      *string   `json:"amount_usd,omitempty"`
+	Model          *string   `json:"model,omitempty"`
+	Notes          *string   `json:"notes,omitempty"`
+	Attempts       int       `json:"attempts"`
+	LastError      *string   `json:"last_error,omitempty"`
+	LastAttemptAt  *time.Time `json:"last_attempt_at,omitempty"`
+	NextAttemptAt  time.Time `json:"next_attempt_at"`
+	Status         string    `json:"status"`
+	CreatedAt      time.Time `json:"created_at"`
+}

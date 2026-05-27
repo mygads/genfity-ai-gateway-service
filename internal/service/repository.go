@@ -95,6 +95,19 @@ type Store interface {
 	// disturbed.
 	ReleaseStaleReservations(ctx context.Context, olderThan time.Duration) (int64, error)
 
+	// Pending callback queue: durable retry for usage-debit callbacks
+	// to genfity-app that fail at the network layer. genfity-app's
+	// handler is idempotent on (request_id, kind), so a row added
+	// here can be safely replayed by the background worker until it
+	// succeeds. EnqueuePendingCallback is idempotent on
+	// (request_id, billing_mode) — the gateway can call it from any
+	// retry path without worrying about duplicating queue entries.
+	EnqueuePendingCallback(ctx context.Context, item store.PendingCallback) error
+	ListDuePendingCallbacks(ctx context.Context, limit int) ([]store.PendingCallback, error)
+	MarkCallbackSucceeded(ctx context.Context, id uuid.UUID) error
+	MarkCallbackRetry(ctx context.Context, id uuid.UUID, lastError string, nextAttemptAt time.Time) error
+	MarkCallbackAbandoned(ctx context.Context, id uuid.UUID, status string, lastError string) error
+
 	// UpsertModelCreditCost installs/refreshes the per-model credit
 	// cost row. Called by the sync worker when genfity-app publishes a
 	// new pricing decision.

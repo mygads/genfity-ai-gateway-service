@@ -1977,3 +1977,86 @@ func nilUUID(value uuid.UUID) any {
 // under <auth-dir>/combos.json, so the gateway no longer owns combo tables
 // or CRUD. A follow-up migration drops virtual_combos and
 // virtual_combo_entries from the database.
+
+// --- Pending callback queue (migration 00019) ---
+
+func (s *PostgresStore) EnqueuePendingCallback(ctx context.Context, item store.PendingCallback) error {
+	// Idempotent on (request_id, billing_mode): if this row was already
+	// enqueued by a prior retry attempt, leave it as-is. We do NOT bump
+	// next_attempt_at — that's the worker's job. Doing it here would
+	// reset the backoff every time a duplicate enqueue lands.
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO ai_gateway.pending_callbacks (
+			request_id, user_id, billing_mode, amount_credits, amount_usd,
+			model, notes, status
+		)
+		VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6, $7, 'pending')
+		ON CONFLICT (request_id, billing_mode) DO NOTHING`,
+		item.RequestID, item.UserID, item.BillingMode,
+		item.AmountCredits, item.AmountUSD, item.Model, item.Notes,
+	)
+	return err
+}
+
+func (s *PostgresStore) ListDuePendingCallbacks(ctx context.Context, limit int) ([]store.PendingCallback, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, request_id, user_id, billing_mode,
+			amount_credits::text, amount_usd::text, model, notes,
+			attempts, last_error, last_attempt_at, next_attempt_at,
+			status, created_at
+		FROM ai_gateway.pending_callbacks
+		WHERE status = 'pending' AND next_attempt_at <= now()
+		ORDER BY next_attempt_at
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.PendingCallback
+	for rows.Next() {
+		var item store.PendingCallback
+		if err := rows.Scan(
+			&item.ID, &item.RequestID, &item.UserID, &item.BillingMode,
+			&item.AmountCredits, &item.AmountUSD, &item.Model, &item.Notes,
+			&item.Attempts, &item.LastError, &item.LastAttemptAt, &item.NextAttemptAt,
+			&item.Status, &item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) MarkCallbackSucceeded(ctx context.Context, id uuid.UUID) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM ai_gateway.pending_callbacks WHERE id = $1`, id)
+	return err
+}
+
+func (s *PostgresStore) MarkCallbackRetry(ctx context.Context, id uuid.UUID, lastError string, nextAttemptAt time.Time) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE ai_gateway.pending_callbacks
+		   SET attempts = attempts + 1,
+		       last_error = $2,
+		       last_attempt_at = now(),
+		       next_attempt_at = $3
+		 WHERE id = $1`, id, lastError, nextAttemptAt)
+	return err
+}
+
+func (s *PostgresStore) MarkCallbackAbandoned(ctx context.Context, id uuid.UUID, status string, lastError string) error {
+	if status != "abandoned" && status != "failed_permanent" {
+		status = "abandoned"
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE ai_gateway.pending_callbacks
+		   SET status = $2,
+		       attempts = attempts + 1,
+		       last_error = $3,
+		       last_attempt_at = now()
+		 WHERE id = $1`, id, status, lastError)
+	return err
+}

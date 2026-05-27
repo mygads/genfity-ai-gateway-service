@@ -142,6 +142,12 @@ func main() {
 
 	var store service.Store = service.NewPostgresStore(dbpool)
 
+	// Wire the durable callback queue into the genfity callback so
+	// any usage-debit that fails the in-process retry chain is
+	// persisted for background retry. The retry worker below drains
+	// pending_callbacks every 30s.
+	genfityCallback := service.NewGenfityCallback(cfg.GenfityAppURL, cfg.GenfityInternalSecret, logger).WithQueue(store)
+
 	server := httpserver.New(cfg, redisClient, dbpool, store, logger)
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -158,6 +164,46 @@ func main() {
 		logger.Info().Str("addr", cfg.HTTPAddr).Msg("gateway ready")
 		errCh <- httpServer.ListenAndServe()
 	}()
+
+	// Background sweeper: release credit reservations on rows whose
+	// updated_at is older than 5 minutes. Reservations are normally
+	// finalized within seconds; anything older is by definition orphan
+	// — left behind by panic / crash / client-disconnect mid-request.
+	// Without this sweep, every panic permanently locks a slice of the
+	// user's balance ("insufficient_credit_balance" while UI shows
+	// money). Runs every 60s; cheap UPDATE keyed on a partial index.
+	sweepCtx, cancelSweep := context.WithCancel(ctx)
+	defer cancelSweep()
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(sweepCtx, 10*time.Second)
+				released, err := store.ReleaseStaleReservations(ctx, 5*time.Minute)
+				cancel()
+				if err != nil {
+					logger.Warn().Err(err).Msg("orphan reservation sweep failed")
+					continue
+				}
+				if released > 0 {
+					logger.Info().Int64("released", released).Msg("released stale credit reservations")
+				}
+			}
+		}
+	}()
+
+	// Durable callback retry: drain ai_gateway.pending_callbacks every
+	// 30s so any usage-debit that fell out of the in-process retry
+	// chain (genfity-app down / DNS glitch) eventually reaches its
+	// destination. Without this, balance drift like the 2026-05-25
+	// Ilham incident (141 callbacks lost in a single user) recurs
+	// silently every time genfity-app has a transient outage longer
+	// than ~3 seconds.
+	go service.NewCallbackRetryWorker(store, genfityCallback, logger).Run(sweepCtx)
 
 	logger.Info().
 		Str("db", "up").

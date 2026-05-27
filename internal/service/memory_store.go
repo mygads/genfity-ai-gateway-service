@@ -41,6 +41,8 @@ type MemoryStore struct {
 	modelCreditCosts map[string]store.ModelCreditCost
 	// PAYG top-up catalog, keyed by code.
 	paygTopupRates map[string]store.PaygTopupRate
+	// Durable callback queue (test-only mirror of pending_callbacks).
+	pendingCallbacks map[string]store.PendingCallback
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -1253,4 +1255,106 @@ func (s *MemoryStore) ListUsageByUser(_ context.Context, userID string) []store.
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].StartedAt.After(items[j].StartedAt) })
 	return items
+}
+
+// --- Pending callback queue (memory stub) ---
+//
+// MemoryStore is test-only; the real durable queue lives in PostgresStore.
+// We keep a simple in-memory map keyed by (request_id, billing_mode) so
+// tests can exercise the enqueue/list/mark flow without spinning up
+// postgres.
+
+func (s *MemoryStore) EnqueuePendingCallback(_ context.Context, item store.PendingCallback) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingCallbacks == nil {
+		s.pendingCallbacks = make(map[string]store.PendingCallback)
+	}
+	key := item.RequestID + "|" + item.BillingMode
+	if _, exists := s.pendingCallbacks[key]; exists {
+		return nil
+	}
+	if item.ID == uuid.Nil {
+		item.ID = uuid.New()
+	}
+	if item.NextAttemptAt.IsZero() {
+		item.NextAttemptAt = time.Now()
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now()
+	}
+	if item.Status == "" {
+		item.Status = "pending"
+	}
+	s.pendingCallbacks[key] = item
+	return nil
+}
+
+func (s *MemoryStore) ListDuePendingCallbacks(_ context.Context, limit int) ([]store.PendingCallback, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now()
+	var out []store.PendingCallback
+	for _, item := range s.pendingCallbacks {
+		if item.Status != "pending" {
+			continue
+		}
+		if item.NextAttemptAt.After(now) {
+			continue
+		}
+		out = append(out, item)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) MarkCallbackSucceeded(_ context.Context, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.pendingCallbacks {
+		if v.ID == id {
+			delete(s.pendingCallbacks, k)
+			return nil
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) MarkCallbackRetry(_ context.Context, id uuid.UUID, lastError string, nextAttemptAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.pendingCallbacks {
+		if v.ID == id {
+			v.Attempts++
+			v.LastError = &lastError
+			now := time.Now()
+			v.LastAttemptAt = &now
+			v.NextAttemptAt = nextAttemptAt
+			s.pendingCallbacks[k] = v
+			return nil
+		}
+	}
+	return nil
+}
+
+func (s *MemoryStore) MarkCallbackAbandoned(_ context.Context, id uuid.UUID, status string, lastError string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if status != "abandoned" && status != "failed_permanent" {
+		status = "abandoned"
+	}
+	for k, v := range s.pendingCallbacks {
+		if v.ID == id {
+			v.Status = status
+			v.LastError = &lastError
+			v.Attempts++
+			now := time.Now()
+			v.LastAttemptAt = &now
+			s.pendingCallbacks[k] = v
+			return nil
+		}
+	}
+	return nil
 }

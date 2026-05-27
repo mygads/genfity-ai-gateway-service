@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"genfity-ai-gateway-service/internal/store"
 )
 
 // GenfityCallback posts settled-usage debit notifications to genfity-app
@@ -22,16 +25,27 @@ import (
 // callback those two diverge: the gateway charges the user but the
 // customer dashboard still shows the pre-debit balance.
 //
-// The callback is fire-and-forget on the request hot path (we already
-// debited locally; whether the callback succeeds doesn't change what
-// the user can do next request). Failures are logged and would be
-// reconciled by a future job. Idempotency lives in the genfity-app
-// handler — it dedupes on (request_id, kind).
+// Delivery semantics: in-process retry on the request hot path (3
+// attempts), then — if all in-process attempts fail — the payload is
+// persisted to ai_gateway.pending_callbacks for the background
+// retry worker to keep delivering. genfity-app's handler is idempotent
+// on (request_id, kind), so re-deliveries are safe even if a previous
+// attempt secretly succeeded.
 type GenfityCallback struct {
 	baseURL string
 	secret  string
 	client  *http.Client
 	log     zerolog.Logger
+	queue   PendingCallbackQueue
+}
+
+// PendingCallbackQueue is the persistence interface used to durably
+// hold callbacks that the in-process retry could not deliver. The
+// real implementation is the gateway's PostgresStore; the gateway
+// only needs Enqueue here so genfity_callback.go is decoupled from
+// the full Store interface.
+type PendingCallbackQueue interface {
+	EnqueuePendingCallback(ctx context.Context, item store.PendingCallback) error
 }
 
 const usageDebitCallbackAttempts = 3
@@ -43,6 +57,19 @@ func NewGenfityCallback(baseURL, secret string, logger zerolog.Logger) *GenfityC
 		client:  &http.Client{Timeout: 10 * time.Second},
 		log:     logger.With().Str("component", "genfity_callback").Logger(),
 	}
+}
+
+// WithQueue attaches a durable backstop. When all in-process retries
+// fail, PostUsageDebitAsync persists the payload here so a background
+// worker can keep retrying across restarts. Without a queue, callbacks
+// are lost if genfity-app outage outlasts ~3 seconds (the
+// in-process retry window).
+func (c *GenfityCallback) WithQueue(queue PendingCallbackQueue) *GenfityCallback {
+	if c == nil {
+		return nil
+	}
+	c.queue = queue
+	return c
 }
 
 // Enabled returns true when the callback is configured. We keep this
@@ -87,14 +114,27 @@ func (c *GenfityCallback) PostUsageDebit(ctx context.Context, payload UsageDebit
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("callback returned %d", resp.StatusCode)
+		return &callbackStatusError{statusCode: resp.StatusCode}
 	}
 	return nil
 }
 
+// callbackStatusError lets the retry worker classify whether a
+// non-2xx response is retriable (5xx / 429) or permanent (4xx).
+type callbackStatusError struct {
+	statusCode int
+}
+
+func (e *callbackStatusError) Error() string {
+	return fmt.Sprintf("callback returned %d", e.statusCode)
+}
+
 // PostUsageDebitAsync fires the callback in a background goroutine so
-// the request hot path isn't blocked by genfity-app latency. Failures
-// are logged. Used from finalizeRuntimeReservation.
+// the request hot path isn't blocked by genfity-app latency. After 3
+// in-process attempts fail, the payload is persisted to the durable
+// queue (if configured) so a background worker can keep retrying
+// across restarts. Without the queue this would be the legacy
+// fire-and-forget that loses callbacks during outages > ~3 seconds.
 func (c *GenfityCallback) PostUsageDebitAsync(payload UsageDebitPayload) {
 	if !c.Enabled() {
 		return
@@ -112,8 +152,45 @@ func (c *GenfityCallback) PostUsageDebitAsync(payload UsageDebitPayload) {
 				time.Sleep(time.Duration(attempt) * time.Second)
 			}
 		}
-		if lastErr != nil {
-			c.log.Warn().Err(lastErr).Str("user_id", payload.UserID).Str("request_id", payload.RequestID).Msg("usage debit callback failed")
+		if lastErr == nil {
+			return
+		}
+		c.log.Warn().Err(lastErr).
+			Str("user_id", payload.UserID).
+			Str("request_id", payload.RequestID).
+			Msg("usage debit callback failed in-process; persisting for background retry")
+		if c.queue == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		item := store.PendingCallback{
+			RequestID:   payload.RequestID,
+			UserID:      payload.UserID,
+			BillingMode: payload.BillingMode,
+			Model:       optionalString(payload.Model),
+			Notes:       optionalString(payload.Notes),
+		}
+		if payload.AmountCredits > 0 {
+			s := strconv.FormatFloat(payload.AmountCredits, 'f', 4, 64)
+			item.AmountCredits = &s
+		}
+		if payload.AmountUSD > 0 {
+			s := strconv.FormatFloat(payload.AmountUSD, 'f', 6, 64)
+			item.AmountUSD = &s
+		}
+		if err := c.queue.EnqueuePendingCallback(ctx, item); err != nil {
+			c.log.Error().Err(err).
+				Str("user_id", payload.UserID).
+				Str("request_id", payload.RequestID).
+				Msg("failed to persist callback to retry queue; debit drift may occur")
 		}
 	}()
+}
+
+func optionalString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
