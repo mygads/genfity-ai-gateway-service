@@ -59,7 +59,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 	// as-is; combo resolution and fallback happen upstream.
 	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, routers, cliProxyClient, genfityCallback, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
-	adminHandler := handler.NewAdminHandler(models, routers, usage, store)
+	adminHandler := handler.NewAdminHandler(models, routers, usage, store, entitlements, rateLimit)
 	monitoringHandler := handler.NewMonitoringHandler(cliProxyClient, usage, store)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 	syncHandler := handler.NewSyncHandler(syncService, genfityCallback, cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey)
@@ -137,6 +137,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		r.Get("/usage/dashboard", adminHandler.ListUsageDashboard)
 		r.Get("/usage/analytics", adminHandler.ListUsageAnalytics)
 		r.Get("/usage/logs", adminHandler.ListUsageLogs)
+		r.Get("/users/{userId}/billing-detail", adminHandler.UserBillingDetail)
 
 		r.Get("/routers/{code}/health", routerProxyHandler.Health)
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)

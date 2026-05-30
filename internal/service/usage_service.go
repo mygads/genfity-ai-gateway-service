@@ -181,6 +181,12 @@ func (s *UsageService) SummaryGrouped(ctx context.Context, since time.Time) []st
 	return s.store.ListUsageSummaryGrouped(ctx, since)
 }
 
+// UsageByBillingModeSince rolls up one user's successful usage by
+// billing_mode for [since, now). Powers the admin billing-detail modal.
+func (s *UsageService) UsageByBillingModeSince(ctx context.Context, userID string, since time.Time) []store.BillingModeUsageRow {
+	return s.store.ListUsageByBillingModeSince(ctx, userID, since)
+}
+
 func (s *UsageService) CreditBalances(ctx context.Context) []store.CreditBalanceRow {
 	return s.store.ListCreditBalances(ctx)
 }

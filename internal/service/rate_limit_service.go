@@ -215,6 +215,46 @@ func (s *RateLimitService) CheckRequestsPerPeriod(ctx context.Context, userID, p
 	return nil
 }
 
+// GetPlanRPDCount reads (does NOT increment) the per-(user,plan) request
+// count for the current UTC day. Mirrors the key scheme of CheckPlanRPD
+// so the admin billing-detail modal can show "rpd_used / rpd_limit"
+// without consuming the user's daily quota. Returns 0 when the key is
+// missing/expired or on any read error.
+func (s *RateLimitService) GetPlanRPDCount(ctx context.Context, userID, planCode string) int {
+	if userID == "" || planCode == "" {
+		return 0
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	n, err := s.client.Get(ctx, key).Int()
+	if err != nil {
+		return 0
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+// GetRequestsPerPeriodCount reads (does NOT increment) the
+// per-(user,period) request count. Mirrors the key scheme of
+// CheckRequestsPerPeriod. periodKey must be derived the same way the
+// request path derives it. Returns 0 when missing/expired or on error.
+func (s *RateLimitService) GetRequestsPerPeriodCount(ctx context.Context, userID, periodKey string) int {
+	if userID == "" || periodKey == "" {
+		return 0
+	}
+	key := fmt.Sprintf("%s:rl:plan-period:%s:%s", s.prefix, userID, periodKey)
+	n, err := s.client.Get(ctx, key).Int()
+	if err != nil {
+		return 0
+	}
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
 // CheckFreeModelRPM/RPD/TPD enforce per-(user,model) limits for models
 // flagged is_free=true. They share the same window semantics as the plan
 // limits (per-minute, per-day) but are scoped to a single model.

@@ -133,6 +133,10 @@ type Store interface {
 	// disables that predicate.
 	ListUsageLogs(ctx context.Context, filter store.UsageLogFilter) ([]store.UsageLedgerEntry, int, error)
 	ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow
+	// ListUsageByBillingModeSince rolls up a single user's successful
+	// usage by billing_mode for the window [since, now). Used by the
+	// admin billing-detail modal for per-mode "today" requests + tokens.
+	ListUsageByBillingModeSince(ctx context.Context, userID string, since time.Time) []store.BillingModeUsageRow
 	// ListProviderStats aggregates usage_ledger rows since `since` by
 	// router_model prefix. Used by the admin Provider Stats page.
 	ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow

@@ -280,6 +280,20 @@ type BillingModeBreakdownRow struct {
 	TotalCost    string `json:"total_cost"`
 }
 
+// BillingModeUsageRow is a per-(user, billing_mode) usage rollup for a
+// single time window (e.g. "today"). Split input/output tokens so the
+// admin billing-detail modal can show, for a credit/PAYG user, how many
+// requests + how many tokens in each direction they consumed today.
+type BillingModeUsageRow struct {
+	BillingMode  string `json:"billing_mode"`
+	RequestCount int64  `json:"request_count"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	TotalTokens  int64  `json:"total_tokens"`
+	TotalCost    string `json:"total_cost"`
+	CreditsUsed  string `json:"credits_used"`
+}
+
 // StatusBreakdownRow surfaces success/error counts plus an explicit
 // error_code histogram so admins can scan for misbehaving providers
 // or auth/quota issues without paging through the logs modal.

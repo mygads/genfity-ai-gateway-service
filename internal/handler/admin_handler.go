@@ -15,10 +15,12 @@ import (
 )
 
 type AdminHandler struct {
-	models  *service.ModelService
-	routers *service.RouterService
-	usage   *service.UsageService
-	store   service.Store
+	models       *service.ModelService
+	routers      *service.RouterService
+	usage        *service.UsageService
+	store        service.Store
+	entitlements *service.EntitlementService
+	rateLimit    *service.RateLimitService
 }
 
 // patchHasField returns true if the PATCH body contained a key (even if null).
@@ -52,8 +54,8 @@ func patchDecodeOptionalString(fields map[string]json.RawMessage, key string) (*
 	return &v, true
 }
 
-func NewAdminHandler(models *service.ModelService, routers *service.RouterService, usage *service.UsageService, store service.Store) *AdminHandler {
-	return &AdminHandler{models: models, routers: routers, usage: usage, store: store}
+func NewAdminHandler(models *service.ModelService, routers *service.RouterService, usage *service.UsageService, store service.Store, entitlements *service.EntitlementService, rateLimit *service.RateLimitService) *AdminHandler {
+	return &AdminHandler{models: models, routers: routers, usage: usage, store: store, entitlements: entitlements, rateLimit: rateLimit}
 }
 
 func respondAdminWriteError(w http.ResponseWriter, err error) {
@@ -733,6 +735,113 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 			"total_reserved":  strconv.FormatFloat(totalCreditUsed, 'f', 4, 64),
 			"user_balances":   cbList,
 		},
+	})
+}
+
+// UserBillingDetail returns a single user's current billing posture for
+// the admin "Detail" modal: active subscription (plan + RPM/RPD/RPP/TPM/
+// concurrent/quota limits and live RPD/RPP usage), credit balance +
+// expiry + today's credit usage, and PAYG balance + today's PAYG usage.
+// Read-only: the Redis counter reads use GET, never INCR, so opening the
+// modal cannot consume a user's quota.
+func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("userId")
+	if userID == "" {
+		respondError(w, http.StatusBadRequest, "invalid_user_id")
+		return
+	}
+
+	ctx := r.Context()
+
+	// --- Subscription section ---
+	subSection := map[string]any{"active": false}
+	if sub, err := h.entitlements.CheckActiveSubscription(ctx, userID); err == nil && sub != nil && sub.Entitlement != nil {
+		ent := sub.Entitlement
+		s := map[string]any{
+			"active":       true,
+			"plan_code":    ent.PlanCode,
+			"status":       ent.Status,
+			"period_start": ent.PeriodStart,
+			"period_end":   ent.PeriodEnd,
+		}
+		if ent.PeriodEnd != nil {
+			days := int(time.Until(*ent.PeriodEnd).Hours() / 24)
+			if rem := time.Until(*ent.PeriodEnd); rem > 0 && rem%(24*time.Hour) != 0 {
+				days++ // ceil partial day so "expires in <24h" shows 1, not 0
+			}
+			if days < 0 {
+				days = 0
+			}
+			s["days_remaining"] = days
+		}
+		limits := service.PlanLimitsFromSnapshot(sub.Plan)
+		s["limits"] = map[string]any{
+			"rpm":                  limits.RPM,
+			"tpm":                  limits.TPM,
+			"rpd":                  limits.RPD,
+			"rpp":                  limits.MaxRequestsPerPeriod,
+			"concurrent":           limits.ConcurrentLimit,
+			"quota_tokens_monthly": ent.QuotaTokensMonthly,
+		}
+		if sub.Plan != nil {
+			s["plan_name"] = sub.Plan.DisplayName
+		}
+		// Live counters — read-only.
+		rpdUsed, rppUsed := 0, 0
+		if h.rateLimit != nil {
+			rpdUsed = h.rateLimit.GetPlanRPDCount(ctx, userID, ent.PlanCode)
+			rppUsed = h.rateLimit.GetRequestsPerPeriodCount(ctx, userID, periodKey(ent))
+		}
+		s["usage"] = map[string]any{"rpd_used": rpdUsed, "rpp_used": rppUsed}
+		subSection = s
+	}
+
+	// --- Credit + PAYG balances (each lives on its own pricing_group row) ---
+	creditSection := map[string]any{"balance": "0", "expires_at": nil}
+	paygSection := map[string]any{"balance_usd": "0"}
+	if rows, err := h.entitlements.ListActiveByUser(ctx, userID); err == nil {
+		for i := range rows {
+			pg := ""
+			if rows[i].PricingGroup != nil {
+				pg = *rows[i].PricingGroup
+			}
+			switch pg {
+			case "credit_package":
+				if rows[i].CreditBalance != nil {
+					creditSection["balance"] = *rows[i].CreditBalance
+				}
+				creditSection["expires_at"] = rows[i].CreditExpiresAt
+			case "payg_topup":
+				if rows[i].PaygUsdBalance != nil {
+					paygSection["balance_usd"] = *rows[i].PaygUsdBalance
+				}
+			}
+		}
+	}
+
+	// --- Today usage by billing mode (UTC day, matches RPD reset window) ---
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	for _, row := range h.usage.UsageByBillingModeSince(ctx, userID, startOfDay) {
+		switch row.BillingMode {
+		case "credit_package":
+			creditSection["requests_today"] = row.RequestCount
+			creditSection["credits_used_today"] = row.CreditsUsed
+			creditSection["input_tokens_today"] = row.InputTokens
+			creditSection["output_tokens_today"] = row.OutputTokens
+		case "payg_topup":
+			paygSection["requests_today"] = row.RequestCount
+			paygSection["cost_today"] = row.TotalCost
+			paygSection["input_tokens_today"] = row.InputTokens
+			paygSection["output_tokens_today"] = row.OutputTokens
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"user_id":      userID,
+		"subscription": subSection,
+		"credit":       creditSection,
+		"payg":         paygSection,
 	})
 }
 

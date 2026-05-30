@@ -1557,6 +1557,48 @@ func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.
 	return items
 }
 
+// ListUsageByBillingModeSince rolls up a single user's usage by
+// billing_mode for the window [since, now). Used by the admin
+// billing-detail modal to show per-billing-mode requests + split
+// input/output tokens + cost/credits "today". Only successful requests
+// count (failed requests don't consume balance).
+func (s *PostgresStore) ListUsageByBillingModeSince(ctx context.Context, userID string, since time.Time) []store.BillingModeUsageRow {
+	query := `
+		SELECT
+			COALESCE(NULLIF(billing_mode, ''), 'unknown') AS billing_mode,
+			COUNT(*)::bigint AS request_count,
+			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
+			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
+			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+			COALESCE(SUM(total_cost), 0)::text AS total_cost,
+			COALESCE(SUM(amount_credits), 0)::text AS credits_used
+		FROM ai_gateway.usage_ledger
+		WHERE genfity_user_id = $1
+		  AND status = 'success'
+		  AND ($2::timestamptz IS NULL OR started_at >= $2)
+		GROUP BY 1`
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+
+	rows, err := s.pool.Query(ctx, query, userID, sinceArg)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	items := []store.BillingModeUsageRow{}
+	for rows.Next() {
+		var item store.BillingModeUsageRow
+		if rows.Scan(&item.BillingMode, &item.RequestCount, &item.InputTokens, &item.OutputTokens, &item.TotalTokens, &item.TotalCost, &item.CreditsUsed) == nil {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
 func (s *PostgresStore) ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow {
 	query := `
 		SELECT
