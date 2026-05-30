@@ -654,11 +654,70 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 }
 
 func (s *PostgresStore) upsertEntitlementByPlanCode(ctx context.Context, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
+	// A user holds at most ONE active unlimited subscription at a time.
+	// When an admin changes a user's plan (plan_code A -> B) or a renewal
+	// switches plans, genfity-app updates its single entitlement row in
+	// place, but the gateway keys by (genfity_user_id, plan_code), so the
+	// incoming plan_code B inserts a NEW row and the old plan_code A row
+	// stays status='active' forever — a "ghost" subscription. GetByUser
+	// then keeps selecting the ghost (e.g. an 850-RPP plus-lite) instead
+	// of the new plan (1250-RPP), so the user is stuck on the old limits.
+	// Demote every OTHER active unlimited row for this user before the
+	// upsert so exactly one stays active. We do NOT touch credit_package /
+	// payg_topup rows (a user legitimately holds an unlimited plan AND a
+	// credit balance simultaneously). Runs in a tx so the demote + upsert
+	// are atomic.
+	pg := ""
+	if item.PricingGroup != nil {
+		pg = strings.TrimSpace(*item.PricingGroup)
+	}
+	isActiveUnlimited := strings.TrimSpace(defaultString(item.Status, "active")) == "active" &&
+		(pg == "unlimited" || pg == "unlimited_plan")
+
+	if isActiveUnlimited {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+		defer tx.Rollback(ctx)
+
+		if _, err := tx.Exec(ctx,
+			`UPDATE ai_gateway.customer_entitlements
+			   SET status = 'replaced', updated_at = now()
+			 WHERE genfity_user_id = $1
+			   AND status = 'active'
+			   AND plan_code <> $2
+			   AND COALESCE(pricing_group, metadata->>'pricingGroup') IN ('unlimited', 'unlimited_plan')`,
+			item.GenfityUserID, item.PlanCode); err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+
+		saved, err := s.insertEntitlementByPlanCode(ctx, tx, item)
+		if err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+		return saved, nil
+	}
+
+	return s.insertEntitlementByPlanCode(ctx, s.pool, item)
+}
+
+// pgxQuerier is satisfied by both *pgxpool.Pool and pgx.Tx, so the
+// INSERT ... ON CONFLICT body can run either standalone or inside the
+// demote transaction above.
+type pgxQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQuerier, item store.CustomerEntitlement) (store.CustomerEntitlement, error) {
 	var metadata json.RawMessage
 	// Subscription / unlimited_plan path: keep legacy upsert by
 	// (user, plan_code). Same user may hold multiple rows here for
 	// history (active + replaced) — that's intentional and audited.
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		INSERT INTO ai_gateway.customer_entitlements (
 			id, genfity_user_id, genfity_tenant_id, plan_code, status,
 			period_start, period_end, quota_tokens_monthly, balance_snapshot,
