@@ -50,12 +50,17 @@ func (h *SyncHandler) SyncCustomerEntitlements(w http.ResponseWriter, r *http.Re
 		respondError(w, http.StatusBadRequest, "invalid_json")
 		return
 	}
-	count, err := h.sync.SyncCustomerEntitlements(r.Context(), payload)
+	count, failures, err := h.sync.SyncCustomerEntitlements(r.Context(), payload)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"synced": count})
+	// Per-row resilience: report how many succeeded and which rows failed,
+	// instead of aborting the whole batch on the first error. The app
+	// treats synced==len(payload) as full success and uses `failures` to
+	// mark ONLY the offending rows, so one bad row no longer tars the
+	// other 499 in a sync.
+	respondJSON(w, http.StatusOK, map[string]any{"synced": count, "failures": failures})
 }
 
 func (h *SyncHandler) SyncCustomerBalance(w http.ResponseWriter, r *http.Request) {

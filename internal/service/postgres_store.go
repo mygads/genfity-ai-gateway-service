@@ -538,6 +538,27 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 	}
 	defer tx.Rollback(ctx)
 
+	// Free the target plan_code slot before INSERT/UPDATE. The legacy
+	// customer_entitlements_user_plan_idx UNIQUE (genfity_user_id,
+	// plan_code) spans ALL statuses, so a terminal-status row that still
+	// holds the incoming plan_code (e.g. a 'consolidated' credit row left
+	// by migration 00018, or an 'expired'/'replaced' row) collides when we
+	// (a) INSERT a fresh single credit/PAYG row with that plan_code, or
+	// (b) rename the existing active row's plan_code to it (starter →
+	// developer top-up). That 23505 used to abort the whole sync batch and
+	// stamp every unrelated row in the batch as failed. These terminal
+	// rows carry zero balance (consolidation zeroes them) and are
+	// audit-only, so deleting them is safe — and we never touch 'active'
+	// rows, so the user's live balance row is preserved.
+	if item.PlanCode != "" {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM ai_gateway.customer_entitlements
+			 WHERE genfity_user_id = $1 AND plan_code = $2 AND status <> 'active'`,
+			item.GenfityUserID, item.PlanCode); err != nil {
+			return store.CustomerEntitlement{}, err
+		}
+	}
+
 	var existingID uuid.UUID
 	err = tx.QueryRow(ctx, `
 		SELECT id FROM ai_gateway.customer_entitlements
@@ -773,41 +794,68 @@ func (s *PostgresStore) ListActiveEntitlementsByUser(ctx context.Context, userID
 }
 
 func (s *PostgresStore) UpsertBalanceSnapshot(ctx context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) (*store.CustomerEntitlement, error) {
-	var item store.CustomerEntitlement
-	var metadata json.RawMessage
+	var affected int64
+	var creditRow *store.CustomerEntitlement
 
-	// Update both balance_snapshot AND credit_balance so the reservation
-	// query (which checks credit_balance) sees the correct value after
-	// admin grants or topups synced from genfity-app.
-	setClauses := `balance_snapshot = $2, credit_balance = $2::numeric, updated_from_genfity_at = now(), updated_at = now()`
-	args := []any{userID, balance}
-	argIdx := 3
+	// Credit balance belongs on the user's active credit_package row ONLY.
+	// The old behaviour updated "the most recently updated active row"
+	// (ORDER BY updated_at DESC LIMIT 1) regardless of pricing_group, so an
+	// admin grant or top-up landed credit_balance on the user's
+	// unlimited_plan row whenever that row had been touched more recently.
+	// The billing path (ReserveRequestCredits) reads credit_balance
+	// exclusively from the credit_package row, so those credits were
+	// invisible and the user got insufficient_credit_balance despite a
+	// positive balance. Target the credit_package row explicitly — the
+	// partial unique index guarantees at most one such active row.
+	{
+		var item store.CustomerEntitlement
+		var metadata json.RawMessage
+		setClauses := `balance_snapshot = $2, credit_balance = $2::numeric, updated_from_genfity_at = now(), updated_at = now()`
+		args := []any{userID, balance}
+		argIdx := 3
+		if creditExpiresAt != nil {
+			setClauses += fmt.Sprintf(`, credit_expires_at = $%d`, argIdx)
+			args = append(args, *creditExpiresAt)
+			argIdx++
+		}
+		query := fmt.Sprintf(`UPDATE ai_gateway.customer_entitlements SET %s
+			WHERE genfity_user_id = $1 AND status = 'active' AND pricing_group = 'credit_package'
+			RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, setClauses)
+		err := s.pool.QueryRow(ctx, query, args...).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
+		if err == nil {
+			item.Metadata = metadata
+			creditRow = &item
+			affected++
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+	}
 
+	// PAYG balance belongs on the active payg_topup row ONLY — same reason
+	// as credit above. Writing it onto a credit_package or unlimited row
+	// would be invisible to ReservePaygUsdBalance.
 	if paygBalance != nil {
-		setClauses += fmt.Sprintf(`, payg_usd_balance = $%d`, argIdx)
-		args = append(args, *paygBalance)
-		argIdx++
-	}
-	if creditExpiresAt != nil {
-		setClauses += fmt.Sprintf(`, credit_expires_at = $%d`, argIdx)
-		args = append(args, *creditExpiresAt)
-		argIdx++
+		cmd, err := s.pool.Exec(ctx,
+			`UPDATE ai_gateway.customer_entitlements
+			   SET payg_usd_balance = $2::numeric, updated_from_genfity_at = now(), updated_at = now()
+			 WHERE genfity_user_id = $1 AND status = 'active' AND pricing_group = 'payg_topup'`,
+			userID, *paygBalance)
+		if err != nil {
+			return nil, err
+		}
+		affected += cmd.RowsAffected()
 	}
 
-	// Update the most recent active entitlement (ORDER BY updated_at DESC)
-	// so admin grants land on the correct row when multiple entitlements exist.
-	query := fmt.Sprintf(`UPDATE ai_gateway.customer_entitlements SET %s WHERE id = (
-		SELECT id FROM ai_gateway.customer_entitlements
-		WHERE genfity_user_id = $1 AND status = 'active'
-		ORDER BY updated_at DESC LIMIT 1
-	) RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status, period_start, period_end, quota_tokens_monthly, balance_snapshot::text, metadata, updated_from_genfity_at`, setClauses)
-
-	err := s.pool.QueryRow(ctx, query, args...).Scan(&item.ID, &item.GenfityUserID, &item.GenfityTenantID, &item.PlanCode, &item.Status, &item.PeriodStart, &item.PeriodEnd, &item.QuotaTokensMonthly, &item.BalanceSnapshot, &metadata, &item.UpdatedFromGenfityAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	// No credit_package or payg_topup row exists for this user. The
+	// canonical fix lives in genfity-app, which now ensures a
+	// credit_package entitlement exists and syncs it (carrying plan_code +
+	// balance) via the entitlement path before/alongside this balance push.
+	// Surface ErrNotFound so the caller can tell "nothing to update" apart
+	// from a successful write.
+	if affected == 0 {
 		return nil, ErrNotFound
 	}
-	item.Metadata = metadata
-	return &item, err
+	return creditRow, nil
 }
 
 func (s *PostgresStore) UpsertRouterInstance(ctx context.Context, item store.RouterInstance) (store.RouterInstance, error) {

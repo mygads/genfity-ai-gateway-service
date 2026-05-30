@@ -45,18 +45,44 @@ func (s *SyncService) SyncSubscriptionPlans(ctx context.Context, payload []store
 	return count, nil
 }
 
-func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []store.CustomerEntitlement) (int, error) {
+// EntitlementSyncFailure identifies a single row that failed to upsert,
+// keyed the same way the inbound payload is (genfity_user_id + plan_code),
+// since the app doesn't send its own row id. The app maps these back to
+// mark ONLY the failed rows, instead of failing the whole batch.
+type EntitlementSyncFailure struct {
+	GenfityUserID string `json:"genfity_user_id"`
+	PlanCode      string `json:"plan_code"`
+	Error         string `json:"error"`
+}
+
+// SyncCustomerEntitlements upserts each entitlement independently. A row
+// that fails (e.g. a transient error or a residual unique-index
+// collision) is collected into failures and the loop continues, rather
+// than aborting the whole batch — one poison row used to tar every
+// other row in the same 500-row sync as "failed", locking unrelated
+// users out of the gateway.
+func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []store.CustomerEntitlement) (int, []EntitlementSyncFailure, error) {
 	count := 0
+	var failures []EntitlementSyncFailure
 	for _, item := range payload {
 		if item.ID == uuid.Nil {
 			item.ID = uuid.New()
 		}
 		if _, err := s.entitlements.Upsert(ctx, item); err != nil {
-			return count, err
+			s.log.Error().Err(err).
+				Str("genfity_user_id", item.GenfityUserID).
+				Str("plan_code", item.PlanCode).
+				Msg("entitlement upsert failed; continuing batch")
+			failures = append(failures, EntitlementSyncFailure{
+				GenfityUserID: item.GenfityUserID,
+				PlanCode:      item.PlanCode,
+				Error:         err.Error(),
+			})
+			continue
 		}
 		count++
 	}
-	return count, nil
+	return count, failures, nil
 }
 
 func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) error {
