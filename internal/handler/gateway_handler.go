@@ -782,6 +782,18 @@ func isStreamingPayload(payload map[string]any) bool {
 	return stream
 }
 
+// ensureNonStreaming forces stream:false on the upstream payload. Per the
+// OpenAI spec, `stream` defaults to false when omitted, but some upstreams
+// (notably Claude/Anthropic models via CLIProxyAPI) default to SSE when the
+// field is absent. The CRM's non-streaming OpenAI SDK omits `stream`, so
+// without this the client receives `data:` SSE chunks and fails to parse the
+// JSON body ("invalid character 'd'"). Setting it explicitly keeps the
+// non-streaming contract intact for every upstream/model.
+func ensureNonStreaming(payload map[string]any) {
+	payload["stream"] = false
+	delete(payload, "stream_options")
+}
+
 func ensureStreamUsageOption(payload map[string]any) {
 	options, _ := payload["stream_options"].(map[string]any)
 	if options == nil {
@@ -2348,6 +2360,11 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p["model"] = cand.routerModel
+		if streamRequested {
+			ensureStreamUsageOption(p)
+		} else {
+			ensureNonStreaming(p)
+		}
 
 		client, ok := h.clientForRouter(ctx, cand.routerInstanceCode)
 		if !ok {
@@ -2728,6 +2745,8 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		p["model"] = cand.routerModel
 		if streamRequested {
 			ensureStreamUsageOption(p)
+		} else {
+			ensureNonStreaming(p)
 		}
 
 		client, ok := h.clientForRouter(ctx, cand.routerInstanceCode)
