@@ -738,6 +738,48 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// entitlementRowPricingGroup resolves a raw entitlement row's pricing
+// group the same way the persistence layer does — column first, then the
+// metadata.pricingGroup fallback for legacy rows whose pricing_group
+// column is NULL (the store queries use COALESCE for exactly this). Keeps
+// the billing-detail credit/PAYG matching consistent with the SQL ordering
+// and with billingDetailIsSubscription.
+func entitlementRowPricingGroup(row store.CustomerEntitlement) string {
+	if row.PricingGroup != nil && *row.PricingGroup != "" {
+		return *row.PricingGroup
+	}
+	if len(row.Metadata) > 0 {
+		var meta map[string]any
+		if err := json.Unmarshal(row.Metadata, &meta); err == nil {
+			if s, ok := meta["pricingGroup"].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// billingDetailIsSubscription reports whether the active entitlement is a
+// real subscription plan (period-based / unlimited) rather than a
+// credit_package or payg_topup row. CheckActiveSubscription returns the
+// user's highest-priority active entitlement, which for a credit- or
+// PAYG-only user is the credit/PAYG row itself. Rendering that as an
+// "active subscription" in the admin modal is wrong — it shows a credit
+// package (e.g. "Admin Grant Credit") with empty period and 0/∞ limits.
+// Credit and PAYG have their own dedicated sections below.
+func billingDetailIsSubscription(sub *service.ActiveSubscription) bool {
+	group := resolveSubscriptionPricingGroup(sub)
+	if group == "" {
+		group = pricingGroup(sub)
+	}
+	switch group {
+	case "credit_package", "payg_topup":
+		return false
+	default:
+		return true
+	}
+}
+
 // UserBillingDetail returns a single user's current billing posture for
 // the admin "Detail" modal: active subscription (plan + RPM/RPD/RPP/TPM/
 // concurrent/quota limits and live RPD/RPP usage), credit balance +
@@ -755,7 +797,7 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 
 	// --- Subscription section ---
 	subSection := map[string]any{"active": false}
-	if sub, err := h.entitlements.CheckActiveSubscription(ctx, userID); err == nil && sub != nil && sub.Entitlement != nil {
+	if sub, err := h.entitlements.CheckActiveSubscription(ctx, userID); err == nil && sub != nil && sub.Entitlement != nil && billingDetailIsSubscription(sub) {
 		ent := sub.Entitlement
 		s := map[string]any{
 			"active":       true,
@@ -801,11 +843,7 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 	paygSection := map[string]any{"balance_usd": "0"}
 	if rows, err := h.entitlements.ListActiveByUser(ctx, userID); err == nil {
 		for i := range rows {
-			pg := ""
-			if rows[i].PricingGroup != nil {
-				pg = *rows[i].PricingGroup
-			}
-			switch pg {
+			switch entitlementRowPricingGroup(rows[i]) {
 			case "credit_package":
 				if rows[i].CreditBalance != nil {
 					creditSection["balance"] = *rows[i].CreditBalance
