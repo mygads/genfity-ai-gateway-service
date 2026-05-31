@@ -1569,20 +1569,55 @@ func (s *PostgresStore) ListUsageLogs(ctx context.Context, f store.UsageLogFilte
 }
 
 func (s *PostgresStore) ListUsageSummaryGrouped(ctx context.Context, since time.Time) []store.UsageSummaryRow {
+	// UNION raw usage_ledger (last 7d after pruning) with usage_daily_rollup
+	// for everything older. The rollup side is gated `day < (earliest raw
+	// UTC day)`, a data-driven boundary: while nothing is pruned the raw
+	// floor is the very first day so the rollup side is empty and results
+	// equal the old raw-only query; after pruning, raw's floor moves up and
+	// the rollup fills exactly the deleted gap — no overlap, no gap. Both
+	// sides pre-aggregate to the same grain then re-sum.
 	query := `
-		SELECT
-			COALESCE(NULLIF(metadata->>'pricing_group', ''), 'unknown') AS pricing_group,
-			genfity_user_id,
-			COUNT(*)::int AS request_count,
-			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
-			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
-			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
-			COALESCE(SUM(total_cost), 0)::text AS total_cost,
-			MAX(started_at) AS last_active
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		WITH rf AS (
+			SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+			FROM ai_gateway.usage_ledger
+		)
+		SELECT pricing_group, genfity_user_id,
+			SUM(request_count)::int AS request_count,
+			SUM(input_tokens)::bigint AS input_tokens,
+			SUM(output_tokens)::bigint AS output_tokens,
+			SUM(total_tokens)::bigint AS total_tokens,
+			SUM(total_cost)::text AS total_cost,
+			MAX(last_active) AS last_active
+		FROM (
+			SELECT
+				COALESCE(NULLIF(metadata->>'pricing_group', ''), 'unknown') AS pricing_group,
+				genfity_user_id,
+				COUNT(*) AS request_count,
+				COALESCE(SUM(prompt_tokens), 0) AS input_tokens,
+				COALESCE(SUM(completion_tokens), 0) AS output_tokens,
+				COALESCE(SUM(total_tokens), 0) AS total_tokens,
+				COALESCE(SUM(total_cost), 0) AS total_cost,
+				MAX(started_at) AS last_active
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			GROUP BY 1, 2
+			UNION ALL
+			SELECT
+				COALESCE(NULLIF(r.pricing_group, ''), 'unknown') AS pricing_group,
+				r.genfity_user_id,
+				SUM(r.request_count) AS request_count,
+				SUM(r.input_tokens) AS input_tokens,
+				SUM(r.output_tokens) AS output_tokens,
+				SUM(r.total_tokens) AS total_tokens,
+				SUM(r.total_cost) AS total_cost,
+				MAX(r.day::timestamptz) AS last_active
+			FROM ai_gateway.usage_daily_rollup r, rf
+			WHERE r.day < rf.floor_day
+			  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+			GROUP BY 1, 2
+		) u
 		GROUP BY pricing_group, genfity_user_id
-		ORDER BY COALESCE(SUM(total_cost), 0) DESC`
+		ORDER BY SUM(total_cost) DESC`
 
 	var sinceArg any
 	if !since.IsZero() {
@@ -1789,14 +1824,36 @@ func (s *PostgresStore) rollupOneDay(ctx context.Context, day time.Time, dryRun 
 
 func (s *PostgresStore) ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow {
 	query := `
-		SELECT
-			COALESCE(NULLIF(split_part(router_model, '/', 1), ''), 'unknown') AS prefix,
-			COUNT(*)::bigint AS total_count,			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
-			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		WITH rf AS (
+			SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+			FROM ai_gateway.usage_ledger
+		)
+		SELECT prefix,
+			SUM(total_count)::bigint AS total_count,
+			SUM(success_count)::bigint AS success_count,
+			SUM(error_count)::bigint AS error_count
+		FROM (
+			SELECT
+				COALESCE(NULLIF(split_part(router_model, '/', 1), ''), 'unknown') AS prefix,
+				COUNT(*) AS total_count,
+				COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success') AS error_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			GROUP BY 1
+			UNION ALL
+			SELECT
+				COALESCE(NULLIF(r.router_prefix, ''), 'unknown') AS prefix,
+				SUM(r.request_count) AS total_count,
+				SUM(r.request_count) FILTER (WHERE r.status = 'success') AS success_count,
+				SUM(r.request_count) FILTER (WHERE r.status <> 'success') AS error_count
+			FROM ai_gateway.usage_daily_rollup r, rf
+			WHERE r.day < rf.floor_day
+			  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+			GROUP BY 1
+		) u
 		GROUP BY prefix
-		ORDER BY total_count DESC`
+		ORDER BY SUM(total_count) DESC`
 
 	var sinceArg any
 	if !since.IsZero() {
@@ -1827,20 +1884,72 @@ func (s *PostgresStore) ListUsageTimeseries(ctx context.Context, since time.Time
 	if bucket == "hour" {
 		trunc = "hour"
 	}
-	query := `
-		SELECT
-			date_trunc('` + trunc + `', started_at) AS bucket,
-			COUNT(*)::bigint AS request_count,
-			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
-			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count,
-			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
-			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
-			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
-			COALESCE(SUM(total_cost), 0)::text AS total_cost
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
-		GROUP BY bucket
-		ORDER BY bucket ASC`
+	var query string
+	if trunc == "hour" {
+		// Hour buckets are only requested for the 1d range, which is always
+		// inside the raw 7d retention window, so no rollup union is needed.
+		query = `
+			SELECT
+				date_trunc('hour', started_at) AS bucket,
+				COUNT(*)::bigint AS request_count,
+				COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count,
+				COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
+				COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
+				COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
+				COALESCE(SUM(total_cost), 0)::text AS total_cost
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			GROUP BY bucket
+			ORDER BY bucket ASC`
+	} else {
+		// Day buckets can reach beyond the raw 7d window, so UNION raw rows
+		// with the daily rollup, gated by the data-driven floor_day boundary
+		// (rollup grain is daily, matching r.day::timestamptz).
+		query = `
+			WITH rf AS (
+				SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+				FROM ai_gateway.usage_ledger
+			)
+			SELECT bucket,
+				SUM(request_count)::bigint AS request_count,
+				SUM(success_count)::bigint AS success_count,
+				SUM(error_count)::bigint AS error_count,
+				SUM(input_tokens)::bigint AS input_tokens,
+				SUM(output_tokens)::bigint AS output_tokens,
+				SUM(total_tokens)::bigint AS total_tokens,
+				SUM(total_cost)::text AS total_cost
+			FROM (
+				SELECT
+					date_trunc('day', started_at) AS bucket,
+					COUNT(*) AS request_count,
+					COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+					COUNT(*) FILTER (WHERE status != 'success') AS error_count,
+					COALESCE(SUM(prompt_tokens), 0) AS input_tokens,
+					COALESCE(SUM(completion_tokens), 0) AS output_tokens,
+					COALESCE(SUM(total_tokens), 0) AS total_tokens,
+					COALESCE(SUM(total_cost), 0) AS total_cost
+				FROM ai_gateway.usage_ledger
+				WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+				GROUP BY 1
+				UNION ALL
+				SELECT
+					r.day::timestamptz AS bucket,
+					SUM(r.request_count) AS request_count,
+					SUM(r.request_count) FILTER (WHERE r.status = 'success') AS success_count,
+					SUM(r.request_count) FILTER (WHERE r.status <> 'success') AS error_count,
+					SUM(r.input_tokens) AS input_tokens,
+					SUM(r.output_tokens) AS output_tokens,
+					SUM(r.total_tokens) AS total_tokens,
+					SUM(r.total_cost) AS total_cost
+				FROM ai_gateway.usage_daily_rollup r, rf
+				WHERE r.day < rf.floor_day
+				  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+				GROUP BY 1
+			) u
+			GROUP BY bucket
+			ORDER BY bucket ASC`
+	}
 
 	var sinceArg any
 	if !since.IsZero() {
@@ -1868,19 +1977,48 @@ func (s *PostgresStore) ListTopModels(ctx context.Context, since time.Time, limi
 		limit = 10
 	}
 	query := `
-		SELECT
-			public_model,
-			COUNT(*)::bigint AS request_count,
-			COALESCE(SUM(prompt_tokens), 0)::bigint AS input_tokens,
-			COALESCE(SUM(completion_tokens), 0)::bigint AS output_tokens,
-			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
-			COALESCE(SUM(total_cost), 0)::text AS total_cost,
-			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
-			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		WITH rf AS (
+			SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+			FROM ai_gateway.usage_ledger
+		)
+		SELECT public_model,
+			SUM(request_count)::bigint AS request_count,
+			SUM(input_tokens)::bigint AS input_tokens,
+			SUM(output_tokens)::bigint AS output_tokens,
+			SUM(total_tokens)::bigint AS total_tokens,
+			SUM(total_cost)::text AS total_cost,
+			SUM(success_count)::bigint AS success_count,
+			SUM(error_count)::bigint AS error_count
+		FROM (
+			SELECT
+				public_model,
+				COUNT(*) AS request_count,
+				COALESCE(SUM(prompt_tokens), 0) AS input_tokens,
+				COALESCE(SUM(completion_tokens), 0) AS output_tokens,
+				COALESCE(SUM(total_tokens), 0) AS total_tokens,
+				COALESCE(SUM(total_cost), 0) AS total_cost,
+				COUNT(*) FILTER (WHERE status = 'success') AS success_count,
+				COUNT(*) FILTER (WHERE status != 'success') AS error_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			GROUP BY public_model
+			UNION ALL
+			SELECT
+				r.public_model,
+				SUM(r.request_count) AS request_count,
+				SUM(r.input_tokens) AS input_tokens,
+				SUM(r.output_tokens) AS output_tokens,
+				SUM(r.total_tokens) AS total_tokens,
+				SUM(r.total_cost) AS total_cost,
+				SUM(r.request_count) FILTER (WHERE r.status = 'success') AS success_count,
+				SUM(r.request_count) FILTER (WHERE r.status <> 'success') AS error_count
+			FROM ai_gateway.usage_daily_rollup r, rf
+			WHERE r.day < rf.floor_day
+			  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+			GROUP BY r.public_model
+		) u
 		GROUP BY public_model
-		ORDER BY COALESCE(SUM(total_cost), 0) DESC, COUNT(*) DESC
+		ORDER BY SUM(total_cost) DESC, SUM(request_count) DESC
 		LIMIT $2`
 
 	var sinceArg any
@@ -1908,15 +2046,36 @@ func (s *PostgresStore) ListTopModels(ctx context.Context, since time.Time, limi
 // a priority-billing path.
 func (s *PostgresStore) ListBillingModeBreakdown(ctx context.Context, since time.Time) []store.BillingModeBreakdownRow {
 	query := `
-		SELECT
-			COALESCE(NULLIF(billing_mode, ''), 'subscription_unmetered') AS billing_mode,
-			COUNT(*)::bigint AS request_count,
-			COALESCE(SUM(total_tokens), 0)::bigint AS total_tokens,
-			COALESCE(SUM(total_cost), 0)::text AS total_cost
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		WITH rf AS (
+			SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+			FROM ai_gateway.usage_ledger
+		)
+		SELECT billing_mode,
+			SUM(request_count)::bigint AS request_count,
+			SUM(total_tokens)::bigint AS total_tokens,
+			SUM(total_cost)::text AS total_cost
+		FROM (
+			SELECT
+				COALESCE(NULLIF(billing_mode, ''), 'subscription_unmetered') AS billing_mode,
+				COUNT(*) AS request_count,
+				COALESCE(SUM(total_tokens), 0) AS total_tokens,
+				COALESCE(SUM(total_cost), 0) AS total_cost
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			GROUP BY 1
+			UNION ALL
+			SELECT
+				COALESCE(NULLIF(r.billing_mode, ''), 'subscription_unmetered') AS billing_mode,
+				SUM(r.request_count) AS request_count,
+				SUM(r.total_tokens) AS total_tokens,
+				SUM(r.total_cost) AS total_cost
+			FROM ai_gateway.usage_daily_rollup r, rf
+			WHERE r.day < rf.floor_day
+			  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+			GROUP BY 1
+		) u
 		GROUP BY billing_mode
-		ORDER BY COUNT(*) DESC`
+		ORDER BY SUM(request_count) DESC`
 
 	var sinceArg any
 	if !since.IsZero() {
@@ -1941,13 +2100,30 @@ func (s *PostgresStore) ListBillingModeBreakdown(ctx context.Context, since time
 // column. Used to render the success/error donut.
 func (s *PostgresStore) ListStatusBreakdown(ctx context.Context, since time.Time) []store.StatusBreakdownRow {
 	query := `
-		SELECT
-			COALESCE(NULLIF(status, ''), 'unknown') AS bucket,
-			COUNT(*)::bigint AS request_count
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+		WITH rf AS (
+			SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+			FROM ai_gateway.usage_ledger
+		)
+		SELECT bucket,
+			SUM(request_count)::bigint AS request_count
+		FROM (
+			SELECT
+				COALESCE(NULLIF(status, ''), 'unknown') AS bucket,
+				COUNT(*) AS request_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			GROUP BY 1
+			UNION ALL
+			SELECT
+				COALESCE(NULLIF(r.status, ''), 'unknown') AS bucket,
+				SUM(r.request_count) AS request_count
+			FROM ai_gateway.usage_daily_rollup r, rf
+			WHERE r.day < rf.floor_day
+			  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+			GROUP BY 1
+		) u
 		GROUP BY bucket
-		ORDER BY COUNT(*) DESC`
+		ORDER BY SUM(request_count) DESC`
 
 	var sinceArg any
 	if !since.IsZero() {
@@ -1975,15 +2151,34 @@ func (s *PostgresStore) ListErrorCodeBreakdown(ctx context.Context, since time.T
 		limit = 10
 	}
 	query := `
-		SELECT
-			COALESCE(NULLIF(error_code, ''), 'unknown') AS bucket,
-			COUNT(*)::bigint AS request_count
-		FROM ai_gateway.usage_ledger
-		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
-		  AND status != 'success'
-		  AND error_code IS NOT NULL
+		WITH rf AS (
+			SELECT COALESCE(MIN((started_at AT TIME ZONE 'UTC')::date), 'infinity'::date) AS floor_day
+			FROM ai_gateway.usage_ledger
+		)
+		SELECT bucket,
+			SUM(request_count)::bigint AS request_count
+		FROM (
+			SELECT
+				COALESCE(NULLIF(error_code, ''), 'unknown') AS bucket,
+				COUNT(*) AS request_count
+			FROM ai_gateway.usage_ledger
+			WHERE ($1::timestamptz IS NULL OR started_at >= $1)
+			  AND status != 'success'
+			  AND error_code IS NOT NULL
+			GROUP BY 1
+			UNION ALL
+			SELECT
+				COALESCE(NULLIF(r.error_code, ''), 'unknown') AS bucket,
+				SUM(r.request_count) AS request_count
+			FROM ai_gateway.usage_daily_rollup r, rf
+			WHERE r.day < rf.floor_day
+			  AND r.status <> 'success'
+			  AND COALESCE(NULLIF(r.error_code, ''), '') <> ''
+			  AND ($1::timestamptz IS NULL OR r.day >= ($1::timestamptz AT TIME ZONE 'UTC')::date)
+			GROUP BY 1
+		) u
 		GROUP BY bucket
-		ORDER BY COUNT(*) DESC
+		ORDER BY SUM(request_count) DESC
 		LIMIT $2`
 
 	var sinceArg any
