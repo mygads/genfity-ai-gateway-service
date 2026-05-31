@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -224,8 +225,100 @@ func sanitizePayloadInPlace(payload map[string]any) bool {
 	return false
 }
 
-func buildSafeErrorJSON(statusCode int, message string) []byte {
-	errType := "server_error"
+// rewriteModelInPayload sets the "model" field of a parsed response payload
+// to the public model name the customer requested, so the real router/
+// upstream model (e.g. "minimax-m2.5", "kimi-k2.6") never leaks. Handles
+// both the top-level "model" (OpenAI chat/completions + Anthropic non-stream
+// message) and the nested "message.model" (Anthropic message_start SSE
+// event). Returns true if anything changed.
+func rewriteModelInPayload(payload map[string]any, publicModel string) bool {
+	if payload == nil || publicModel == "" {
+		return false
+	}
+	changed := false
+	if cur, ok := payload["model"].(string); ok && cur != publicModel {
+		payload["model"] = publicModel
+		changed = true
+	}
+	if msg, ok := payload["message"].(map[string]any); ok {
+		if cur, ok := msg["model"].(string); ok && cur != publicModel {
+			msg["model"] = publicModel
+			payload["message"] = msg
+			changed = true
+		}
+	}
+	return changed
+}
+
+// rewriteResponseModel rewrites the "model" field in a successful response
+// body to the public model the customer asked for. Only touches 2xx/3xx
+// JSON bodies; returns the body unchanged when publicModel is empty, the
+// body has no "model" key, or it isn't parseable JSON. Error bodies are
+// left to sanitizeErrorBody.
+func rewriteResponseModel(body []byte, statusCode int, publicModel string) []byte {
+	if publicModel == "" || len(body) == 0 || statusCode >= 400 {
+		return body
+	}
+	if !bytes.Contains(body, []byte(`"model"`)) {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if !rewriteModelInPayload(payload, publicModel) {
+		return body
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// rewriteSSEChunkModel rewrites the "model" field in each SSE data line of a
+// streaming chunk to the public model name. Mirrors sanitizeSSEChunk's line
+// handling exactly so SSE framing is preserved. Cheap fast-path: skips the
+// whole chunk when it carries no "model" key.
+func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
+	if publicModel == "" || !bytes.Contains(chunk, []byte(`"model"`)) {
+		return chunk
+	}
+	lines := strings.Split(string(chunk), "\n")
+	var result strings.Builder
+	modified := false
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, "\r")
+		if strings.HasPrefix(trimmed, "data:") {
+			data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if data != "" && data != "[DONE]" {
+				var payload map[string]any
+				if err := json.Unmarshal([]byte(data), &payload); err == nil {
+					if rewriteModelInPayload(payload, publicModel) {
+						modified = true
+						rewritten, _ := json.Marshal(payload)
+						result.WriteString("data: ")
+						result.Write(rewritten)
+						result.WriteString("\n")
+						continue
+					}
+				}
+			}
+		}
+		result.WriteString(line)
+		result.WriteString("\n")
+	}
+	if !modified {
+		return chunk
+	}
+	out := result.String()
+	if len(out) > 0 && out[len(out)-1] == '\n' && (len(chunk) == 0 || chunk[len(chunk)-1] != '\n') {
+		out = out[:len(out)-1]
+	}
+	return []byte(out)
+}
+
+func buildSafeErrorJSON(statusCode int, message string) []byte {	errType := "server_error"
 	code := "upstream_error"
 	switch {
 	case statusCode == 429:

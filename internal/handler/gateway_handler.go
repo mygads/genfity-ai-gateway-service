@@ -756,11 +756,16 @@ func formatAmount(value float64) string {
 	return fmt.Sprintf("%.6f", value)
 }
 
-func (h *GatewayHandler) writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
+func (h *GatewayHandler) writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte, publicModel string) {
 	// Sanitize error bodies so internal provider/router details (litellm,
 	// "All credentials for model X are cooling down", "via provider Y", etc.)
 	// never reach the customer. Successful 2xx/3xx responses pass through.
 	sanitized := sanitizeErrorBody(body, resp.StatusCode)
+	// Rewrite the response "model" field to the public model the customer
+	// requested so the real router/upstream model (e.g. "minimax-m2.5",
+	// "kimi-k2.6" for a disguised combo) never leaks. No-op on error bodies
+	// and when the name already matches.
+	sanitized = rewriteResponseModel(sanitized, resp.StatusCode, publicModel)
 
 	for k, v := range resp.Header {
 		w.Header()[k] = v
@@ -1595,7 +1600,7 @@ func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKe
 	}()
 }
 
-func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response) []byte {
+func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel string) []byte {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
@@ -1618,6 +1623,11 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 			// (litellm, model names, cooldown messages) never reach
 			// the customer even in streaming responses.
 			safe := sanitizeSSEChunk(chunk)
+			// Rewrite the "model" field in each SSE event to the public
+			// model the customer requested (covers OpenAI chunk.model and
+			// Anthropic message_start's message.model) so a disguised
+			// combo's real upstream never leaks mid-stream.
+			safe = rewriteSSEChunkModel(safe, publicModel)
 			_, _ = w.Write(safe)
 			_, _ = captured.Write(chunk)
 			if flusher != nil {
@@ -1961,7 +1971,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		preCounters.commit()
 	}
 	h.recordUsageWithLegacyBilling(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
-	h.writeUpstreamResponse(w, resp, body)
+	h.writeUpstreamResponse(w, resp, body, publicModel)
 }
 
 // --- Image Generation ---
@@ -2085,7 +2095,7 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 		zerolog.Ctx(ctx).Warn().Err(recordErr).Msg("failed to record image generation usage")
 	}
 
-	h.writeUpstreamResponse(w, resp, body)
+	h.writeUpstreamResponse(w, resp, body, publicModel)
 }
 
 func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
@@ -2202,7 +2212,7 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 		zerolog.Ctx(ctx).Warn().Err(recordErr).Msg("failed to record image edit usage")
 	}
 
-	h.writeUpstreamResponse(w, resp, body)
+	h.writeUpstreamResponse(w, resp, body, publicModel)
 }
 
 // --- Anthropic-compatible Messages with virtual combo fallback ---
@@ -2365,7 +2375,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body := h.streamUpstreamResponse(w, resp)
+			body := h.streamUpstreamResponse(w, resp, publicModel)
 			resp.Body.Close()
 			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).
@@ -2414,11 +2424,18 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			if shouldCountAsSuccess(statusCode, body) {
 				preCounters.commit()
 			}
+			// Rewrite the response "model" field to the requested public
+			// model so a disguised combo's real upstream (e.g. minimax)
+			// never leaks to the customer.
+			outBody := rewriteResponseModel(body, statusCode, publicModel)
 			for k, v := range resp.Header {
 				w.Header()[k] = v
 			}
+			if len(outBody) != len(body) {
+				w.Header().Set("Content-Length", strconv.Itoa(len(outBody)))
+			}
 			w.WriteHeader(statusCode)
-			_, _ = w.Write(body)
+			_, _ = w.Write(outBody)
 			return
 		}
 
@@ -2572,7 +2589,7 @@ func (h *GatewayHandler) CountMessageTokens(w http.ResponseWriter, r *http.Reque
 		_, _ = w.Write([]byte(`{"input_tokens":-1}`))
 		return
 	}
-	h.writeUpstreamResponse(w, resp, body)
+	h.writeUpstreamResponse(w, resp, body, publicModel)
 }
 
 // --- ChatCompletions with virtual combo fallback ---
@@ -2739,7 +2756,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body := h.streamUpstreamResponse(w, resp)
+			body := h.streamUpstreamResponse(w, resp, publicModel)
 			resp.Body.Close()
 			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).
@@ -2777,7 +2794,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			if shouldCountAsSuccess(statusCode, body) {
 				preCounters.commit()
 			}
-			h.writeUpstreamResponse(w, resp, body)
+			h.writeUpstreamResponse(w, resp, body, publicModel)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
 		}
@@ -2804,7 +2821,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			if shouldCountAsSuccess(statusCode, body) {
 				preCounters.commit()
 			}
-			h.writeUpstreamResponse(w, resp, body)
+			h.writeUpstreamResponse(w, resp, body, publicModel)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
 			return
 		}
