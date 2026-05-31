@@ -716,9 +716,23 @@ func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQu
 	var metadata json.RawMessage
 	// Subscription / unlimited_plan path: keep legacy upsert by
 	// (user, plan_code). Same user may hold multiple rows here for
-	// history (active + replaced) — that's intentional and audited.
+	// history (active + expired) — that's intentional and audited. But
+	// the gateway only stores ONE row per (user, plan_code), so when the
+	// app syncs both an OLD expired row and a NEWLY re-bought active row
+	// of the SAME plan_code, a plain last-writer-wins ON CONFLICT lets the
+	// expired row clobber the active one (whichever synced last), leaving
+	// the user with no active subscription at runtime.
+	//
+	// The WHERE guard blocks an update ONLY when the incoming row is a
+	// strictly-older purchase trying to overwrite a newer one: it is
+	// non-active AND both period_starts are known AND the incoming
+	// period_start is strictly earlier than the stored one. period_start
+	// is the purchase identity (a re-buy of the same plan gets a later
+	// period_start), so an admin editing the SAME purchase keeps the same
+	// period_start and always updates — only a genuinely older purchase
+	// row is rejected. An incoming active row always updates.
 	err := q.QueryRow(ctx, `
-		INSERT INTO ai_gateway.customer_entitlements (
+		INSERT INTO ai_gateway.customer_entitlements AS ce (
 			id, genfity_user_id, genfity_tenant_id, plan_code, status,
 			period_start, period_end, quota_tokens_monthly, balance_snapshot,
 			credit_balance, credit_expires_at, payg_usd_balance, pricing_group,
@@ -739,6 +753,12 @@ func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQu
 			metadata = EXCLUDED.metadata,
 			updated_from_genfity_at = EXCLUDED.updated_from_genfity_at,
 			updated_at = now()
+		WHERE NOT (
+			EXCLUDED.status <> 'active'
+			AND ce.period_start IS NOT NULL
+			AND EXCLUDED.period_start IS NOT NULL
+			AND EXCLUDED.period_start < ce.period_start
+		)
 		RETURNING id, genfity_user_id, genfity_tenant_id, plan_code, status,
 			period_start, period_end, quota_tokens_monthly, balance_snapshot::text,
 			credit_balance::text, credit_expires_at, payg_usd_balance::text,
@@ -753,6 +773,14 @@ func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQu
 		&item.CreditBalance, &item.CreditExpiresAt, &item.PaygUsdBalance, &item.PricingGroup,
 		&metadata, &item.UpdatedFromGenfityAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The WHERE guard rejected the update: a stale (older, non-active)
+		// purchase row tried to overwrite a fresher stored row. This is a
+		// successful no-op — the correct row is already in place — so
+		// return the incoming item without error so the sync counts it as
+		// handled rather than failed.
+		return item, nil
+	}
 	if err != nil {
 		return store.CustomerEntitlement{}, err
 	}
