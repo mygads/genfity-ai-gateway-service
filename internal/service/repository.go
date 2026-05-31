@@ -137,6 +137,13 @@ type Store interface {
 	// usage by billing_mode for the window [since, now). Used by the
 	// admin billing-detail modal for per-mode "today" requests + tokens.
 	ListUsageByBillingModeSince(ctx context.Context, userID string, since time.Time) []store.BillingModeUsageRow
+	// RollupAndPruneUsage rolls every UTC day older than retentionDays
+	// that still has raw usage_ledger rows into usage_daily_rollup
+	// (idempotent UPSERT), then deletes those raw rows. Each day runs in
+	// its own transaction. When dryRun is true the rollup runs but the
+	// raw rows are NOT deleted. Pure analytics maintenance — never touches
+	// credit/quota tables.
+	RollupAndPruneUsage(ctx context.Context, retentionDays int, dryRun bool) (store.UsageRollupResult, error)
 	// ListProviderStats aggregates usage_ledger rows since `since` by
 	// router_model prefix. Used by the admin Provider Stats page.
 	ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow

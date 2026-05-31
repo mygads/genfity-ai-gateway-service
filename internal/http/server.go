@@ -158,6 +158,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		r.Post("/sync/customer-entitlements", syncHandler.SyncCustomerEntitlements)
 		r.Post("/sync/customer-balance", syncHandler.SyncCustomerBalance)
 		r.Post("/sync/replay-usage-debits", syncHandler.ReplayUsageDebits)
+		r.Post("/maintenance/rollup-usage", syncHandler.RollupUsage)
 		r.Post("/sync/model-credit-costs", syncHandler.SyncModelCreditCosts)
 		r.Post("/sync/models", syncHandler.SyncModels)
 		r.Post("/sync/payg-topup-rates", syncHandler.SyncPaygTopupRates)

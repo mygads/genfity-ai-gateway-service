@@ -294,6 +294,19 @@ type BillingModeUsageRow struct {
 	CreditsUsed  string `json:"credits_used"`
 }
 
+// UsageRollupResult summarizes one run of the rollup+prune maintenance
+// job: which days were rolled into usage_daily_rollup and how many raw
+// usage_ledger rows were deleted. DryRun=true means rollup ran but no
+// rows were deleted.
+type UsageRollupResult struct {
+	DaysProcessed int      `json:"days_processed"`
+	RowsRolledUp  int64    `json:"rows_rolled_up"`
+	RowsDeleted   int64    `json:"rows_deleted"`
+	Days          []string `json:"days,omitempty"`
+	DryRun        bool     `json:"dry_run"`
+	RetentionDays int      `json:"retention_days"`
+}
+
 // StatusBreakdownRow surfaces success/error counts plus an explicit
 // error_code histogram so admins can scan for misbehaving providers
 // or auth/quota issues without paging through the logs modal.

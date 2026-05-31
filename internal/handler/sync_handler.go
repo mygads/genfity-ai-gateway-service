@@ -124,6 +124,33 @@ func (h *SyncHandler) ReplayUsageDebits(w http.ResponseWriter, r *http.Request) 
 	respondJSON(w, http.StatusOK, result)
 }
 
+// RollupUsage rolls usage_ledger days older than the retention window
+// into usage_daily_rollup and prunes the raw rows. Defaults: retention
+// 7 days, deletes after rollup. Query params:
+//   - retention_days: int (default 7)
+//   - dry_run: "true" rolls up but keeps raw rows (verification)
+// Pure analytics maintenance — never touches credit/quota state.
+func (h *SyncHandler) RollupUsage(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	retentionDays := 7
+	if raw := query.Get("retention_days"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			respondError(w, http.StatusBadRequest, "invalid_retention_days")
+			return
+		}
+		retentionDays = parsed
+	}
+	dryRun := query.Get("dry_run") == "true"
+
+	result, err := h.sync.RollupAndPruneUsage(r.Context(), retentionDays, dryRun)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
 func (h *SyncHandler) SyncModelCreditCosts(w http.ResponseWriter, r *http.Request) {
 	var payload []store.ModelCreditCost
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {

@@ -191,6 +191,13 @@ func (s *UsageService) CreditBalances(ctx context.Context) []store.CreditBalance
 	return s.store.ListCreditBalances(ctx)
 }
 
+// RollupAndPruneUsage rolls usage_ledger days older than retentionDays
+// into usage_daily_rollup and prunes the raw rows. Pure analytics
+// maintenance — see store.RollupAndPruneUsage.
+func (s *UsageService) RollupAndPruneUsage(ctx context.Context, retentionDays int, dryRun bool) (store.UsageRollupResult, error) {
+	return s.store.RollupAndPruneUsage(ctx, retentionDays, dryRun)
+}
+
 // Analytics facades — power the admin /admin/usage/analytics endpoint.
 // Each one is a thin pass-through; the heavy lifting is in the store.
 func (s *UsageService) Timeseries(ctx context.Context, since time.Time, bucket string) []store.UsageTimeseriesPoint {

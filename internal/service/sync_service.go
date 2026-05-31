@@ -90,6 +90,13 @@ func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, ba
 	return err
 }
 
+// RollupAndPruneUsage rolls usage_ledger days older than retentionDays
+// into usage_daily_rollup and prunes the raw rows (unless dryRun). Pure
+// analytics maintenance — never touches credit/quota state.
+func (s *SyncService) RollupAndPruneUsage(ctx context.Context, retentionDays int, dryRun bool) (store.UsageRollupResult, error) {
+	return s.store.RollupAndPruneUsage(ctx, retentionDays, dryRun)
+}
+
 type ReplayUsageDebitsInput struct {
 	UserID string
 	Since  time.Time

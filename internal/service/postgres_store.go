@@ -1647,12 +1647,151 @@ func (s *PostgresStore) ListUsageByBillingModeSince(ctx context.Context, userID 
 	return items
 }
 
+// RollupAndPruneUsage rolls every UTC day older than retentionDays that
+// still has raw usage_ledger rows into usage_daily_rollup, then (unless
+// dryRun) deletes those raw rows. Each day is handled in its own
+// transaction so a crash mid-run never double-counts (the UPSERT is
+// idempotent) or loses a day. Pure analytics maintenance — it reads only
+// usage_ledger and writes only usage_daily_rollup; credit/quota tables
+// are never touched.
+func (s *PostgresStore) RollupAndPruneUsage(ctx context.Context, retentionDays int, dryRun bool) (store.UsageRollupResult, error) {
+	if retentionDays <= 0 {
+		retentionDays = 7
+	}
+	result := store.UsageRollupResult{DryRun: dryRun, RetentionDays: retentionDays}
+
+	// Cutoff = start of (today - retentionDays) in UTC. Any day strictly
+	// before this cutoff is eligible. We compute it in SQL so the boundary
+	// matches the date_trunc used for the rollup grain.
+	cutoffSQL := fmt.Sprintf("(date_trunc('day', now() AT TIME ZONE 'UTC') - interval '%d days')", retentionDays)
+
+	// Find distinct UTC days with raw rows older than the cutoff, oldest
+	// first so a partial run always makes forward progress.
+	dayRows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT date_trunc('day', started_at AT TIME ZONE 'UTC')::date AS day
+		FROM ai_gateway.usage_ledger
+		WHERE started_at < `+cutoffSQL+`
+		ORDER BY day ASC`)
+	if err != nil {
+		return result, err
+	}
+	var days []time.Time
+	for dayRows.Next() {
+		var d time.Time
+		if err := dayRows.Scan(&d); err != nil {
+			dayRows.Close()
+			return result, err
+		}
+		days = append(days, d)
+	}
+	dayRows.Close()
+	if err := dayRows.Err(); err != nil {
+		return result, err
+	}
+
+	for _, day := range days {
+		rolled, deleted, err := s.rollupOneDay(ctx, day, dryRun)
+		if err != nil {
+			// Stop on first error; days already committed stay done, and
+			// the idempotent UPSERT makes a re-run of this day safe.
+			return result, fmt.Errorf("rollup day %s: %w", day.Format("2006-01-02"), err)
+		}
+		result.DaysProcessed++
+		result.RowsRolledUp += rolled
+		result.RowsDeleted += deleted
+		result.Days = append(result.Days, day.Format("2006-01-02"))
+	}
+	return result, nil
+}
+
+// rollupOneDay aggregates one UTC day's raw usage_ledger rows into
+// usage_daily_rollup and (unless dryRun) deletes them, all in one
+// transaction. Returns (rawRowsAggregated, rawRowsDeleted).
+func (s *PostgresStore) rollupOneDay(ctx context.Context, day time.Time, dryRun bool) (int64, int64, error) {
+	dayStart := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Idempotent UPSERT: re-running a day overwrites (not adds to) the
+	// rollup row with a freshly computed SUM over the raw rows, so a retry
+	// after a crash between UPSERT and DELETE cannot double-count. The
+	// dimension tuple is the PK; empty string stands in for absent dims so
+	// they participate in the unique key.
+	upsert := `
+		INSERT INTO ai_gateway.usage_daily_rollup (
+			day, genfity_user_id, public_model, billing_mode, status,
+			pricing_group, router_prefix, error_code,
+			request_count, input_tokens, output_tokens, total_tokens,
+			total_cost, amount_credits, updated_at
+		)
+		SELECT
+			$1::date AS day,
+			COALESCE(genfity_user_id, '') ,
+			COALESCE(public_model, ''),
+			COALESCE(billing_mode, ''),
+			COALESCE(status, ''),
+			COALESCE(metadata->>'pricing_group', ''),
+			COALESCE(NULLIF(split_part(router_model, '/', 1), ''), 'unknown'),
+			COALESCE(error_code, ''),
+			COUNT(*)::bigint,
+			COALESCE(SUM(prompt_tokens), 0)::bigint,
+			COALESCE(SUM(completion_tokens), 0)::bigint,
+			COALESCE(SUM(total_tokens), 0)::bigint,
+			COALESCE(SUM(total_cost), 0)::numeric(18,6),
+			COALESCE(SUM(amount_credits), 0)::numeric(18,4),
+			now()
+		FROM ai_gateway.usage_ledger
+		WHERE started_at >= $2 AND started_at < $3
+		GROUP BY 1,2,3,4,5,6,7,8
+		ON CONFLICT (day, genfity_user_id, public_model, billing_mode, status, pricing_group, router_prefix, error_code)
+		DO UPDATE SET
+			request_count  = EXCLUDED.request_count,
+			input_tokens   = EXCLUDED.input_tokens,
+			output_tokens  = EXCLUDED.output_tokens,
+			total_tokens   = EXCLUDED.total_tokens,
+			total_cost     = EXCLUDED.total_cost,
+			amount_credits = EXCLUDED.amount_credits,
+			updated_at     = now()`
+	if _, err := tx.Exec(ctx, upsert, dayStart, dayStart, dayEnd); err != nil {
+		return 0, 0, err
+	}
+
+	// Count the raw rows for this day (reported as rolled-up).
+	var rawCount int64
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*)::bigint FROM ai_gateway.usage_ledger WHERE started_at >= $1 AND started_at < $2`,
+		dayStart, dayEnd,
+	).Scan(&rawCount); err != nil {
+		return 0, 0, err
+	}
+
+	var deleted int64
+	if !dryRun {
+		cmd, err := tx.Exec(ctx,
+			`DELETE FROM ai_gateway.usage_ledger WHERE started_at >= $1 AND started_at < $2`,
+			dayStart, dayEnd)
+		if err != nil {
+			return 0, 0, err
+		}
+		deleted = cmd.RowsAffected()
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, err
+	}
+	return rawCount, deleted, nil
+}
+
 func (s *PostgresStore) ListProviderStats(ctx context.Context, since time.Time) []store.ProviderStatsRow {
 	query := `
 		SELECT
 			COALESCE(NULLIF(split_part(router_model, '/', 1), ''), 'unknown') AS prefix,
-			COUNT(*)::bigint AS total_count,
-			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
+			COUNT(*)::bigint AS total_count,			COUNT(*) FILTER (WHERE status = 'success')::bigint AS success_count,
 			COUNT(*) FILTER (WHERE status != 'success')::bigint AS error_count
 		FROM ai_gateway.usage_ledger
 		WHERE ($1::timestamptz IS NULL OR started_at >= $1)
