@@ -1532,9 +1532,29 @@ func (s *PostgresStore) ListUsageLogs(ctx context.Context, f store.UsageLogFilte
 
 	whereSQL := strings.Join(conds, " AND ")
 
+	// Count: with no filters (the common "Semua" view), an exact COUNT(*)
+	// is a full O(n) scan that grows with the table (~90 ms at 190k rows
+	// and climbing). The UI only needs a page-count hint, so use Postgres'
+	// planner estimate (pg_class.reltuples, kept fresh by autovacuum) —
+	// effectively instant. With any filter applied we keep the exact count;
+	// those queries are indexed/selective and cheap.
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*)::int FROM ai_gateway.usage_ledger WHERE `+whereSQL, args...).Scan(&total); err != nil {
-		return nil, 0, err
+	if len(args) == 0 {
+		var est float64
+		if err := s.pool.QueryRow(ctx,
+			`SELECT reltuples FROM pg_class WHERE oid = 'ai_gateway.usage_ledger'::regclass`,
+		).Scan(&est); err != nil || est < 0 {
+			// Estimate unavailable (e.g. never analyzed) — fall back to exact.
+			if err2 := s.pool.QueryRow(ctx, `SELECT COUNT(*)::int FROM ai_gateway.usage_ledger`).Scan(&total); err2 != nil {
+				return nil, 0, err2
+			}
+		} else {
+			total = int(est)
+		}
+	} else {
+		if err := s.pool.QueryRow(ctx, `SELECT COUNT(*)::int FROM ai_gateway.usage_ledger WHERE `+whereSQL, args...).Scan(&total); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	limitArg := addArg(limit)
