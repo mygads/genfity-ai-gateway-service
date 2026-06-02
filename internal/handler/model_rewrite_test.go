@@ -6,13 +6,16 @@ import (
 )
 
 func TestRewriteResponseModel_OpenAINonStream(t *testing.T) {
-	body := []byte(`{"id":"x","object":"chat.completion","model":"minimax-m2.5","choices":[{"message":{"content":"ok"}}]}`)
+	body := []byte(`{"id":"x","object":"chat.completion","model":"minimax-m2.5","choices":[{"message":{"content":"ok","reasoning_content":"hidden provider thoughts"}}]}`)
 	out := rewriteResponseModel(body, 200, "genfity/claude-opus-4.7")
 	if !strings.Contains(string(out), `"genfity/claude-opus-4.7"`) {
 		t.Fatalf("expected public model in body, got %s", out)
 	}
 	if strings.Contains(string(out), "minimax") {
 		t.Fatalf("upstream model leaked: %s", out)
+	}
+	if strings.Contains(string(out), "reasoning_content") || strings.Contains(string(out), "hidden provider thoughts") {
+		t.Fatalf("reasoning_content leaked: %s", out)
 	}
 }
 
@@ -47,13 +50,27 @@ func TestRewriteResponseModel_NoOpCases(t *testing.T) {
 }
 
 func TestRewriteSSEChunkModel_OpenAIChunk(t *testing.T) {
-	chunk := []byte("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"minimax-m2.5\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+	chunk := []byte("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"minimax-m2.5\",\"choices\":[{\"delta\":{\"content\":\"hi\",\"reasoning_content\":\"hidden\"}}]}\n\n")
 	out := rewriteSSEChunkModel(chunk, "genfity/claude-opus-4.7")
 	if !strings.Contains(string(out), "genfity/claude-opus-4.7") || strings.Contains(string(out), "minimax") {
 		t.Fatalf("SSE rewrite failed or leaked: %q", out)
 	}
+	if strings.Contains(string(out), "reasoning_content") || strings.Contains(string(out), "hidden") {
+		t.Fatalf("SSE reasoning_content leaked: %q", out)
+	}
 	if !strings.HasSuffix(string(out), "\n\n") {
 		t.Fatalf("SSE framing (trailing newlines) not preserved: %q", out)
+	}
+}
+
+func TestSanitizeErrorBodyMasksProviderCatalogError(t *testing.T) {
+	body := []byte(`{"error":{"code":"invalid_request_error","message":"Model \"deepseek-v4-pro\" is not available in current public model catalog.","type":"invalid_request_error","upstream_status":400}}`)
+	out := sanitizeErrorBody(body, 400)
+	if strings.Contains(string(out), "deepseek") || strings.Contains(string(out), "model catalog") {
+		t.Fatalf("provider error leaked: %s", out)
+	}
+	if !strings.Contains(string(out), customerGatewayBusyMessage) {
+		t.Fatalf("safe message missing: %s", out)
 	}
 }
 

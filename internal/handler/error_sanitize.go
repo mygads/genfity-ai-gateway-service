@@ -3,134 +3,102 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
-	"regexp"
 	"strings"
 )
 
-// internalPatterns matches strings that reveal internal infrastructure details.
-var internalPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)litellm\.\w+`),
-	regexp.MustCompile(`(?i)MidStreamFallback\w*`),
-	regexp.MustCompile(`(?i)All credentials for model\s+\S+`),
-	regexp.MustCompile(`(?i)are cooling down`),
-	regexp.MustCompile(`(?i)OpenAI?Exception`),
-	regexp.MustCompile(`(?i)APIConnectionError:\s*\S+`),
-	regexp.MustCompile(`(?i)providers?=\S+`),
-	regexp.MustCompile(`(?i)model=\S+`),
-	regexp.MustCompile(`(?i)/v0/management/\S+`),
-	regexp.MustCompile(`(?i)mtr/\S+`),
-	regexp.MustCompile(`(?i)via provider\s+\S+`),
-	regexp.MustCompile(`(?i)openai_compatible`),
-	regexp.MustCompile(`(?i)Original exception:`),
-}
-
-// internalKeywords are substrings that indicate an internal error leaked.
-var internalKeywords = []string{
-	"litellm",
-	"MidStreamFallback",
-	"All credentials for model",
-	"cooling down",
-	"OpenAIException",
-	"OpenAlException",
-	"APIConnectionError",
-	"/v0/management/",
-	"mtr/",
-	"via provider",
-	"openai_compatible",
-	"Original exception",
-	"cliproxy",
-	"CLIProxy",
-}
-
-func containsInternalLeak(s string) bool {
-	lower := strings.ToLower(s)
-	for _, kw := range internalKeywords {
-		if strings.Contains(lower, strings.ToLower(kw)) {
-			return true
-		}
-	}
-	return false
-}
+const customerGatewayBusyMessage = "The requested model/provider is currently experiencing high traffic. Please try again later."
 
 func sanitizedMessageForStatus(statusCode int) string {
-	switch {
-	case statusCode == 429:
-		return "Rate limit exceeded. Please retry after a short delay."
-	case statusCode == 503:
-		return "Service temporarily unavailable. Please retry shortly."
-	case statusCode >= 500:
-		return "An upstream error occurred. Please retry your request."
-	case statusCode == 401 || statusCode == 403:
-		return "Authentication or permission error."
-	default:
-		return "An error occurred while processing your request."
-	}
+	return customerGatewayBusyMessage
 }
 
-// sanitizeErrorBody inspects a JSON error response body and replaces internal
-// details with a safe customer-facing message. Non-error bodies (successful
-// responses) are returned unchanged.
+// sanitizeErrorBody replaces ALL error response bodies (4xx/5xx) with a
+// generic customer-facing message. By the time we reach writeUpstreamResponse
+// the request has already passed through gateway-level validation (respondError
+// handles gateway errors before contacting upstreams). Every 4xx/5xx body that
+// arrives here came from a third-party provider/router and its message must
+// never be shown to the customer — it could leak provider names, internal
+// routing, or infrastructure details.
+//
+// Prior approach was a blacklist (block litellm/CLIProxy/etc.) but new provider
+// names constantly leak through. This whitelist approach is exhaustive:
+// nothing survives unless explicitly marked safe.
 func sanitizeErrorBody(body []byte, statusCode int) []byte {
 	if len(body) == 0 {
-		return body
-	}
-
-	// Only sanitize error responses (4xx/5xx).
-	if statusCode >= 200 && statusCode < 400 {
-		return body
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		// Not JSON — check raw text for leaks.
-		if containsInternalLeak(string(body)) {
+		if statusCode < 200 || statusCode >= 400 {
 			return buildSafeErrorJSON(statusCode, sanitizedMessageForStatus(statusCode))
 		}
 		return body
 	}
 
-	errField, hasError := payload["error"]
-	if !hasError {
+	// Only sanitize error responses.
+	if statusCode >= 200 && statusCode < 400 {
 		return body
 	}
 
-	switch errObj := errField.(type) {
-	case map[string]any:
-		msg, _ := errObj["message"].(string)
-		if containsInternalLeak(msg) {
-			errObj["message"] = sanitizedMessageForStatus(statusCode)
-			// Remove provider/model fields that leak internals.
-			delete(errObj, "provider")
-			delete(errObj, "model")
-			payload["error"] = errObj
-			sanitized, err := json.Marshal(payload)
-			if err != nil {
-				return buildSafeErrorJSON(statusCode, sanitizedMessageForStatus(statusCode))
-			}
-			return sanitized
-		}
-	case string:
-		if containsInternalLeak(errObj) {
-			payload["error"] = sanitizedMessageForStatus(statusCode)
-			sanitized, err := json.Marshal(payload)
-			if err != nil {
-				return buildSafeErrorJSON(statusCode, sanitizedMessageForStatus(statusCode))
-			}
-			return sanitized
-		}
+	// Parse the body. If it looks like JSON with an error key, rewrite it
+	// entirely. If we can't parse it, replace it with a safe error envelope.
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return buildSafeErrorJSON(statusCode, sanitizedMessageForStatus(statusCode))
 	}
 
-	return body
+	// If the body has an error field, blind-replace it. No content-based
+	// filtering — all provider error text is unsafe by default.
+	if _, hasError := payload["error"]; hasError {
+		payload["error"] = map[string]any{
+			"message": sanitizedMessageForStatus(statusCode),
+			"type":    errorTypeForStatus(statusCode),
+			"code":    errorCodeForStatus(statusCode),
+		}
+		// Drop any other keys that might leak internals.
+		for k := range payload {
+			if k != "error" {
+				delete(payload, k)
+			}
+		}
+		sanitized, err := json.Marshal(payload)
+		if err != nil {
+			return buildSafeErrorJSON(statusCode, sanitizedMessageForStatus(statusCode))
+		}
+		return sanitized
+	}
+
+	// Non-standard body: replace entirely.
+	return buildSafeErrorJSON(statusCode, sanitizedMessageForStatus(statusCode))
 }
 
-// sanitizeSSEChunk inspects a single SSE data line for internal error leaks.
-// Returns the original chunk if safe, or a sanitized version if it leaks.
+func errorTypeForStatus(statusCode int) string {
+	switch {
+	case statusCode == 429:
+		return "rate_limit_error"
+	case statusCode == 401 || statusCode == 403:
+		return "authentication_error"
+	default:
+		return "server_error"
+	}
+}
+
+func errorCodeForStatus(statusCode int) string {
+	switch {
+	case statusCode == 429:
+		return "rate_limit_exceeded"
+	case statusCode == 401 || statusCode == 403:
+		return "auth_error"
+	default:
+		return "upstream_error"
+	}
+}
+
+// sanitizeSSEChunk rewrites any SSE data line that carries an error payload
+// so provider details never leak in streaming responses. Non-error lines and
+// non-JSON data lines pass through unchanged.
 func sanitizeSSEChunk(chunk []byte) []byte {
-	if !containsInternalLeak(string(chunk)) {
+	// Fast-path: skip chunks that don't carry an error key at all.
+	if !bytes.Contains(chunk, []byte(`"error"`)) {
 		return chunk
 	}
 
-	// Try to parse as SSE lines and sanitize data: payloads.
 	lines := strings.Split(string(chunk), "\n")
 	var result strings.Builder
 	modified := false
@@ -156,23 +124,6 @@ func sanitizeSSEChunk(chunk []byte) []byte {
 					continue
 				}
 			}
-
-			// Raw data line contains leak but isn't parseable JSON.
-			if containsInternalLeak(data) {
-				modified = true
-				safePayload := map[string]any{
-					"error": map[string]any{
-						"message": "An upstream error occurred. Please retry your request.",
-						"type":    "server_error",
-						"code":    "upstream_error",
-					},
-				}
-				sanitized, _ := json.Marshal(safePayload)
-				result.WriteString("data: ")
-				result.Write(sanitized)
-				result.WriteString("\n")
-				continue
-			}
 		}
 
 		result.WriteString(line)
@@ -182,7 +133,6 @@ func sanitizeSSEChunk(chunk []byte) []byte {
 	if !modified {
 		return chunk
 	}
-	// Trim trailing extra newline added by loop.
 	out := result.String()
 	if len(out) > 0 && out[len(out)-1] == '\n' && (len(chunk) == 0 || chunk[len(chunk)-1] != '\n') {
 		out = out[:len(out)-1]
@@ -190,39 +140,55 @@ func sanitizeSSEChunk(chunk []byte) []byte {
 	return []byte(out)
 }
 
-// sanitizePayloadInPlace modifies a parsed JSON payload to remove internal leaks.
+// sanitizePayloadInPlace rewrites any error payload to a safe customer-facing
+// message. All upstream/provider error text is unsafe by default.
 // Returns true if modifications were made.
 func sanitizePayloadInPlace(payload map[string]any) bool {
 	if payload == nil {
 		return false
 	}
 
-	errField, hasError := payload["error"]
+	_, hasError := payload["error"]
 	if !hasError {
 		return false
 	}
 
-	switch errObj := errField.(type) {
-	case map[string]any:
-		msg, _ := errObj["message"].(string)
-		if containsInternalLeak(msg) {
-			errObj["message"] = "An upstream error occurred. Please retry your request."
-			delete(errObj, "provider")
-			delete(errObj, "model")
-			payload["error"] = errObj
-			return true
-		}
-	case string:
-		if containsInternalLeak(errObj) {
-			payload["error"] = map[string]any{
-				"message": "An upstream error occurred. Please retry your request.",
-				"type":    "server_error",
-				"code":    "upstream_error",
-			}
-			return true
-		}
+	// Blind-replace: any error in a streaming chunk came from a provider
+	// and must be masked. No content-based filtering.
+	payload["error"] = map[string]any{
+		"message": "An upstream error occurred. Please retry your request.",
+		"type":    "server_error",
+		"code":    "upstream_error",
 	}
-	return false
+	return true
+}
+
+func stripReasoningContentInPlace(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		changed := false
+		for key, nested := range typed {
+			if strings.EqualFold(key, "reasoning_content") {
+				delete(typed, key)
+				changed = true
+				continue
+			}
+			if stripReasoningContentInPlace(nested) {
+				changed = true
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for _, nested := range typed {
+			if stripReasoningContentInPlace(nested) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
 }
 
 // rewriteModelInPayload sets the "model" field of a parsed response payload
@@ -250,23 +216,26 @@ func rewriteModelInPayload(payload map[string]any, publicModel string) bool {
 	return changed
 }
 
-// rewriteResponseModel rewrites the "model" field in a successful response
-// body to the public model the customer asked for. Only touches 2xx/3xx
-// JSON bodies; returns the body unchanged when publicModel is empty, the
-// body has no "model" key, or it isn't parseable JSON. Error bodies are
-// left to sanitizeErrorBody.
+// rewriteResponseModel rewrites successful response bodies so customer-facing
+// payloads never expose combo internals. It forces model fields back to the
+// public model name and strips provider-specific reasoning_content fields.
+// Error bodies are left to sanitizeErrorBody.
 func rewriteResponseModel(body []byte, statusCode int, publicModel string) []byte {
-	if publicModel == "" || len(body) == 0 || statusCode >= 400 {
+	if len(body) == 0 || statusCode >= 400 {
 		return body
 	}
-	if !bytes.Contains(body, []byte(`"model"`)) {
+	if !bytes.Contains(body, []byte(`"model"`)) && !bytes.Contains(body, []byte(`"reasoning_content"`)) {
 		return body
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body
 	}
-	if !rewriteModelInPayload(payload, publicModel) {
+	changed := rewriteModelInPayload(payload, publicModel)
+	if stripReasoningContentInPlace(payload) {
+		changed = true
+	}
+	if !changed {
 		return body
 	}
 	out, err := json.Marshal(payload)
@@ -278,10 +247,10 @@ func rewriteResponseModel(body []byte, statusCode int, publicModel string) []byt
 
 // rewriteSSEChunkModel rewrites the "model" field in each SSE data line of a
 // streaming chunk to the public model name. Mirrors sanitizeSSEChunk's line
-// handling exactly so SSE framing is preserved. Cheap fast-path: skips the
-// whole chunk when it carries no "model" key.
+// handling exactly so SSE framing is preserved. It also strips
+// reasoning_content from any JSON SSE data event.
 func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
-	if publicModel == "" || !bytes.Contains(chunk, []byte(`"model"`)) {
+	if !bytes.Contains(chunk, []byte(`"model"`)) && !bytes.Contains(chunk, []byte(`"reasoning_content"`)) {
 		return chunk
 	}
 	lines := strings.Split(string(chunk), "\n")
@@ -294,7 +263,11 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 			if data != "" && data != "[DONE]" {
 				var payload map[string]any
 				if err := json.Unmarshal([]byte(data), &payload); err == nil {
-					if rewriteModelInPayload(payload, publicModel) {
+					changed := rewriteModelInPayload(payload, publicModel)
+					if stripReasoningContentInPlace(payload) {
+						changed = true
+					}
+					if changed {
 						modified = true
 						rewritten, _ := json.Marshal(payload)
 						result.WriteString("data: ")
@@ -318,7 +291,8 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 	return []byte(out)
 }
 
-func buildSafeErrorJSON(statusCode int, message string) []byte {	errType := "server_error"
+func buildSafeErrorJSON(statusCode int, message string) []byte {
+	errType := "server_error"
 	code := "upstream_error"
 	switch {
 	case statusCode == 429:
