@@ -1076,7 +1076,7 @@ type runtimeReservation struct {
 	// PaygUSD is the reserved USD amount for the payg_topup schema
 	// (actual-cost per-1M pricing). Exactly one of these is non-zero
 	// when BillingMode != "unlimited".
-	BillingMode    string  // "unlimited" | "credit_package" | "payg_topup" | ""
+	BillingMode    string // "unlimited" | "credit_package" | "payg_topup" | ""
 	RequestCredits float64
 	PaygUSD        float64
 }
@@ -1168,7 +1168,26 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		if (group != "unlimited" && group != "unlimited_plan") || !modelCoveredByUnlimited(subscription, model) {
 			return runtimeReservation{}, http.StatusPaymentRequired, "subscription_not_covering_model"
 		}
-		return runtimeReservation{BillingMode: "unlimited"}, 0, ""
+
+		res := runtimeReservation{BillingMode: "unlimited"}
+		limit := quotaLimit(subscription)
+		if limit > 0 {
+			if !estimate.Bounded {
+				return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
+			}
+			periodStart, periodEnd := activePeriod(subscription.Entitlement)
+			if err := h.usage.ReserveQuotaTokens(ctx, apiKey.GenfityUserID, apiKey.GenfityTenantID, periodStart, periodEnd, estimate.TotalTokens, limit); err != nil {
+				if errors.Is(err, service.ErrQuotaExceeded) {
+					return runtimeReservation{}, http.StatusTooManyRequests, "quota_exceeded"
+				}
+				return runtimeReservation{}, http.StatusInternalServerError, "quota_reservation_failed"
+			}
+			res.PeriodStart = periodStart
+			res.PeriodEnd = periodEnd
+			res.QuotaTokens = estimate.TotalTokens
+		}
+
+		return res, 0, ""
 
 	case "credit":
 		fullModelID := model.PublicModel
@@ -1427,22 +1446,6 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 	}
 
 	var reservation runtimeReservation
-	limit := quotaLimit(subscription)
-	if limit > 0 && subscription != nil && subscription.Entitlement != nil {
-		if !estimate.Bounded {
-			return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
-		}
-		periodStart, periodEnd := activePeriod(subscription.Entitlement)
-		if err := h.usage.ReserveQuotaTokens(ctx, apiKey.GenfityUserID, apiKey.GenfityTenantID, periodStart, periodEnd, estimate.TotalTokens, limit); err != nil {
-			if errors.Is(err, service.ErrQuotaExceeded) {
-				return runtimeReservation{}, http.StatusTooManyRequests, "quota_exceeded"
-			}
-			return runtimeReservation{}, http.StatusInternalServerError, "quota_reservation_failed"
-		}
-		reservation.PeriodStart = periodStart
-		reservation.PeriodEnd = periodEnd
-		reservation.QuotaTokens = estimate.TotalTokens
-	}
 	if pricingGroup(subscription) == "credit_package" {
 		if balanceAmount(subscription) <= 0 {
 			if reservation.QuotaTokens > 0 {
