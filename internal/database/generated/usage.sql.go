@@ -28,6 +28,8 @@ INSERT INTO ai_gateway.usage_ledger (
     completion_tokens,
     total_tokens,
     cached_tokens,
+    cache_read_input_tokens,
+    cache_creation_input_tokens,
     reasoning_tokens,
     input_cost,
     output_cost,
@@ -40,34 +42,36 @@ INSERT INTO ai_gateway.usage_ledger (
     metadata
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
 )
-RETURNING id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost, output_cost, total_cost, status, error_code, latency_ms, started_at, finished_at, metadata
+RETURNING id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, input_cost, output_cost, total_cost, status, error_code, latency_ms, started_at, finished_at, metadata
 `
 
 type CreateUsageLedgerEntryParams struct {
-	ID                 uuid.UUID          `json:"id"`
-	RequestID          string             `json:"request_id"`
-	GenfityUserID      string             `json:"genfity_user_id"`
-	GenfityTenantID    *string            `json:"genfity_tenant_id"`
-	ApiKeyID           pgtype.UUID        `json:"api_key_id"`
-	PublicModel        string             `json:"public_model"`
-	RouterModel        *string            `json:"router_model"`
-	RouterInstanceCode *string            `json:"router_instance_code"`
-	PromptTokens       int64              `json:"prompt_tokens"`
-	CompletionTokens   int64              `json:"completion_tokens"`
-	TotalTokens        int64              `json:"total_tokens"`
-	CachedTokens       int64              `json:"cached_tokens"`
-	ReasoningTokens    int64              `json:"reasoning_tokens"`
-	InputCost          pgtype.Numeric     `json:"input_cost"`
-	OutputCost         pgtype.Numeric     `json:"output_cost"`
-	TotalCost          pgtype.Numeric     `json:"total_cost"`
-	Status             string             `json:"status"`
-	ErrorCode          *string            `json:"error_code"`
-	LatencyMs          *int32             `json:"latency_ms"`
-	StartedAt          time.Time          `json:"started_at"`
-	FinishedAt         pgtype.Timestamptz `json:"finished_at"`
-	Metadata           json.RawMessage    `json:"metadata"`
+	ID                       uuid.UUID          `json:"id"`
+	RequestID                string             `json:"request_id"`
+	GenfityUserID            string             `json:"genfity_user_id"`
+	GenfityTenantID          *string            `json:"genfity_tenant_id"`
+	ApiKeyID                 pgtype.UUID        `json:"api_key_id"`
+	PublicModel              string             `json:"public_model"`
+	RouterModel              *string            `json:"router_model"`
+	RouterInstanceCode       *string            `json:"router_instance_code"`
+	PromptTokens             int64              `json:"prompt_tokens"`
+	CompletionTokens         int64              `json:"completion_tokens"`
+	TotalTokens              int64              `json:"total_tokens"`
+	CachedTokens             int64              `json:"cached_tokens"`
+	CacheReadInputTokens     int64              `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64              `json:"cache_creation_input_tokens"`
+	ReasoningTokens          int64              `json:"reasoning_tokens"`
+	InputCost                pgtype.Numeric     `json:"input_cost"`
+	OutputCost               pgtype.Numeric     `json:"output_cost"`
+	TotalCost                pgtype.Numeric     `json:"total_cost"`
+	Status                   string             `json:"status"`
+	ErrorCode                *string            `json:"error_code"`
+	LatencyMs                *int32             `json:"latency_ms"`
+	StartedAt                time.Time          `json:"started_at"`
+	FinishedAt               pgtype.Timestamptz `json:"finished_at"`
+	Metadata                 json.RawMessage    `json:"metadata"`
 }
 
 func (q *Queries) CreateUsageLedgerEntry(ctx context.Context, arg CreateUsageLedgerEntryParams) (AiGatewayUsageLedger, error) {
@@ -84,6 +88,8 @@ func (q *Queries) CreateUsageLedgerEntry(ctx context.Context, arg CreateUsageLed
 		arg.CompletionTokens,
 		arg.TotalTokens,
 		arg.CachedTokens,
+		arg.CacheReadInputTokens,
+		arg.CacheCreationInputTokens,
 		arg.ReasoningTokens,
 		arg.InputCost,
 		arg.OutputCost,
@@ -109,6 +115,8 @@ func (q *Queries) CreateUsageLedgerEntry(ctx context.Context, arg CreateUsageLed
 		&i.CompletionTokens,
 		&i.TotalTokens,
 		&i.CachedTokens,
+		&i.CacheReadInputTokens,
+		&i.CacheCreationInputTokens,
 		&i.ReasoningTokens,
 		&i.InputCost,
 		&i.OutputCost,
@@ -124,7 +132,7 @@ func (q *Queries) CreateUsageLedgerEntry(ctx context.Context, arg CreateUsageLed
 }
 
 const listUsageByUser = `-- name: ListUsageByUser :many
-SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, reasoning_tokens, input_cost, output_cost, total_cost, status, error_code, latency_ms, started_at, finished_at, metadata
+SELECT id, request_id, genfity_user_id, genfity_tenant_id, api_key_id, public_model, router_model, router_instance_code, prompt_tokens, completion_tokens, total_tokens, cached_tokens, cache_read_input_tokens, cache_creation_input_tokens, reasoning_tokens, input_cost, output_cost, total_cost, status, error_code, latency_ms, started_at, finished_at, metadata
 FROM ai_gateway.usage_ledger
 WHERE genfity_user_id = $1
 ORDER BY started_at DESC
@@ -152,6 +160,8 @@ func (q *Queries) ListUsageByUser(ctx context.Context, genfityUserID string) ([]
 			&i.CompletionTokens,
 			&i.TotalTokens,
 			&i.CachedTokens,
+			&i.CacheReadInputTokens,
+			&i.CacheCreationInputTokens,
 			&i.ReasoningTokens,
 			&i.InputCost,
 			&i.OutputCost,

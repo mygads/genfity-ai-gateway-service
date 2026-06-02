@@ -546,29 +546,31 @@ func (h *AdminHandler) ListUsageLogs(w http.ResponseWriter, r *http.Request) {
 	enriched := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
 		entry := map[string]any{
-			"id":                    row.ID,
-			"request_id":            row.RequestID,
-			"genfity_user_id":       row.GenfityUserID,
-			"public_model":          row.PublicModel,
-			"router_model":          row.RouterModel,
-			"router_instance_code":  row.RouterInstanceCode,
-			"prompt_tokens":         row.PromptTokens,
-			"completion_tokens":     row.CompletionTokens,
-			"total_tokens":          row.TotalTokens,
-			"cached_tokens":         row.CachedTokens,
-			"reasoning_tokens":      row.ReasoningTokens,
-			"input_cost":            row.InputCost,
-			"output_cost":           row.OutputCost,
-			"total_cost":            row.TotalCost,
-			"billing_mode":          row.BillingMode,
-			"amount_credits":        row.AmountCredits,
-			"balance_after_credits": row.BalanceAfterCredits,
-			"balance_after_usd":     row.BalanceAfterUsd,
-			"status":                row.Status,
-			"error_code":            row.ErrorCode,
-			"latency_ms":            row.LatencyMS,
-			"started_at":            row.StartedAt,
-			"finished_at":           row.FinishedAt,
+			"id":                          row.ID,
+			"request_id":                  row.RequestID,
+			"genfity_user_id":             row.GenfityUserID,
+			"public_model":                row.PublicModel,
+			"router_model":                row.RouterModel,
+			"router_instance_code":        row.RouterInstanceCode,
+			"prompt_tokens":               row.PromptTokens,
+			"completion_tokens":           row.CompletionTokens,
+			"total_tokens":                row.TotalTokens,
+			"cached_tokens":               row.CachedTokens,
+			"cache_read_input_tokens":     row.CacheReadInputTokens,
+			"cache_creation_input_tokens": row.CacheCreationInputTokens,
+			"reasoning_tokens":            row.ReasoningTokens,
+			"input_cost":                  row.InputCost,
+			"output_cost":                 row.OutputCost,
+			"total_cost":                  row.TotalCost,
+			"billing_mode":                row.BillingMode,
+			"amount_credits":              row.AmountCredits,
+			"balance_after_credits":       row.BalanceAfterCredits,
+			"balance_after_usd":           row.BalanceAfterUsd,
+			"status":                      row.Status,
+			"error_code":                  row.ErrorCode,
+			"latency_ms":                  row.LatencyMS,
+			"started_at":                  row.StartedAt,
+			"finished_at":                 row.FinishedAt,
 		}
 		if row.APIKeyID != nil {
 			entry["api_key_id"] = row.APIKeyID.String()
@@ -626,9 +628,9 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 		TotalCost    string `json:"total_cost"`
 	}
 	type groupPayload struct {
-		PricingGroup string              `json:"pricing_group"`
-		Label        string              `json:"label"`
-		Totals       groupTotals         `json:"totals"`
+		PricingGroup string                  `json:"pricing_group"`
+		Label        string                  `json:"label"`
+		Totals       groupTotals             `json:"totals"`
 		Users        []store.UsageSummaryRow `json:"users"`
 	}
 
@@ -731,9 +733,9 @@ func (h *AdminHandler) ListUsageDashboard(w http.ResponseWriter, r *http.Request
 		},
 		"groups": groups,
 		"credit_summary": map[string]any{
-			"total_balance":   strconv.FormatFloat(totalCreditBalance, 'f', 4, 64),
-			"total_reserved":  strconv.FormatFloat(totalCreditUsed, 'f', 4, 64),
-			"user_balances":   cbList,
+			"total_balance":  strconv.FormatFloat(totalCreditBalance, 'f', 4, 64),
+			"total_reserved": strconv.FormatFloat(totalCreditUsed, 'f', 4, 64),
+			"user_balances":  cbList,
 		},
 	})
 }
@@ -817,24 +819,36 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 			s["days_remaining"] = days
 		}
 		limits := service.PlanLimitsFromSnapshot(sub.Plan)
+		quotaTokensMonthly := quotaLimitPtr(sub)
 		s["limits"] = map[string]any{
 			"rpm":                  limits.RPM,
 			"tpm":                  limits.TPM,
 			"rpd":                  limits.RPD,
 			"rpp":                  limits.MaxRequestsPerPeriod,
 			"concurrent":           limits.ConcurrentLimit,
-			"quota_tokens_monthly": ent.QuotaTokensMonthly,
+			"quota_tokens_monthly": quotaTokensMonthly,
 		}
 		if sub.Plan != nil {
 			s["plan_name"] = sub.Plan.DisplayName
 		}
 		// Live counters — read-only.
 		rpdUsed, rppUsed := 0, 0
+		var periodTokensUsed int64
 		if h.rateLimit != nil {
 			rpdUsed = h.rateLimit.GetPlanRPDCount(ctx, userID, ent.PlanCode)
 			rppUsed = h.rateLimit.GetRequestsPerPeriodCount(ctx, userID, periodKey(ent))
 		}
-		s["usage"] = map[string]any{"rpd_used": rpdUsed, "rpp_used": rppUsed}
+		if ent.PeriodStart != nil && ent.PeriodEnd != nil {
+			for _, row := range h.store.ListUsageByUser(ctx, userID) {
+				if row.Status != "success" || row.StartedAt.Before(*ent.PeriodStart) || row.StartedAt.After(*ent.PeriodEnd) {
+					continue
+				}
+				if row.BillingMode != nil && *row.BillingMode == "unlimited" {
+					periodTokensUsed += row.TotalTokens
+				}
+			}
+		}
+		s["usage"] = map[string]any{"rpd_used": rpdUsed, "rpp_used": rppUsed, "period_tokens_used": periodTokensUsed}
 		subSection = s
 	}
 
@@ -925,16 +939,16 @@ func (h *AdminHandler) ListUsageAnalytics(w http.ResponseWriter, r *http.Request
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
-		"range":             rangeParam,
-		"since":             since,
-		"bucket":            bucket,
-		"timeseries":        h.usage.Timeseries(r.Context(), since, bucket),
-		"top_models":        h.usage.TopModels(r.Context(), since, limit),
-		"billing_modes":     h.usage.BillingModeBreakdown(r.Context(), since),
-		"status_breakdown":  h.usage.StatusBreakdown(r.Context(), since),
-		"error_codes":       h.usage.ErrorCodeBreakdown(r.Context(), since, limit),
-		"providers":         h.usage.ProviderStats(r.Context(), since),
-		"latency":           h.usage.LatencyStats(r.Context(), since),
+		"range":            rangeParam,
+		"since":            since,
+		"bucket":           bucket,
+		"timeseries":       h.usage.Timeseries(r.Context(), since, bucket),
+		"top_models":       h.usage.TopModels(r.Context(), since, limit),
+		"billing_modes":    h.usage.BillingModeBreakdown(r.Context(), since),
+		"status_breakdown": h.usage.StatusBreakdown(r.Context(), since),
+		"error_codes":      h.usage.ErrorCodeBreakdown(r.Context(), since, limit),
+		"providers":        h.usage.ProviderStats(r.Context(), since),
+		"latency":          h.usage.LatencyStats(r.Context(), since),
 	})
 }
 

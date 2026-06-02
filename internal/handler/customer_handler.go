@@ -1,4 +1,4 @@
-﻿package handler
+package handler
 
 import (
 	"encoding/json"
@@ -101,6 +101,18 @@ func (h *CustomerHandler) UsageSummary(w http.ResponseWriter, r *http.Request) {
 
 func (h *CustomerHandler) Quota(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
+	if subscription, err := h.entitlements.CheckActiveSubscription(r.Context(), user.ID); err == nil && subscription != nil && subscription.Entitlement != nil {
+		resp := map[string]any{
+			"balance_snapshot": subscription.Entitlement.BalanceSnapshot,
+			"period_start":     subscription.Entitlement.PeriodStart,
+			"period_end":       subscription.Entitlement.PeriodEnd,
+		}
+		if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
+			resp["quota_tokens_monthly"] = *quotaTokensMonthly
+		}
+		respondJSON(w, http.StatusOK, resp)
+		return
+	}
 	entitlement, err := h.entitlements.GetByUser(r.Context(), user.ID)
 	if err != nil {
 		respondError(w, http.StatusNotFound, "subscription_not_found")
@@ -139,13 +151,15 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		"subscription": subscription.Entitlement,
 		"plan":         subscription.Plan,
 	}
+	if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
+		resp["quota_tokens_monthly"] = *quotaTokensMonthly
+	}
 	if subscription.Plan != nil {
 		resp["plan_code"] = subscription.Entitlement.PlanCode
 		resp["plan_name"] = subscription.Plan.DisplayName
 		resp["status"] = subscription.Entitlement.Status
 		resp["period_start"] = subscription.Entitlement.PeriodStart
 		resp["period_end"] = subscription.Entitlement.PeriodEnd
-		resp["quota_tokens_monthly"] = subscription.Plan.QuotaTokensMonthly
 		resp["rate_limit_rpm"] = subscription.Plan.RateLimitRPM
 		resp["rate_limit_tpm"] = subscription.Plan.RateLimitTPM
 		resp["rate_limit_rpd"] = subscription.Plan.RateLimitRPD

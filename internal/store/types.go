@@ -8,37 +8,37 @@ import (
 )
 
 type SubscriptionPlanSnapshot struct {
-	ID                   uuid.UUID       `json:"id"`
-	PlanCode             string          `json:"plan_code"`
-	DisplayName          string          `json:"display_name"`
-	Status               string          `json:"status"`
-	MonthlyPrice         string          `json:"monthly_price"`
-	Currency             string          `json:"currency"`
-	QuotaTokensMonthly   *int64          `json:"quota_tokens_monthly,omitempty"`
-	RateLimitRPM         *int32          `json:"rate_limit_rpm,omitempty"`
-	RateLimitTPM         *int32          `json:"rate_limit_tpm,omitempty"`
-	ConcurrentLimit      *int32          `json:"concurrent_limit,omitempty"`
+	ID                 uuid.UUID `json:"id"`
+	PlanCode           string    `json:"plan_code"`
+	DisplayName        string    `json:"display_name"`
+	Status             string    `json:"status"`
+	MonthlyPrice       string    `json:"monthly_price"`
+	Currency           string    `json:"currency"`
+	QuotaTokensMonthly *int64    `json:"quota_tokens_monthly,omitempty"`
+	RateLimitRPM       *int32    `json:"rate_limit_rpm,omitempty"`
+	RateLimitTPM       *int32    `json:"rate_limit_tpm,omitempty"`
+	ConcurrentLimit    *int32    `json:"concurrent_limit,omitempty"`
 	// MaxRequestsPerPeriod caps total requests in one entitlement period
 	// (period_start..period_end). NULL/0 = unlimited.
-	MaxRequestsPerPeriod *int32          `json:"max_requests_per_period,omitempty"`
+	MaxRequestsPerPeriod *int32 `json:"max_requests_per_period,omitempty"`
 	// RateLimitRPD caps requests per calendar day (UTC) per user on this
 	// plan. Independent of MaxRequestsPerPeriod — admin may set either or
 	// both. NULL/0 = no daily limit.
-	RateLimitRPD         *int32          `json:"rate_limit_rpd,omitempty"`
-	Metadata             json.RawMessage `json:"metadata,omitempty"`
-	SyncedFromGenfityAt  time.Time       `json:"synced_from_genfity_at"`
-	CreatedAt            time.Time       `json:"created_at"`
-	UpdatedAt            time.Time       `json:"updated_at"`
+	RateLimitRPD        *int32          `json:"rate_limit_rpd,omitempty"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	SyncedFromGenfityAt time.Time       `json:"synced_from_genfity_at"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 type APIKey struct {
-	ID              uuid.UUID  `json:"id"`
-	GenfityUserID   string     `json:"genfity_user_id"`
-	GenfityTenantID *string    `json:"genfity_tenant_id,omitempty"`
-	Name            string     `json:"name"`
-	KeyPrefix       string     `json:"key_prefix"`
-	KeyHash         string     `json:"-"`
-	Status          string     `json:"status"`
+	ID              uuid.UUID `json:"id"`
+	GenfityUserID   string    `json:"genfity_user_id"`
+	GenfityTenantID *string   `json:"genfity_tenant_id,omitempty"`
+	Name            string    `json:"name"`
+	KeyPrefix       string    `json:"key_prefix"`
+	KeyHash         string    `json:"-"`
+	Status          string    `json:"status"`
 	// BillingSource constrains which billing schema the key may consume.
 	// Values:
 	//   "subscription" (default — unlimited plan only),
@@ -47,12 +47,12 @@ type APIKey struct {
 	// The legacy "auto" value (3-priority cascade) was removed in 2026-05;
 	// no rows still carry it. Empty source is treated as "subscription"
 	// for safety, but the DB CHECK constraint should reject it.
-	BillingSource   string     `json:"billing_source"`
-	LastUsedAt      *time.Time `json:"last_used_at,omitempty"`
-	ExpiresAt       *time.Time `json:"expires_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	RegeneratedAt   *time.Time `json:"regenerated_at,omitempty"`
-	RevokedAt       *time.Time `json:"revoked_at,omitempty"`
+	BillingSource string     `json:"billing_source"`
+	LastUsedAt    *time.Time `json:"last_used_at,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	RegeneratedAt *time.Time `json:"regenerated_at,omitempty"`
+	RevokedAt     *time.Time `json:"revoked_at,omitempty"`
 }
 
 type AIModel struct {
@@ -71,12 +71,12 @@ type AIModel struct {
 	// fields below (per-(user,model) limits). When false, those fields
 	// are ignored. The user's billing balance must still be > 0 even
 	// when the model is free.
-	IsFree            bool      `json:"is_free"`
-	FreeLimitRPD      *int32    `json:"free_limit_rpd,omitempty"`
-	FreeLimitRPM      *int32    `json:"free_limit_rpm,omitempty"`
-	FreeLimitTPD      *int64    `json:"free_limit_tpd,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	IsFree       bool      `json:"is_free"`
+	FreeLimitRPD *int32    `json:"free_limit_rpd,omitempty"`
+	FreeLimitRPM *int32    `json:"free_limit_rpm,omitempty"`
+	FreeLimitTPD *int64    `json:"free_limit_tpd,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type AIModelPrice struct {
@@ -106,16 +106,16 @@ type AIModelRoute struct {
 // a one-shot migration, check out this file at tag pre-combo-removal.
 
 type CustomerEntitlement struct {
-	ID                   uuid.UUID       `json:"id"`
-	GenfityUserID        string          `json:"genfity_user_id"`
-	GenfityTenantID      *string         `json:"genfity_tenant_id,omitempty"`
-	PlanCode             string          `json:"plan_code"`
-	Status               string          `json:"status"`
-	PeriodStart          *time.Time      `json:"period_start,omitempty"`
-	PeriodEnd            *time.Time      `json:"period_end,omitempty"`
-	QuotaTokensMonthly   *int64          `json:"quota_tokens_monthly,omitempty"`
-	BalanceSnapshot      *string         `json:"balance_snapshot,omitempty"`
-	BalanceReserved      *string         `json:"balance_reserved,omitempty"`
+	ID                 uuid.UUID  `json:"id"`
+	GenfityUserID      string     `json:"genfity_user_id"`
+	GenfityTenantID    *string    `json:"genfity_tenant_id,omitempty"`
+	PlanCode           string     `json:"plan_code"`
+	Status             string     `json:"status"`
+	PeriodStart        *time.Time `json:"period_start,omitempty"`
+	PeriodEnd          *time.Time `json:"period_end,omitempty"`
+	QuotaTokensMonthly *int64     `json:"quota_tokens_monthly,omitempty"`
+	BalanceSnapshot    *string    `json:"balance_snapshot,omitempty"`
+	BalanceReserved    *string    `json:"balance_reserved,omitempty"`
 	// PRD v3 Phase 2: per-user credit + PAYG USD balances. Mirrors
 	// genfity-app's User.aiGatewayCreditBalance / aiGatewayPaygUsdBalance
 	// so the gateway can enforce the 3-priority chain without a round
@@ -128,14 +128,14 @@ type CustomerEntitlement struct {
 	// queries credit + PAYG balances regardless; PricingGroup is only
 	// used to select the "current" unlimited entitlement when one is
 	// active.
-	CreditBalance         *string         `json:"credit_balance,omitempty"`
-	CreditBalanceReserved *string         `json:"credit_balance_reserved,omitempty"`
-	CreditExpiresAt       *time.Time      `json:"credit_expires_at,omitempty"`
-	PaygUsdBalance        *string         `json:"payg_usd_balance,omitempty"`
-	PaygUsdBalanceReserved *string        `json:"payg_usd_balance_reserved,omitempty"`
-	PricingGroup          *string         `json:"pricing_group,omitempty"`
-	Metadata             json.RawMessage `json:"metadata,omitempty"`
-	UpdatedFromGenfityAt time.Time       `json:"updated_from_genfity_at"`
+	CreditBalance          *string         `json:"credit_balance,omitempty"`
+	CreditBalanceReserved  *string         `json:"credit_balance_reserved,omitempty"`
+	CreditExpiresAt        *time.Time      `json:"credit_expires_at,omitempty"`
+	PaygUsdBalance         *string         `json:"payg_usd_balance,omitempty"`
+	PaygUsdBalanceReserved *string         `json:"payg_usd_balance_reserved,omitempty"`
+	PricingGroup           *string         `json:"pricing_group,omitempty"`
+	Metadata               json.RawMessage `json:"metadata,omitempty"`
+	UpdatedFromGenfityAt   time.Time       `json:"updated_from_genfity_at"`
 }
 
 // ModelCreditCost is the per-model request credit cost for the
@@ -191,32 +191,34 @@ type RouterInstance struct {
 }
 
 type UsageLedgerEntry struct {
-	ID                  uuid.UUID       `json:"id"`
-	RequestID           string          `json:"request_id"`
-	GenfityUserID       string          `json:"genfity_user_id"`
-	GenfityTenantID     *string         `json:"genfity_tenant_id,omitempty"`
-	APIKeyID            *uuid.UUID      `json:"api_key_id,omitempty"`
-	PublicModel         string          `json:"public_model"`
-	RouterModel         *string         `json:"router_model,omitempty"`
-	RouterInstanceCode  *string         `json:"router_instance_code,omitempty"`
-	PromptTokens        int64           `json:"prompt_tokens"`
-	CompletionTokens    int64           `json:"completion_tokens"`
-	TotalTokens         int64           `json:"total_tokens"`
-	CachedTokens        int64           `json:"cached_tokens"`
-	ReasoningTokens    int64           `json:"reasoning_tokens"`
-	InputCost           string          `json:"input_cost"`
-	OutputCost          string          `json:"output_cost"`
-	TotalCost           string          `json:"total_cost"`
-	BillingMode         *string         `json:"billing_mode,omitempty"`
-	AmountCredits       *string         `json:"amount_credits,omitempty"`
-	BalanceAfterCredits *string         `json:"balance_after_credits,omitempty"`
-	BalanceAfterUsd     *string         `json:"balance_after_usd,omitempty"`
-	Status              string          `json:"status"`
-	ErrorCode           *string         `json:"error_code,omitempty"`
-	LatencyMS           *int32          `json:"latency_ms,omitempty"`
-	StartedAt           time.Time       `json:"started_at"`
-	FinishedAt          *time.Time      `json:"finished_at,omitempty"`
-	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	ID                       uuid.UUID       `json:"id"`
+	RequestID                string          `json:"request_id"`
+	GenfityUserID            string          `json:"genfity_user_id"`
+	GenfityTenantID          *string         `json:"genfity_tenant_id,omitempty"`
+	APIKeyID                 *uuid.UUID      `json:"api_key_id,omitempty"`
+	PublicModel              string          `json:"public_model"`
+	RouterModel              *string         `json:"router_model,omitempty"`
+	RouterInstanceCode       *string         `json:"router_instance_code,omitempty"`
+	PromptTokens             int64           `json:"prompt_tokens"`
+	CompletionTokens         int64           `json:"completion_tokens"`
+	TotalTokens              int64           `json:"total_tokens"`
+	CachedTokens             int64           `json:"cached_tokens"`
+	CacheReadInputTokens     int64           `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64           `json:"cache_creation_input_tokens"`
+	ReasoningTokens          int64           `json:"reasoning_tokens"`
+	InputCost                string          `json:"input_cost"`
+	OutputCost               string          `json:"output_cost"`
+	TotalCost                string          `json:"total_cost"`
+	BillingMode              *string         `json:"billing_mode,omitempty"`
+	AmountCredits            *string         `json:"amount_credits,omitempty"`
+	BalanceAfterCredits      *string         `json:"balance_after_credits,omitempty"`
+	BalanceAfterUsd          *string         `json:"balance_after_usd,omitempty"`
+	Status                   string          `json:"status"`
+	ErrorCode                *string         `json:"error_code,omitempty"`
+	LatencyMS                *int32          `json:"latency_ms,omitempty"`
+	StartedAt                time.Time       `json:"started_at"`
+	FinishedAt               *time.Time      `json:"finished_at,omitempty"`
+	Metadata                 json.RawMessage `json:"metadata,omitempty"`
 }
 
 type UsageSummaryRow struct {
@@ -366,9 +368,9 @@ type UsageLogFilter struct {
 }
 
 type CreditBalanceRow struct {
-	GenfityUserID string  `json:"genfity_user_id"`
-	CreditBalance string  `json:"credit_balance"`
-	CreditUsed    string  `json:"credit_used"`
+	GenfityUserID string `json:"genfity_user_id"`
+	CreditBalance string `json:"credit_balance"`
+	CreditUsed    string `json:"credit_used"`
 }
 
 type AuthUser struct {
@@ -388,18 +390,18 @@ type AuthUser struct {
 // retry sites (e.g., the in-process attempt and a future re-attempt
 // from the same finalizer) without creating duplicates.
 type PendingCallback struct {
-	ID             uuid.UUID `json:"id"`
-	RequestID      string    `json:"request_id"`
-	UserID         string    `json:"user_id"`
-	BillingMode    string    `json:"billing_mode"`
-	AmountCredits  *string   `json:"amount_credits,omitempty"`
-	AmountUSD      *string   `json:"amount_usd,omitempty"`
-	Model          *string   `json:"model,omitempty"`
-	Notes          *string   `json:"notes,omitempty"`
-	Attempts       int       `json:"attempts"`
-	LastError      *string   `json:"last_error,omitempty"`
-	LastAttemptAt  *time.Time `json:"last_attempt_at,omitempty"`
-	NextAttemptAt  time.Time `json:"next_attempt_at"`
-	Status         string    `json:"status"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID            uuid.UUID  `json:"id"`
+	RequestID     string     `json:"request_id"`
+	UserID        string     `json:"user_id"`
+	BillingMode   string     `json:"billing_mode"`
+	AmountCredits *string    `json:"amount_credits,omitempty"`
+	AmountUSD     *string    `json:"amount_usd,omitempty"`
+	Model         *string    `json:"model,omitempty"`
+	Notes         *string    `json:"notes,omitempty"`
+	Attempts      int        `json:"attempts"`
+	LastError     *string    `json:"last_error,omitempty"`
+	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
+	NextAttemptAt time.Time  `json:"next_attempt_at"`
+	Status        string     `json:"status"`
+	CreatedAt     time.Time  `json:"created_at"`
 }

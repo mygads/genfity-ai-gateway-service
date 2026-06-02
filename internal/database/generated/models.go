@@ -148,28 +148,30 @@ type AiGatewaySyncRun struct {
 }
 
 type AiGatewayUsageLedger struct {
-	ID                 uuid.UUID          `json:"id"`
-	RequestID          string             `json:"request_id"`
-	GenfityUserID      string             `json:"genfity_user_id"`
-	GenfityTenantID    *string            `json:"genfity_tenant_id"`
-	ApiKeyID           pgtype.UUID        `json:"api_key_id"`
-	PublicModel        string             `json:"public_model"`
-	RouterModel        *string            `json:"router_model"`
-	RouterInstanceCode *string            `json:"router_instance_code"`
-	PromptTokens       int64              `json:"prompt_tokens"`
-	CompletionTokens   int64              `json:"completion_tokens"`
-	TotalTokens        int64              `json:"total_tokens"`
-	CachedTokens       int64              `json:"cached_tokens"`
-	ReasoningTokens    int64              `json:"reasoning_tokens"`
-	InputCost          pgtype.Numeric     `json:"input_cost"`
-	OutputCost         pgtype.Numeric     `json:"output_cost"`
-	TotalCost          pgtype.Numeric     `json:"total_cost"`
-	Status             string             `json:"status"`
-	ErrorCode          *string            `json:"error_code"`
-	LatencyMs          *int32             `json:"latency_ms"`
-	StartedAt          time.Time          `json:"started_at"`
-	FinishedAt         pgtype.Timestamptz `json:"finished_at"`
-	Metadata           json.RawMessage    `json:"metadata"`
+	ID                       uuid.UUID          `json:"id"`
+	RequestID                string             `json:"request_id"`
+	GenfityUserID            string             `json:"genfity_user_id"`
+	GenfityTenantID          *string            `json:"genfity_tenant_id"`
+	ApiKeyID                 pgtype.UUID        `json:"api_key_id"`
+	PublicModel              string             `json:"public_model"`
+	RouterModel              *string            `json:"router_model"`
+	RouterInstanceCode       *string            `json:"router_instance_code"`
+	PromptTokens             int64              `json:"prompt_tokens"`
+	CompletionTokens         int64              `json:"completion_tokens"`
+	TotalTokens              int64              `json:"total_tokens"`
+	CachedTokens             int64              `json:"cached_tokens"`
+	CacheReadInputTokens     int64              `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64              `json:"cache_creation_input_tokens"`
+	ReasoningTokens          int64              `json:"reasoning_tokens"`
+	InputCost                pgtype.Numeric     `json:"input_cost"`
+	OutputCost               pgtype.Numeric     `json:"output_cost"`
+	TotalCost                pgtype.Numeric     `json:"total_cost"`
+	Status                   string             `json:"status"`
+	ErrorCode                *string            `json:"error_code"`
+	LatencyMs                *int32             `json:"latency_ms"`
+	StartedAt                time.Time          `json:"started_at"`
+	FinishedAt               pgtype.Timestamptz `json:"finished_at"`
+	Metadata                 json.RawMessage    `json:"metadata"`
 }
 
 type AiGatewayVirtualCombo struct {

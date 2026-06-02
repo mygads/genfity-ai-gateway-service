@@ -12,6 +12,8 @@ INSERT INTO ai_gateway.usage_ledger (
     completion_tokens,
     total_tokens,
     cached_tokens,
+    cache_read_input_tokens,
+    cache_creation_input_tokens,
     reasoning_tokens,
     input_cost,
     output_cost,
@@ -24,7 +26,7 @@ INSERT INTO ai_gateway.usage_ledger (
     metadata
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+    $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
 )
 RETURNING *;
 

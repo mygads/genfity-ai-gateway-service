@@ -87,6 +87,8 @@ func (s *UsageService) summaryForEntries(entries []store.UsageLedgerEntry) map[s
 	var completionTokens int64
 	var totalTokens int64
 	var cachedTokens int64
+	var cacheReadInputTokens int64
+	var cacheCreationInputTokens int64
 	var reasoningTokens int64
 	totalCostUsd := 0.0
 	for _, item := range entries {
@@ -94,22 +96,26 @@ func (s *UsageService) summaryForEntries(entries []store.UsageLedgerEntry) map[s
 		completionTokens += item.CompletionTokens
 		totalTokens += item.TotalTokens
 		cachedTokens += item.CachedTokens
+		cacheReadInputTokens += item.CacheReadInputTokens
+		cacheCreationInputTokens += item.CacheCreationInputTokens
 		reasoningTokens += item.ReasoningTokens
 		if v, err := strconv.ParseFloat(item.TotalCost, 64); err == nil {
 			totalCostUsd += v
 		}
 	}
 	return map[string]any{
-		"request_count":     len(entries),
-		"prompt_tokens":     promptTokens,
-		"completion_tokens": completionTokens,
-		"total_tokens":      totalTokens,
-		"cached_tokens":     cachedTokens,
-		"reasoning_tokens":  reasoningTokens,
-		"input_tokens":      promptTokens,
-		"output_tokens":     completionTokens,
-		"total_cost_usd":    totalCostUsd,
-		"period":            "30d",
+		"request_count":               len(entries),
+		"prompt_tokens":               promptTokens,
+		"completion_tokens":           completionTokens,
+		"total_tokens":                totalTokens,
+		"cached_tokens":               cachedTokens,
+		"cache_read_input_tokens":     cacheReadInputTokens,
+		"cache_creation_input_tokens": cacheCreationInputTokens,
+		"reasoning_tokens":            reasoningTokens,
+		"input_tokens":                promptTokens,
+		"output_tokens":               completionTokens,
+		"total_cost_usd":              totalCostUsd,
+		"period":                      "30d",
 	}
 }
 

@@ -244,29 +244,43 @@ func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.A
 	_ = statusCode
 }
 
-func parseUsageFromBody(body []byte) (prompt int64, completion int64, total int64, cached int64, reasoning int64) {
+type usageMetrics struct {
+	PromptTokens             int64
+	CompletionTokens         int64
+	TotalTokens              int64
+	CachedTokens             int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+	ReasoningTokens          int64
+}
+
+func parseUsageFromBody(body []byte) usageMetrics {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	var payload map[string]any
 	if err := dec.Decode(&payload); err == nil {
-		prompt, completion, total, cached, reasoning = parseUsageFromPayload(payload)
+		metrics := parseUsageFromPayload(payload)
 		// If completion is 0 but the response has content (text or tool_use),
 		// estimate from body. Anthropic upstream sometimes reports
 		// output_tokens=0 for tool_use responses; without this fallback,
 		// credit/PAYG users get charged $0 for tool calls.
-		if completion == 0 {
+		if metrics.CompletionTokens == 0 {
 			if est := estimateOutputTokensFromPayload(payload); est > 0 {
-				completion = est
-				if total < prompt+completion {
-					total = prompt + completion
+				metrics.CompletionTokens = est
+				if metrics.TotalTokens < metrics.PromptTokens+metrics.CompletionTokens {
+					metrics.TotalTokens = metrics.PromptTokens + metrics.CompletionTokens
 				}
 			}
 		}
-		if prompt != 0 || completion != 0 || total != 0 {
-			return prompt, completion, total, cached, reasoning
+		if metrics.PromptTokens != 0 || metrics.CompletionTokens != 0 || metrics.TotalTokens != 0 {
+			return metrics
 		}
 	}
 	p, c, t := parseUsageFromSSEBody(body)
-	return p, c, t, 0, 0
+	return usageMetrics{
+		PromptTokens:     p,
+		CompletionTokens: c,
+		TotalTokens:      t,
+	}
 }
 
 // detectProviderErrorFromBody inspects an upstream response body (JSON or SSE)
@@ -417,15 +431,15 @@ func parseUsageFromSSEBody(body []byte) (prompt int64, completion int64, total i
 		if finalSeen && !isFinal {
 			return
 		}
-		p, c, t, _, _ := parseUsageFromPayload(payload)
-		if p != 0 {
-			prompt = p
+		metrics := parseUsageFromPayload(payload)
+		if metrics.PromptTokens != 0 {
+			prompt = metrics.PromptTokens
 		}
-		if c != 0 {
-			completion = c
+		if metrics.CompletionTokens != 0 {
+			completion = metrics.CompletionTokens
 		}
-		if t != 0 {
-			total = t
+		if metrics.TotalTokens != 0 {
+			total = metrics.TotalTokens
 		}
 		if isFinal {
 			finalSeen = true
@@ -650,7 +664,7 @@ func estimateOutputTokensFromPayload(payload map[string]any) int64 {
 	return tokens
 }
 
-func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int64, total int64, cached int64, reasoning int64) {
+func parseUsageFromPayload(payload map[string]any) usageMetrics {
 	usage, ok := payload["usage"].(map[string]any)
 	if !ok {
 		if message, ok := payload["message"].(map[string]any); ok {
@@ -658,12 +672,12 @@ func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int
 		}
 	}
 	if usage == nil {
-		return 0, 0, 0, 0, 0
+		return usageMetrics{}
 	}
 
-	prompt = anyToInt64(usage["prompt_tokens"])
-	completion = anyToInt64(usage["completion_tokens"])
-	total = anyToInt64(usage["total_tokens"])
+	prompt := anyToInt64(usage["prompt_tokens"])
+	completion := anyToInt64(usage["completion_tokens"])
+	total := anyToInt64(usage["total_tokens"])
 	if prompt == 0 {
 		prompt = anyToInt64(usage["input_tokens"])
 	}
@@ -674,7 +688,7 @@ func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int
 		total = prompt + completion
 	}
 
-	reasoning = anyToInt64(usage["reasoning_tokens"])
+	reasoning := anyToInt64(usage["reasoning_tokens"])
 	if reasoning == 0 {
 		if details, ok := usage["completion_tokens_details"].(map[string]any); ok {
 			reasoning = anyToInt64(details["reasoning_tokens"])
@@ -686,7 +700,7 @@ func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int
 		}
 	}
 
-	cached = anyToInt64(usage["cached_tokens"])
+	cached := anyToInt64(usage["cached_tokens"])
 	cacheRead := anyToInt64(usage["cache_read_tokens"])
 	cacheCreation := anyToInt64(usage["cache_creation_tokens"])
 	if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
@@ -710,7 +724,15 @@ func parseUsageFromPayload(payload map[string]any) (prompt int64, completion int
 		cached = cacheRead + cacheCreation
 	}
 
-	return prompt, completion, total, cached, reasoning
+	return usageMetrics{
+		PromptTokens:             prompt,
+		CompletionTokens:         completion,
+		TotalTokens:              total,
+		CachedTokens:             cached,
+		CacheReadInputTokens:     cacheRead,
+		CacheCreationInputTokens: cacheCreation,
+		ReasoningTokens:          reasoning,
+	}
 }
 
 func anyToInt64(v any) int64 {
@@ -1021,16 +1043,24 @@ func pricingGroup(subscription *service.ActiveSubscription) string {
 }
 
 func quotaLimit(subscription *service.ActiveSubscription) int64 {
-	if subscription == nil {
+	limit := quotaLimitPtr(subscription)
+	if limit == nil {
 		return 0
 	}
-	if subscription.Entitlement != nil && subscription.Entitlement.QuotaTokensMonthly != nil {
-		return *subscription.Entitlement.QuotaTokensMonthly
+	return *limit
+}
+
+func quotaLimitPtr(subscription *service.ActiveSubscription) *int64 {
+	if subscription == nil {
+		return nil
 	}
 	if subscription.Plan != nil && subscription.Plan.QuotaTokensMonthly != nil {
-		return *subscription.Plan.QuotaTokensMonthly
+		return subscription.Plan.QuotaTokensMonthly
 	}
-	return 0
+	if subscription.Entitlement != nil && subscription.Entitlement.QuotaTokensMonthly != nil {
+		return subscription.Entitlement.QuotaTokensMonthly
+	}
+	return nil
 }
 
 func balanceAmount(subscription *service.ActiveSubscription) float64 {
@@ -1049,6 +1079,20 @@ func balanceAmount(subscription *service.ActiveSubscription) float64 {
 	}
 	value, _ := strconv.ParseFloat(*subscription.Entitlement.BalanceSnapshot, 64)
 	return value
+}
+
+func estimatedPromptReservationPrice(price *store.AIModelPrice) float64 {
+	if price == nil {
+		return 0
+	}
+	inputPrice := parseFloatPtr(&price.InputPricePer1M)
+	if inputPrice > 0 {
+		return inputPrice
+	}
+	if price.CachedPricePer1M != nil {
+		return parseFloatPtr(price.CachedPricePer1M)
+	}
+	return 0
 }
 
 type tokenReservationEstimate struct {
@@ -1130,10 +1174,11 @@ func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenRe
 // constrained by the API key's billing_source pin.
 //
 // API key billing_source values:
-//   "auto"         → original 3-priority chain (subscription → credit → payg)
-//   "subscription" → only Priority 1 (unlimited); error if not covered
-//   "credit"       → only Priority 2 (credit_package); error if not configured/insufficient
-//   "payg"         → only Priority 3 (payg_topup USD balance)
+//
+//	"auto"         → original 3-priority chain (subscription → credit → payg)
+//	"subscription" → only Priority 1 (unlimited); error if not covered
+//	"credit"       → only Priority 2 (credit_package); error if not configured/insufficient
+//	"payg"         → only Priority 3 (payg_topup USD balance)
 //
 // Returns a reservation with BillingMode populated when a priority
 // matched; returns zero reservation + zero status when no priority
@@ -1234,7 +1279,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		if !estimate.Bounded && parseFloatPtr(&price.OutputPricePer1M) > 0 {
 			return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
 		}
-		reserveUSD := float64(estimate.PromptTokens)/1_000_000*parseFloatPtr(&price.InputPricePer1M) +
+		reserveUSD := float64(estimate.PromptTokens)/1_000_000*estimatedPromptReservationPrice(price) +
 			float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
 		if reserveUSD <= 0 {
 			// Zero-priced model under PAYG — still require a positive
@@ -1462,7 +1507,7 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 				}
 				return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
 			}
-			reserveUSD := float64(estimate.PromptTokens)/1_000_000*parseFloatPtr(&price.InputPricePer1M) + float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
+			reserveUSD := float64(estimate.PromptTokens)/1_000_000*estimatedPromptReservationPrice(price) + float64(estimate.CompletionTokens)/1_000_000*parseFloatPtr(&price.OutputPricePer1M)
 			if reserveUSD > 0 && subscription != nil && subscription.Entitlement != nil {
 				if err := h.usage.ReserveCreditBalance(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, reserveUSD); err != nil {
 					if reservation.QuotaTokens > 0 {
@@ -2913,7 +2958,14 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	finished := time.Now().UTC()
 	latencyMs := finished.Sub(started).Milliseconds()
 
-	promptTokens, completionTokens, totalTokens, cachedTokens, reasoningTokens := parseUsageFromBody(body)
+	metrics := parseUsageFromBody(body)
+	promptTokens := metrics.PromptTokens
+	completionTokens := metrics.CompletionTokens
+	totalTokens := metrics.TotalTokens
+	cachedTokens := metrics.CachedTokens
+	cacheReadInputTokens := metrics.CacheReadInputTokens
+	cacheCreationInputTokens := metrics.CacheCreationInputTokens
+	reasoningTokens := metrics.ReasoningTokens
 
 	prices := h.models.ListPrices(ctx)
 	price := modelPrice(prices, model.ID)
@@ -2921,7 +2973,19 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	outputCostUsd := 0.0
 	totalCostUsd := 0.0
 	if price != nil {
-		inputCostUsd = float64(promptTokens) / 1_000_000 * parseFloatPtr(&price.InputPricePer1M)
+		nonCachedPromptTokens := promptTokens - cacheReadInputTokens - cacheCreationInputTokens
+		if nonCachedPromptTokens < 0 {
+			nonCachedPromptTokens = 0
+		}
+		inputPrice := parseFloatPtr(&price.InputPricePer1M)
+		cachedPrice := inputPrice
+		if price.CachedPricePer1M != nil {
+			cachedPrice = parseFloatPtr(price.CachedPricePer1M)
+		}
+		inputCostUsd =
+			float64(nonCachedPromptTokens)/1_000_000*inputPrice +
+				float64(cacheReadInputTokens)/1_000_000*cachedPrice +
+				float64(cacheCreationInputTokens)/1_000_000*inputPrice
 		outputCostUsd = float64(completionTokens) / 1_000_000 * parseFloatPtr(&price.OutputPricePer1M)
 		totalCostUsd = inputCostUsd + outputCostUsd
 	}
@@ -3084,32 +3148,34 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	}
 
 	entry := store.UsageLedgerEntry{
-		ID:                  uuid.New(),
-		RequestID:           uuid.New().String(),
-		GenfityUserID:       apiKey.GenfityUserID,
-		GenfityTenantID:     apiKey.GenfityTenantID,
-		APIKeyID:            &apiKeyID,
-		PublicModel:         publicModel,
-		RouterModel:         &routerModel,
-		RouterInstanceCode:  &routerCode,
-		PromptTokens:        promptTokens,
-		CompletionTokens:    completionTokens,
-		TotalTokens:         totalTokens,
-		CachedTokens:        cachedTokens,
-		ReasoningTokens:     reasoningTokens,
-		InputCost:           inCost,
-		OutputCost:          outCost,
-		TotalCost:           totCost,
-		BillingMode:         billingModePtr,
-		AmountCredits:       amountCreditsPtr,
-		BalanceAfterCredits: balanceAfterCreditsPtr,
-		BalanceAfterUsd:     balanceAfterUsdPtr,
-		Status:              statusStr,
-		ErrorCode:           errorCodePtr,
-		LatencyMS:           &latencyMs32,
-		StartedAt:           started,
-		FinishedAt:          &finished,
-		Metadata:            entryMetaJSON,
+		ID:                       uuid.New(),
+		RequestID:                uuid.New().String(),
+		GenfityUserID:            apiKey.GenfityUserID,
+		GenfityTenantID:          apiKey.GenfityTenantID,
+		APIKeyID:                 &apiKeyID,
+		PublicModel:              publicModel,
+		RouterModel:              &routerModel,
+		RouterInstanceCode:       &routerCode,
+		PromptTokens:             promptTokens,
+		CompletionTokens:         completionTokens,
+		TotalTokens:              totalTokens,
+		CachedTokens:             cachedTokens,
+		CacheReadInputTokens:     cacheReadInputTokens,
+		CacheCreationInputTokens: cacheCreationInputTokens,
+		ReasoningTokens:          reasoningTokens,
+		InputCost:                inCost,
+		OutputCost:               outCost,
+		TotalCost:                totCost,
+		BillingMode:              billingModePtr,
+		AmountCredits:            amountCreditsPtr,
+		BalanceAfterCredits:      balanceAfterCreditsPtr,
+		BalanceAfterUsd:          balanceAfterUsdPtr,
+		Status:                   statusStr,
+		ErrorCode:                errorCodePtr,
+		LatencyMS:                &latencyMs32,
+		StartedAt:                started,
+		FinishedAt:               &finished,
+		Metadata:                 entryMetaJSON,
 	}
 	if _, err := h.usage.Record(ctx, entry); err != nil {
 		return usageSettlement{}, err
