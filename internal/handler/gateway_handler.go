@@ -1097,7 +1097,6 @@ func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenRe
 	if completion == 0 {
 		completion = anyToInt64(payload["max_completion_tokens"])
 	}
-	bounded := completion > 0
 	if completion == 0 {
 		// When the client doesn't bound the response, use a sane default
 		// rather than the full context window. Reserving context_window
@@ -1120,7 +1119,11 @@ func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenRe
 	if total <= 0 {
 		total = 1
 	}
-	return tokenReservationEstimate{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total, Bounded: bounded}
+	// Bounded: true when either the client or our default provides a token
+	// cap. This allows the PAYG billing path to reserve a sensible amount
+	// (4096 by default) without rejecting every unbounded request with
+	// max_tokens_required. The actual cost is reconciled on finalize.
+	return tokenReservationEstimate{PromptTokens: prompt, CompletionTokens: completion, TotalTokens: total, Bounded: completion > 0}
 }
 
 // tryPriorityBilling implements the PRD v3 3-priority reservation chain,
