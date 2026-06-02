@@ -324,7 +324,9 @@ func (s *PostgresStore) GetModelByID(ctx context.Context, id uuid.UUID) (*store.
 
 func (s *PostgresStore) GetModelByPublicName(ctx context.Context, publicModel string) (*store.AIModel, error) {
 	var item store.AIModel
-	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE public_model = $1 LIMIT 1`, publicModel).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
+	// Prefer active models to avoid returning a retired duplicate that
+	// existed before the model was re-created with the same public_model.
+	err := s.pool.QueryRow(ctx, `SELECT id, public_model, display_name, description, status, model_type, context_window, supports_streaming, supports_tools, supports_vision, payg_exposed, is_free, free_limit_rpd, free_limit_rpm, free_limit_tpd, created_at, updated_at FROM ai_gateway.ai_models WHERE public_model = $1 ORDER BY (status = 'active') DESC LIMIT 1`, publicModel).Scan(&item.ID, &item.PublicModel, &item.DisplayName, &item.Description, &item.Status, &item.ModelType, &item.ContextWindow, &item.SupportsStreaming, &item.SupportsTools, &item.SupportsVision, &item.PaygExposed, &item.IsFree, &item.FreeLimitRPD, &item.FreeLimitRPM, &item.FreeLimitTPD, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

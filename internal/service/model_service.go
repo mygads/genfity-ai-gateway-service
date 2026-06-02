@@ -186,7 +186,12 @@ func (s *ModelService) DeleteRoute(ctx context.Context, id uuid.UUID) error {
 
 func (s *ModelService) ResolveRouteByPublicModel(ctx context.Context, publicModel string) (*store.AIModelRoute, *store.AIModel, error) {
 	model, err := s.store.GetModelByPublicName(ctx, publicModel)
-	if err != nil && !strings.Contains(publicModel, "/") {
+	// Retry with the genfity/ prefix if: (a) the lookup failed entirely, or
+	// (b) the lookup returned a retired model and the caller didn't already
+	// include the prefix. This handles the common case where a client sends
+	// "claude-sonnet-4.6" which matches a retired free-tier row while the
+	// active "genfity/claude-sonnet-4.6" route exists.
+	if (!strings.Contains(publicModel, "/")) && (err != nil || (model != nil && model.Status == "retired")) {
 		model, err = s.store.GetModelByPublicName(ctx, "genfity/"+publicModel)
 	}
 	if err != nil {
