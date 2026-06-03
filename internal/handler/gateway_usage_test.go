@@ -41,3 +41,22 @@ func TestQuotaLimitPrefersLivePlanSnapshot(t *testing.T) {
 		t.Fatalf("quotaLimit() = %d, want %d", got, planQuota)
 	}
 }
+
+func TestCalculateActualRequestCredits_Uses20kBuckets(t *testing.T) {
+	if got := calculateActualRequestCredits(9, 39_000); got != 6 {
+		t.Fatalf("calculateActualRequestCredits() = %v, want 6", got)
+	}
+	if got := calculateActualRequestCredits(9, 20_000); got != 3 {
+		t.Fatalf("calculateActualRequestCredits() 20k = %v, want 3", got)
+	}
+	if got := calculateActualRequestCredits(9, 0); got != 0 {
+		t.Fatalf("calculateActualRequestCredits() zero = %v, want 0", got)
+	}
+}
+
+func TestEstimateReservedRequestCredits_UsesEstimatedBuckets(t *testing.T) {
+	estimate := tokenReservationEstimate{TotalTokens: 30_000}
+	if got := estimateReservedRequestCredits(9, estimate); got != 6 {
+		t.Fatalf("estimateReservedRequestCredits() = %v, want 6", got)
+	}
+}

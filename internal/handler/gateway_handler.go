@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -1106,6 +1107,7 @@ type runtimeReservation struct {
 	PeriodStart    time.Time
 	PeriodEnd      time.Time
 	QuotaTokens    int64
+	PlanCode       string
 	CreditUSD      float64
 	CreditPlanCode string
 
@@ -1115,14 +1117,21 @@ type runtimeReservation struct {
 	// finalize path knows which Finalize* helper to call. Empty when
 	// the request is covered by an unlimited entitlement (no debit).
 	//
-	// RequestCredits is the reserved credit amount for the
-	// credit_package schema (integer/fractional per model).
+	// RequestCredits is the RESERVED credit amount for the
+	// credit_package schema. The configured model price is stored in
+	// CreditPricePer60k (price per 60k total tokens) and runtime
+	// billing charges in 20k-token buckets.
 	// PaygUSD is the reserved USD amount for the payg_topup schema
 	// (actual-cost per-1M pricing). Exactly one of these is non-zero
 	// when BillingMode != "unlimited".
-	BillingMode    string // "unlimited" | "credit_package" | "payg_topup" | ""
-	RequestCredits float64
-	PaygUSD        float64
+	BillingMode           string // "unlimited" | "credit_package" | "payg_topup" | ""
+	RequestCredits        float64
+	CreditPricePer60k     float64
+	PaygUSD               float64
+	PlanCreditPricePer60k float64
+	PlanCreditsPerDay     float64
+	PlanCreditsPerPeriod  float64
+	PlanCreditPeriodKey   string
 }
 
 type usageSettlement struct {
@@ -1130,9 +1139,52 @@ type usageSettlement struct {
 	CompletionTokens int64
 	TotalTokens      int64
 	TotalCostUSD     float64
+	ActualCredits    float64
 	Success          bool
 	ErrorCode        string
 	RequestID        string
+}
+
+const (
+	creditPricePerRequestTokens = 60_000
+	creditBillingBucketTokens   = 20_000
+)
+
+func roundCredits(value float64) float64 {
+	return math.Round(value*10_000) / 10_000
+}
+
+func creditBillingBuckets(totalTokens int64) int64 {
+	if totalTokens <= 0 {
+		return 0
+	}
+	return int64(math.Ceil(float64(totalTokens) / float64(creditBillingBucketTokens)))
+}
+
+func creditsPer20kBucket(creditsPer60k float64) float64 {
+	if creditsPer60k <= 0 {
+		return 0
+	}
+	return roundCredits(creditsPer60k / (float64(creditPricePerRequestTokens) / float64(creditBillingBucketTokens)))
+}
+
+func calculateActualRequestCredits(creditsPer60k float64, totalTokens int64) float64 {
+	buckets := creditBillingBuckets(totalTokens)
+	if buckets <= 0 {
+		return 0
+	}
+	return roundCredits(float64(buckets) * creditsPer20kBucket(creditsPer60k))
+}
+
+func estimateReservedRequestCredits(creditsPer60k float64, estimate tokenReservationEstimate) float64 {
+	if creditsPer60k <= 0 {
+		return 0
+	}
+	totalTokens := estimate.TotalTokens
+	if totalTokens <= 0 {
+		totalTokens = creditBillingBucketTokens
+	}
+	return calculateActualRequestCredits(creditsPer60k, totalTokens)
 }
 
 func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenReservationEstimate {
@@ -1214,13 +1266,14 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 			return runtimeReservation{}, http.StatusPaymentRequired, "subscription_not_covering_model"
 		}
 
-		res := runtimeReservation{BillingMode: "unlimited"}
+		res := runtimeReservation{BillingMode: "unlimited", PlanCode: subscription.Entitlement.PlanCode}
+		limits := service.PlanLimitsFromSnapshot(subscriptionPlan(subscription))
+		periodStart, periodEnd := activePeriod(subscription.Entitlement)
 		limit := quotaLimit(subscription)
 		if limit > 0 {
 			if !estimate.Bounded {
 				return runtimeReservation{}, http.StatusBadRequest, "max_tokens_required"
 			}
-			periodStart, periodEnd := activePeriod(subscription.Entitlement)
 			if err := h.usage.ReserveQuotaTokens(ctx, apiKey.GenfityUserID, apiKey.GenfityTenantID, periodStart, periodEnd, estimate.TotalTokens, limit); err != nil {
 				if errors.Is(err, service.ErrQuotaExceeded) {
 					return runtimeReservation{}, http.StatusTooManyRequests, "quota_exceeded"
@@ -1230,6 +1283,48 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 			res.PeriodStart = periodStart
 			res.PeriodEnd = periodEnd
 			res.QuotaTokens = estimate.TotalTokens
+		}
+		if h.rateLimit != nil && (limits.HasCreditPerDay() || limits.HasCreditPerPeriod()) {
+			cost, err := h.models.GetModelCreditCost(ctx, model.PublicModel)
+			if err != nil || cost == nil || !cost.IsActive {
+				if res.QuotaTokens > 0 {
+					_ = h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, res.PeriodStart, res.PeriodEnd, res.QuotaTokens, 0, false)
+				}
+				return runtimeReservation{}, http.StatusInternalServerError, "subscription_credit_cost_not_configured"
+			}
+			creditsPer60k := parseFloatPtr(&cost.CreditsPerReq)
+			if !cost.IsFree && creditsPer60k > 0 {
+				reservedCredits := estimateReservedRequestCredits(creditsPer60k, estimate)
+				periodKeyValue := periodKey(subscription.Entitlement)
+				ttl := time.Until(periodEnd)
+				if ttl <= 0 {
+					ttl = 24 * time.Hour
+				}
+				if limits.HasCreditPerDay() {
+					if err := h.rateLimit.CheckPlanCreditRPD(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, reservedCredits, limits.CreditLimitPerDay); err != nil {
+						if res.QuotaTokens > 0 {
+							_ = h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, res.PeriodStart, res.PeriodEnd, res.QuotaTokens, 0, false)
+						}
+						return runtimeReservation{}, http.StatusTooManyRequests, "plan_credit_rpd_exceeded"
+					}
+					res.PlanCreditsPerDay = reservedCredits
+				}
+				if limits.HasCreditPerPeriod() {
+					if err := h.rateLimit.CheckPlanCreditsPerPeriod(ctx, apiKey.GenfityUserID, periodKeyValue, ttl, reservedCredits, limits.CreditLimitPerPeriod); err != nil {
+						if res.PlanCreditsPerDay > 0 {
+							_ = h.rateLimit.FinalizePlanCreditRPD(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, res.PlanCreditsPerDay, 0)
+							res.PlanCreditsPerDay = 0
+						}
+						if res.QuotaTokens > 0 {
+							_ = h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, res.PeriodStart, res.PeriodEnd, res.QuotaTokens, 0, false)
+						}
+						return runtimeReservation{}, http.StatusTooManyRequests, "plan_credit_period_exceeded"
+					}
+					res.PlanCreditsPerPeriod = reservedCredits
+					res.PlanCreditPeriodKey = periodKeyValue
+				}
+				res.PlanCreditPricePer60k = creditsPer60k
+			}
 		}
 
 		return res, 0, ""
@@ -1243,7 +1338,8 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		if err != nil || cost == nil || !cost.IsActive {
 			return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
 		}
-		if cost.IsFree || parseFloatPtr(&cost.CreditsPerReq) <= 0 {
+		creditsPer60k := parseFloatPtr(&cost.CreditsPerReq)
+		if cost.IsFree || creditsPer60k <= 0 {
 			// Free model — still require the user to carry a positive
 			// credit balance. Users with 0 balance (new accounts or
 			// exhausted credits) cannot access even free models.
@@ -1258,14 +1354,18 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 			}
 			return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
 		}
-		credits := parseFloatPtr(&cost.CreditsPerReq)
-		if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, credits); err != nil {
+		reservedCredits := estimateReservedRequestCredits(creditsPer60k, estimate)
+		if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, reservedCredits); err != nil {
 			if errors.Is(err, service.ErrInsufficientBalance) {
 				return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
 			}
 			return runtimeReservation{}, http.StatusInternalServerError, "credit_reservation_failed"
 		}
-		return runtimeReservation{BillingMode: "credit_package", RequestCredits: credits}, 0, ""
+		return runtimeReservation{
+			BillingMode:       "credit_package",
+			RequestCredits:    reservedCredits,
+			CreditPricePer60k: creditsPer60k,
+		}, 0, ""
 
 	case "payg":
 		if !model.PaygExposed {
@@ -1529,13 +1629,27 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey store.APIKey, reservation runtimeReservation, settlement usageSettlement, success bool, countRequest bool) error {
 	usedTokens := int64(0)
 	actualUSD := 0.0
+	actualCredits := 0.0
 	if success {
 		usedTokens = settlement.TotalTokens
 		actualUSD = settlement.TotalCostUSD
+		actualCredits = settlement.ActualCredits
 	}
 	if reservation.QuotaTokens > 0 || countRequest {
 		if err := h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, reservation.PeriodStart, reservation.PeriodEnd, reservation.QuotaTokens, usedTokens, countRequest); err != nil {
 			return err
+		}
+	}
+	if h.rateLimit != nil {
+		if reservation.PlanCreditsPerDay > 0 {
+			if err := h.rateLimit.FinalizePlanCreditRPD(ctx, apiKey.GenfityUserID, reservation.PlanCode, reservation.PlanCreditsPerDay, actualCredits); err != nil {
+				return err
+			}
+		}
+		if reservation.PlanCreditsPerPeriod > 0 {
+			if err := h.rateLimit.FinalizePlanCreditsPerPeriod(ctx, apiKey.GenfityUserID, reservation.PlanCreditPeriodKey, reservation.PlanCreditsPerPeriod, actualCredits); err != nil {
+				return err
+			}
 		}
 	}
 	if reservation.CreditUSD > 0 {
@@ -1543,14 +1657,14 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 			return err
 		}
 	}
-	// PRD v3 Phase 2 — request-credit finalize. Request-credit pricing
-	// is a fixed cost per request (not per-token), so actualAmount ==
-	// reservedAmount when the request succeeded; on failure we release
-	// the full reservation back to the balance.
+	// PRD v3 Phase 2 — request-credit finalize. creditsPerReq stores the
+	// configured price per 60k tokens; runtime billing charges in 20k
+	// buckets based on actual successful usage. On failure we release the
+	// full reservation back to the balance.
 	if reservation.RequestCredits > 0 {
 		actual := 0.0
 		if success {
-			actual = reservation.RequestCredits
+			actual = settlement.ActualCredits
 		}
 		if err := h.usage.FinalizeRequestCredits(ctx, apiKey.GenfityUserID, reservation.RequestCredits, actual); err != nil {
 			return err
@@ -1593,12 +1707,12 @@ func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey st
 	if settlement.Success && h.callback != nil && h.callback.Enabled() {
 		switch reservation.BillingMode {
 		case "credit_package":
-			if reservation.RequestCredits > 0 {
+			if settlement.ActualCredits > 0 {
 				h.callback.PostUsageDebitAsync(service.UsageDebitPayload{
 					UserID:        apiKey.GenfityUserID,
 					RequestID:     settlement.RequestID,
 					BillingMode:   "credit_package",
-					AmountCredits: reservation.RequestCredits,
+					AmountCredits: settlement.ActualCredits,
 					Model:         publicModel,
 					Notes:         "gateway debit",
 				})
@@ -3005,6 +3119,26 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		}
 	}
 	success := statusStr == "success"
+	actualCredits := 0.0
+	if success && reservation != nil {
+		creditPricePer60k := 0.0
+		switch reservation.BillingMode {
+		case "credit_package":
+			creditPricePer60k = reservation.CreditPricePer60k
+		case "unlimited":
+			creditPricePer60k = reservation.PlanCreditPricePer60k
+		}
+		if creditPricePer60k > 0 {
+			billedTokens := totalTokens
+			if billedTokens <= 0 {
+				billedTokens = promptTokens + completionTokens
+			}
+			if billedTokens <= 0 {
+				billedTokens = 1
+			}
+			actualCredits = calculateActualRequestCredits(creditPricePer60k, billedTokens)
+		}
+	}
 
 	inCost := formatAmount(inputCostUsd)
 	outCost := formatAmount(outputCostUsd)
@@ -3104,8 +3238,8 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 			billingModePtr = &bm
 		}
 		if success {
-			if reservation.RequestCredits > 0 {
-				amt := fmt.Sprintf("%.4f", reservation.RequestCredits)
+			if actualCredits > 0 {
+				amt := fmt.Sprintf("%.4f", actualCredits)
 				amountCreditsPtr = &amt
 			}
 			// Read current balance, subtract this debit to compute the
@@ -3118,10 +3252,10 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 			// GetByUser would return the unlimited row first when the
 			// user holds both, leaving credit_balance NULL and snapshot
 			// stuck on the previous request's value.
-			if reservation.RequestCredits > 0 {
+			if actualCredits > 0 {
 				if entitlement, err := h.entitlements.GetCreditEntitlementByUser(ctx, apiKey.GenfityUserID); err == nil && entitlement != nil && entitlement.CreditBalance != nil {
 					current := parseFloatPtr(entitlement.CreditBalance)
-					after := current - reservation.RequestCredits
+					after := current - actualCredits
 					if after < 0 {
 						after = 0
 					}
@@ -3186,6 +3320,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		CompletionTokens: completionTokens,
 		TotalTokens:      totalTokens,
 		TotalCostUSD:     totalCostUsd,
+		ActualCredits:    actualCredits,
 		Success:          success,
 		ErrorCode:        bodyErrorCode,
 		RequestID:        entry.RequestID,

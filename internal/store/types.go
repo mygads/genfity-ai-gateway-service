@@ -24,11 +24,17 @@ type SubscriptionPlanSnapshot struct {
 	// RateLimitRPD caps requests per calendar day (UTC) per user on this
 	// plan. Independent of MaxRequestsPerPeriod — admin may set either or
 	// both. NULL/0 = no daily limit.
-	RateLimitRPD        *int32          `json:"rate_limit_rpd,omitempty"`
-	Metadata            json.RawMessage `json:"metadata,omitempty"`
-	SyncedFromGenfityAt time.Time       `json:"synced_from_genfity_at"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
+	RateLimitRPD *int32 `json:"rate_limit_rpd,omitempty"`
+	// CreditLimitPerDay / CreditLimitPerPeriod cap unlimited-plan usage in
+	// billed credits, using the same per-model credit math as credit_package:
+	// configured price per 60k total tokens, charged in 20k-token buckets.
+	// NULL/0 = unlimited.
+	CreditLimitPerDay    *float64        `json:"credit_limit_per_day,omitempty"`
+	CreditLimitPerPeriod *float64        `json:"credit_limit_per_period,omitempty"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	SyncedFromGenfityAt  time.Time       `json:"synced_from_genfity_at"`
+	CreatedAt            time.Time       `json:"created_at"`
+	UpdatedAt            time.Time       `json:"updated_at"`
 }
 
 type APIKey struct {
@@ -138,11 +144,11 @@ type CustomerEntitlement struct {
 	UpdatedFromGenfityAt   time.Time       `json:"updated_from_genfity_at"`
 }
 
-// ModelCreditCost is the per-model request credit cost for the
-// credit_package billing schema (PRD v3 Phase 2). Synced from
-// genfity-app's AiGatewayModelCreditCost table. Each model request
-// debits CreditsPerReq from the caller's balance; IsFree bypasses the
-// balance check entirely.
+// ModelCreditCost is the per-model credit price for the credit_package
+// billing schema (PRD v3 Phase 2). Synced from genfity-app's
+// AiGatewayModelCreditCost table. CreditsPerReq stores the configured
+// price per 60k total tokens; runtime billing charges that price in
+// 20k-token buckets. IsFree bypasses the balance check entirely.
 type ModelCreditCost struct {
 	ID            uuid.UUID       `json:"id"`
 	FullModelID   string          `json:"full_model_id"`

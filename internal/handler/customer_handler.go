@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -30,6 +31,33 @@ func activeModels(models []store.AIModel) []store.AIModel {
 		}
 	}
 	return items
+}
+
+func subscriptionCreditUsage(entries []store.UsageLedgerEntry, subscription *service.ActiveSubscription) (float64, float64) {
+	if subscription == nil || subscription.Entitlement == nil {
+		return 0, 0
+	}
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	periodStart, periodEnd := activePeriod(subscription.Entitlement)
+	var todayUsed float64
+	var periodUsed float64
+	for _, row := range entries {
+		if row.Status != "success" || row.BillingMode == nil || *row.BillingMode != "unlimited" || row.AmountCredits == nil {
+			continue
+		}
+		credits := parseFloatPtr(row.AmountCredits)
+		if credits <= 0 {
+			continue
+		}
+		if !row.StartedAt.Before(startOfDay) {
+			todayUsed += credits
+		}
+		if (row.StartedAt.Equal(periodStart) || row.StartedAt.After(periodStart)) && row.StartedAt.Before(periodEnd) {
+			periodUsed += credits
+		}
+	}
+	return todayUsed, periodUsed
 }
 
 func (h *CustomerHandler) Overview(w http.ResponseWriter, r *http.Request) {
@@ -102,13 +130,20 @@ func (h *CustomerHandler) UsageSummary(w http.ResponseWriter, r *http.Request) {
 func (h *CustomerHandler) Quota(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
 	if subscription, err := h.entitlements.CheckActiveSubscription(r.Context(), user.ID); err == nil && subscription != nil && subscription.Entitlement != nil {
+		creditUsedToday, creditUsedPeriod := subscriptionCreditUsage(h.usage.ListByUser(r.Context(), user.ID), subscription)
 		resp := map[string]any{
-			"balance_snapshot": subscription.Entitlement.BalanceSnapshot,
-			"period_start":     subscription.Entitlement.PeriodStart,
-			"period_end":       subscription.Entitlement.PeriodEnd,
+			"balance_snapshot":   subscription.Entitlement.BalanceSnapshot,
+			"period_start":       subscription.Entitlement.PeriodStart,
+			"period_end":         subscription.Entitlement.PeriodEnd,
+			"credit_used_today":  creditUsedToday,
+			"credit_used_period": creditUsedPeriod,
 		}
 		if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
 			resp["quota_tokens_monthly"] = *quotaTokensMonthly
+		}
+		if subscription.Plan != nil {
+			resp["credit_limit_per_day"] = subscription.Plan.CreditLimitPerDay
+			resp["credit_limit_per_period"] = subscription.Plan.CreditLimitPerPeriod
 		}
 		respondJSON(w, http.StatusOK, resp)
 		return
@@ -151,6 +186,7 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		"subscription": subscription.Entitlement,
 		"plan":         subscription.Plan,
 	}
+	creditUsedToday, creditUsedPeriod := subscriptionCreditUsage(h.usage.ListByUser(r.Context(), user.ID), subscription)
 	if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
 		resp["quota_tokens_monthly"] = *quotaTokensMonthly
 	}
@@ -163,6 +199,10 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		resp["rate_limit_rpm"] = subscription.Plan.RateLimitRPM
 		resp["rate_limit_tpm"] = subscription.Plan.RateLimitTPM
 		resp["rate_limit_rpd"] = subscription.Plan.RateLimitRPD
+		resp["credit_limit_per_day"] = subscription.Plan.CreditLimitPerDay
+		resp["credit_limit_per_period"] = subscription.Plan.CreditLimitPerPeriod
+		resp["credit_used_today"] = creditUsedToday
+		resp["credit_used_period"] = creditUsedPeriod
 		resp["concurrent_limit"] = subscription.Plan.ConcurrentLimit
 		resp["max_requests_per_period"] = subscription.Plan.MaxRequestsPerPeriod
 		if subscription.Entitlement.PricingGroup != nil {

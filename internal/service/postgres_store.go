@@ -30,9 +30,9 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, item store.SubscriptionP
 		INSERT INTO ai_gateway.subscription_plan_snapshots (
 			id, plan_code, display_name, status, monthly_price, currency,
 			quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit,
-			max_requests_per_period, rate_limit_rpd,
+			max_requests_per_period, rate_limit_rpd, credit_limit_per_day, credit_limit_per_period,
 			metadata, synced_from_genfity_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (plan_code) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
 			status = EXCLUDED.status,
@@ -44,19 +44,21 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, item store.SubscriptionP
 			concurrent_limit = EXCLUDED.concurrent_limit,
 			max_requests_per_period = EXCLUDED.max_requests_per_period,
 			rate_limit_rpd = EXCLUDED.rate_limit_rpd,
+			credit_limit_per_day = EXCLUDED.credit_limit_per_day,
+			credit_limit_per_period = EXCLUDED.credit_limit_per_period,
 			metadata = EXCLUDED.metadata,
 			synced_from_genfity_at = EXCLUDED.synced_from_genfity_at,
 			updated_at = now()
 		RETURNING id, plan_code, display_name, status, monthly_price::text, currency,
 			quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit,
-			max_requests_per_period, rate_limit_rpd,
+			max_requests_per_period, rate_limit_rpd, credit_limit_per_day, credit_limit_per_period,
 			metadata, synced_from_genfity_at, created_at, updated_at`,
 		nilUUID(item.ID), item.PlanCode, item.DisplayName, defaultString(item.Status, "active"), item.MonthlyPrice,
 		defaultString(item.Currency, "IDR"), item.QuotaTokensMonthly, item.RateLimitRPM, item.RateLimitTPM,
-		item.ConcurrentLimit, item.MaxRequestsPerPeriod, item.RateLimitRPD, metadata, defaultTime(item.SyncedFromGenfityAt),
+		item.ConcurrentLimit, item.MaxRequestsPerPeriod, item.RateLimitRPD, item.CreditLimitPerDay, item.CreditLimitPerPeriod, metadata, defaultTime(item.SyncedFromGenfityAt),
 	).Scan(&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency,
 		&item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit,
-		&item.MaxRequestsPerPeriod, &item.RateLimitRPD,
+		&item.MaxRequestsPerPeriod, &item.RateLimitRPD, &item.CreditLimitPerDay, &item.CreditLimitPerPeriod,
 		&item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return store.SubscriptionPlanSnapshot{}, err
@@ -65,7 +67,7 @@ func (s *PostgresStore) UpsertPlan(ctx context.Context, item store.SubscriptionP
 }
 
 func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanSnapshot {
-	rows, err := s.pool.Query(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, max_requests_per_period, rate_limit_rpd, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots ORDER BY plan_code ASC`)
+	rows, err := s.pool.Query(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, max_requests_per_period, rate_limit_rpd, credit_limit_per_day, credit_limit_per_period, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots ORDER BY plan_code ASC`)
 	if err != nil {
 		return nil
 	}
@@ -73,7 +75,7 @@ func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanS
 	items := []store.SubscriptionPlanSnapshot{}
 	for rows.Next() {
 		var item store.SubscriptionPlanSnapshot
-		if rows.Scan(&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency, &item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit, &item.MaxRequestsPerPeriod, &item.RateLimitRPD, &item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt) == nil {
+		if rows.Scan(&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency, &item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit, &item.MaxRequestsPerPeriod, &item.RateLimitRPD, &item.CreditLimitPerDay, &item.CreditLimitPerPeriod, &item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt) == nil {
 			items = append(items, item)
 		}
 	}
@@ -85,10 +87,10 @@ func (s *PostgresStore) ListPlans(ctx context.Context) []store.SubscriptionPlanS
 
 func (s *PostgresStore) GetPlanByCode(ctx context.Context, planCode string) (*store.SubscriptionPlanSnapshot, error) {
 	var item store.SubscriptionPlanSnapshot
-	err := s.pool.QueryRow(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, max_requests_per_period, rate_limit_rpd, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots WHERE plan_code = $1 LIMIT 1`, planCode).Scan(
+	err := s.pool.QueryRow(ctx, `SELECT id, plan_code, display_name, status, monthly_price::text, currency, quota_tokens_monthly, rate_limit_rpm, rate_limit_tpm, concurrent_limit, max_requests_per_period, rate_limit_rpd, credit_limit_per_day, credit_limit_per_period, metadata, synced_from_genfity_at, created_at, updated_at FROM ai_gateway.subscription_plan_snapshots WHERE plan_code = $1 LIMIT 1`, planCode).Scan(
 		&item.ID, &item.PlanCode, &item.DisplayName, &item.Status, &item.MonthlyPrice, &item.Currency,
 		&item.QuotaTokensMonthly, &item.RateLimitRPM, &item.RateLimitTPM, &item.ConcurrentLimit,
-		&item.MaxRequestsPerPeriod, &item.RateLimitRPD,
+		&item.MaxRequestsPerPeriod, &item.RateLimitRPD, &item.CreditLimitPerDay, &item.CreditLimitPerPeriod,
 		&item.Metadata, &item.SyncedFromGenfityAt, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -18,15 +18,17 @@ type RateLimitService struct {
 }
 
 type PlanLimits struct {
-	RPM                  int
-	TPM                  int
-	ConcurrentLimit      int
+	RPM             int
+	TPM             int
+	ConcurrentLimit int
 	// MaxRequestsPerPeriod caps total requests for one entitlement period
 	// (period_start..period_end). 0 = unlimited.
 	MaxRequestsPerPeriod int
 	// RPD caps requests per calendar day (UTC) per user on the plan. 0 =
 	// no daily limit. Independent of MaxRequestsPerPeriod.
 	RPD                  int
+	CreditLimitPerDay    float64
+	CreditLimitPerPeriod float64
 }
 
 func NewRateLimitService(client *redis.Client, prefix string, logger zerolog.Logger) *RateLimitService {
@@ -121,6 +123,12 @@ func PlanLimitsFromSnapshot(plan *store.SubscriptionPlanSnapshot) PlanLimits {
 	if plan.RateLimitRPD != nil {
 		limits.RPD = int(*plan.RateLimitRPD)
 	}
+	if plan.CreditLimitPerDay != nil {
+		limits.CreditLimitPerDay = *plan.CreditLimitPerDay
+	}
+	if plan.CreditLimitPerPeriod != nil {
+		limits.CreditLimitPerPeriod = *plan.CreditLimitPerPeriod
+	}
 	return limits
 }
 
@@ -146,6 +154,14 @@ func (l PlanLimits) HasMaxRequestsPerPeriod() bool {
 
 func (l PlanLimits) HasRPD() bool {
 	return l.RPD > 0
+}
+
+func (l PlanLimits) HasCreditPerDay() bool {
+	return l.CreditLimitPerDay > 0
+}
+
+func (l PlanLimits) HasCreditPerPeriod() bool {
+	return l.CreditLimitPerPeriod > 0
 }
 
 func (l PlanLimits) TPMAllowance(estimatedTokens int64) int64 {
@@ -250,6 +266,95 @@ func (s *RateLimitService) GetRequestsPerPeriodCount(ctx context.Context, userID
 		return 0
 	}
 	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func (s *RateLimitService) CheckPlanCreditRPD(ctx context.Context, userID, planCode string, amount, limit float64) error {
+	if amount <= 0 || limit <= 0 || userID == "" || planCode == "" {
+		return nil
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	count, err := s.client.IncrByFloat(ctx, key, amount).Result()
+	if err != nil {
+		return err
+	}
+	if count == amount {
+		_ = s.client.Expire(ctx, key, 25*time.Hour).Err()
+	}
+	if count > limit {
+		_ = s.client.IncrByFloat(ctx, key, -amount).Err()
+		return fmt.Errorf("plan_credit_rpd_exceeded")
+	}
+	return nil
+}
+
+func (s *RateLimitService) FinalizePlanCreditRPD(ctx context.Context, userID, planCode string, reserved, actual float64) error {
+	if reserved <= 0 || userID == "" || planCode == "" {
+		return nil
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	delta := actual - reserved
+	if delta == 0 {
+		return nil
+	}
+	return s.client.IncrByFloat(ctx, key, delta).Err()
+}
+
+func (s *RateLimitService) CheckPlanCreditsPerPeriod(ctx context.Context, userID, periodKey string, ttl time.Duration, amount, limit float64) error {
+	if amount <= 0 || limit <= 0 || userID == "" || periodKey == "" {
+		return nil
+	}
+	key := fmt.Sprintf("%s:rl:plan-credit-period:%s:%s", s.prefix, userID, periodKey)
+	count, err := s.client.IncrByFloat(ctx, key, amount).Result()
+	if err != nil {
+		return err
+	}
+	if count == amount && ttl > 0 {
+		_ = s.client.Expire(ctx, key, ttl).Err()
+	}
+	if count > limit {
+		_ = s.client.IncrByFloat(ctx, key, -amount).Err()
+		return fmt.Errorf("plan_credit_period_exceeded")
+	}
+	return nil
+}
+
+func (s *RateLimitService) FinalizePlanCreditsPerPeriod(ctx context.Context, userID, periodKey string, reserved, actual float64) error {
+	if reserved <= 0 || userID == "" || periodKey == "" {
+		return nil
+	}
+	key := fmt.Sprintf("%s:rl:plan-credit-period:%s:%s", s.prefix, userID, periodKey)
+	delta := actual - reserved
+	if delta == 0 {
+		return nil
+	}
+	return s.client.IncrByFloat(ctx, key, delta).Err()
+}
+
+func (s *RateLimitService) GetPlanCreditRPDCount(ctx context.Context, userID, planCode string) float64 {
+	if userID == "" || planCode == "" {
+		return 0
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	n, err := s.client.Get(ctx, key).Float64()
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func (s *RateLimitService) GetPlanCreditsPerPeriodCount(ctx context.Context, userID, periodKey string) float64 {
+	if userID == "" || periodKey == "" {
+		return 0
+	}
+	key := fmt.Sprintf("%s:rl:plan-credit-period:%s:%s", s.prefix, userID, periodKey)
+	n, err := s.client.Get(ctx, key).Float64()
+	if err != nil || n < 0 {
 		return 0
 	}
 	return n
