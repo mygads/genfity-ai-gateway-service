@@ -1165,7 +1165,7 @@ func creditsPer20kBucket(creditsPer60k float64) float64 {
 	if creditsPer60k <= 0 {
 		return 0
 	}
-	return roundCredits(creditsPer60k / (float64(creditPricePerRequestTokens) / float64(creditBillingBucketTokens)))
+	return creditsPer60k / (float64(creditPricePerRequestTokens) / float64(creditBillingBucketTokens))
 }
 
 func calculateActualRequestCredits(creditsPer60k float64, totalTokens int64) float64 {

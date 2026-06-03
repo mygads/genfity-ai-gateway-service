@@ -52,6 +52,12 @@ func TestCalculateActualRequestCredits_Uses20kBuckets(t *testing.T) {
 	if got := calculateActualRequestCredits(9, 0); got != 0 {
 		t.Fatalf("calculateActualRequestCredits() zero = %v, want 0", got)
 	}
+	if got := calculateActualRequestCredits(5, 60_000); got != 5 {
+		t.Fatalf("calculateActualRequestCredits() 60k exact = %v, want 5", got)
+	}
+	if got := calculateActualRequestCredits(4, 60_000); got != 4 {
+		t.Fatalf("calculateActualRequestCredits() 60k exact for 4 = %v, want 4", got)
+	}
 }
 
 func TestEstimateReservedRequestCredits_UsesEstimatedBuckets(t *testing.T) {
