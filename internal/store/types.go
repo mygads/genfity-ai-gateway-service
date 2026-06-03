@@ -27,7 +27,7 @@ type SubscriptionPlanSnapshot struct {
 	RateLimitRPD *int32 `json:"rate_limit_rpd,omitempty"`
 	// CreditLimitPerDay / CreditLimitPerPeriod cap unlimited-plan usage in
 	// billed credits, using the same per-model credit math as credit_package:
-	// configured price per 60k total tokens, charged in 20k-token buckets.
+	// configured price per 20k total tokens, charged in 20k-token buckets.
 	// NULL/0 = unlimited.
 	CreditLimitPerDay    *float64        `json:"credit_limit_per_day,omitempty"`
 	CreditLimitPerPeriod *float64        `json:"credit_limit_per_period,omitempty"`
@@ -147,12 +147,12 @@ type CustomerEntitlement struct {
 // ModelCreditCost is the per-model credit price for the credit_package
 // billing schema (PRD v3 Phase 2). Synced from genfity-app's
 // AiGatewayModelCreditCost table. CreditsPerReq stores the configured
-// price per 60k total tokens; runtime billing charges that price in
+// price per 20k total tokens; runtime billing charges that price in
 // 20k-token buckets. IsFree bypasses the balance check entirely.
 type ModelCreditCost struct {
 	ID            uuid.UUID       `json:"id"`
 	FullModelID   string          `json:"full_model_id"`
-	CreditsPerReq string          `json:"credits_per_req"` // stored as numeric(10,4)
+	CreditsPerReq string          `json:"credits_per_req"` // stored as numeric(12,6)
 	IsFree        bool            `json:"is_free"`
 	IsActive      bool            `json:"is_active"`
 	Notes         *string         `json:"notes,omitempty"`

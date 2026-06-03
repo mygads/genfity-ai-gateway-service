@@ -1119,16 +1119,16 @@ type runtimeReservation struct {
 	//
 	// RequestCredits is the RESERVED credit amount for the
 	// credit_package schema. The configured model price is stored in
-	// CreditPricePer60k (price per 60k total tokens) and runtime
+	// CreditPricePer20k (price per 20k total tokens) and runtime
 	// billing charges in 20k-token buckets.
 	// PaygUSD is the reserved USD amount for the payg_topup schema
 	// (actual-cost per-1M pricing). Exactly one of these is non-zero
 	// when BillingMode != "unlimited".
 	BillingMode           string // "unlimited" | "credit_package" | "payg_topup" | ""
 	RequestCredits        float64
-	CreditPricePer60k     float64
+	CreditPricePer20k     float64
 	PaygUSD               float64
-	PlanCreditPricePer60k float64
+	PlanCreditPricePer20k float64
 	PlanCreditsPerDay     float64
 	PlanCreditsPerPeriod  float64
 	PlanCreditPeriodKey   string
@@ -1146,8 +1146,7 @@ type usageSettlement struct {
 }
 
 const (
-	creditPricePerRequestTokens = 60_000
-	creditBillingBucketTokens   = 20_000
+	creditBillingBucketTokens = 20_000
 )
 
 func roundCredits(value float64) float64 {
@@ -1161,30 +1160,23 @@ func creditBillingBuckets(totalTokens int64) int64 {
 	return int64(math.Ceil(float64(totalTokens) / float64(creditBillingBucketTokens)))
 }
 
-func creditsPer20kBucket(creditsPer60k float64) float64 {
-	if creditsPer60k <= 0 {
-		return 0
-	}
-	return creditsPer60k / (float64(creditPricePerRequestTokens) / float64(creditBillingBucketTokens))
-}
-
-func calculateActualRequestCredits(creditsPer60k float64, totalTokens int64) float64 {
+func calculateActualRequestCredits(creditsPer20k float64, totalTokens int64) float64 {
 	buckets := creditBillingBuckets(totalTokens)
-	if buckets <= 0 {
+	if buckets <= 0 || creditsPer20k <= 0 {
 		return 0
 	}
-	return roundCredits(float64(buckets) * creditsPer20kBucket(creditsPer60k))
+	return roundCredits(float64(buckets) * creditsPer20k)
 }
 
-func estimateReservedRequestCredits(creditsPer60k float64, estimate tokenReservationEstimate) float64 {
-	if creditsPer60k <= 0 {
+func estimateReservedRequestCredits(creditsPer20k float64, estimate tokenReservationEstimate) float64 {
+	if creditsPer20k <= 0 {
 		return 0
 	}
 	totalTokens := estimate.TotalTokens
 	if totalTokens <= 0 {
 		totalTokens = creditBillingBucketTokens
 	}
-	return calculateActualRequestCredits(creditsPer60k, totalTokens)
+	return calculateActualRequestCredits(creditsPer20k, totalTokens)
 }
 
 func estimateRequestTokens(payload map[string]any, model *store.AIModel) tokenReservationEstimate {
@@ -1292,9 +1284,9 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 				}
 				return runtimeReservation{}, http.StatusInternalServerError, "subscription_credit_cost_not_configured"
 			}
-			creditsPer60k := parseFloatPtr(&cost.CreditsPerReq)
-			if !cost.IsFree && creditsPer60k > 0 {
-				reservedCredits := estimateReservedRequestCredits(creditsPer60k, estimate)
+			creditsPer20k := parseFloatPtr(&cost.CreditsPerReq)
+			if !cost.IsFree && creditsPer20k > 0 {
+				reservedCredits := estimateReservedRequestCredits(creditsPer20k, estimate)
 				periodKeyValue := periodKey(subscription.Entitlement)
 				ttl := time.Until(periodEnd)
 				if ttl <= 0 {
@@ -1323,7 +1315,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 					res.PlanCreditsPerPeriod = reservedCredits
 					res.PlanCreditPeriodKey = periodKeyValue
 				}
-				res.PlanCreditPricePer60k = creditsPer60k
+				res.PlanCreditPricePer20k = creditsPer20k
 			}
 		}
 
@@ -1338,8 +1330,8 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		if err != nil || cost == nil || !cost.IsActive {
 			return runtimeReservation{}, http.StatusPaymentRequired, "credit_cost_not_configured"
 		}
-		creditsPer60k := parseFloatPtr(&cost.CreditsPerReq)
-		if cost.IsFree || creditsPer60k <= 0 {
+		creditsPer20k := parseFloatPtr(&cost.CreditsPerReq)
+		if cost.IsFree || creditsPer20k <= 0 {
 			// Free model — still require the user to carry a positive
 			// credit balance. Users with 0 balance (new accounts or
 			// exhausted credits) cannot access even free models.
@@ -1354,7 +1346,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 			}
 			return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
 		}
-		reservedCredits := estimateReservedRequestCredits(creditsPer60k, estimate)
+		reservedCredits := estimateReservedRequestCredits(creditsPer20k, estimate)
 		if err := h.usage.ReserveRequestCredits(ctx, apiKey.GenfityUserID, reservedCredits); err != nil {
 			if errors.Is(err, service.ErrInsufficientBalance) {
 				return runtimeReservation{}, http.StatusPaymentRequired, "insufficient_credit_balance"
@@ -1364,7 +1356,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 		return runtimeReservation{
 			BillingMode:       "credit_package",
 			RequestCredits:    reservedCredits,
-			CreditPricePer60k: creditsPer60k,
+			CreditPricePer20k: creditsPer20k,
 		}, 0, ""
 
 	case "payg":
@@ -1658,7 +1650,7 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 		}
 	}
 	// PRD v3 Phase 2 — request-credit finalize. creditsPerReq stores the
-	// configured price per 60k tokens; runtime billing charges in 20k
+	// configured price per 20k tokens; runtime billing charges in 20k
 	// buckets based on actual successful usage. On failure we release the
 	// full reservation back to the balance.
 	if reservation.RequestCredits > 0 {
@@ -3121,14 +3113,14 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	success := statusStr == "success"
 	actualCredits := 0.0
 	if success && reservation != nil {
-		creditPricePer60k := 0.0
+		creditPricePer20k := 0.0
 		switch reservation.BillingMode {
 		case "credit_package":
-			creditPricePer60k = reservation.CreditPricePer60k
+			creditPricePer20k = reservation.CreditPricePer20k
 		case "unlimited":
-			creditPricePer60k = reservation.PlanCreditPricePer60k
+			creditPricePer20k = reservation.PlanCreditPricePer20k
 		}
-		if creditPricePer60k > 0 {
+		if creditPricePer20k > 0 {
 			billedTokens := totalTokens
 			if billedTokens <= 0 {
 				billedTokens = promptTokens + completionTokens
@@ -3136,7 +3128,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 			if billedTokens <= 0 {
 				billedTokens = 1
 			}
-			actualCredits = calculateActualRequestCredits(creditPricePer60k, billedTokens)
+			actualCredits = calculateActualRequestCredits(creditPricePer20k, billedTokens)
 		}
 	}
 

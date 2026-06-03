@@ -43,26 +43,26 @@ func TestQuotaLimitPrefersLivePlanSnapshot(t *testing.T) {
 }
 
 func TestCalculateActualRequestCredits_Uses20kBuckets(t *testing.T) {
-	if got := calculateActualRequestCredits(9, 39_000); got != 6 {
+	if got := calculateActualRequestCredits(3, 39_000); got != 6 {
 		t.Fatalf("calculateActualRequestCredits() = %v, want 6", got)
 	}
-	if got := calculateActualRequestCredits(9, 20_000); got != 3 {
+	if got := calculateActualRequestCredits(3, 20_000); got != 3 {
 		t.Fatalf("calculateActualRequestCredits() 20k = %v, want 3", got)
 	}
-	if got := calculateActualRequestCredits(9, 0); got != 0 {
+	if got := calculateActualRequestCredits(3, 0); got != 0 {
 		t.Fatalf("calculateActualRequestCredits() zero = %v, want 0", got)
 	}
-	if got := calculateActualRequestCredits(5, 60_000); got != 5 {
-		t.Fatalf("calculateActualRequestCredits() 60k exact = %v, want 5", got)
+	if got := calculateActualRequestCredits(5.0/3.0, 60_000); got != 5 {
+		t.Fatalf("calculateActualRequestCredits() exact = %v, want 5", got)
 	}
-	if got := calculateActualRequestCredits(4, 60_000); got != 4 {
-		t.Fatalf("calculateActualRequestCredits() 60k exact for 4 = %v, want 4", got)
+	if got := calculateActualRequestCredits(4.0/3.0, 60_000); got != 4 {
+		t.Fatalf("calculateActualRequestCredits() exact for 4 = %v, want 4", got)
 	}
 }
 
 func TestEstimateReservedRequestCredits_UsesEstimatedBuckets(t *testing.T) {
 	estimate := tokenReservationEstimate{TotalTokens: 30_000}
-	if got := estimateReservedRequestCredits(9, estimate); got != 6 {
+	if got := estimateReservedRequestCredits(3, estimate); got != 6 {
 		t.Fatalf("estimateReservedRequestCredits() = %v, want 6", got)
 	}
 }
