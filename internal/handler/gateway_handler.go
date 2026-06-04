@@ -1145,6 +1145,16 @@ type usageSettlement struct {
 	RequestID        string
 }
 
+func reservationNeedsFinalize(reservation runtimeReservation) bool {
+	return reservation.BillingMode != "" ||
+		reservation.QuotaTokens > 0 ||
+		reservation.CreditUSD > 0 ||
+		reservation.RequestCredits > 0 ||
+		reservation.PaygUSD > 0 ||
+		reservation.PlanCreditsPerDay > 0 ||
+		reservation.PlanCreditsPerPeriod > 0
+}
+
 const (
 	creditBillingBucketTokens = 20_000
 )
@@ -2477,7 +2487,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		if settled {
 			return
 		}
-		if reservation.QuotaTokens == 0 && reservation.CreditUSD == 0 {
+		if !reservationNeedsFinalize(reservation) {
 			return
 		}
 		// Release reservations on early/abnormal exit (panic, ctx cancel before settlement).
@@ -2859,7 +2869,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		if settled {
 			return
 		}
-		if reservation.QuotaTokens == 0 && reservation.CreditUSD == 0 {
+		if !reservationNeedsFinalize(reservation) {
 			return
 		}
 		bgCtx := context.Background()

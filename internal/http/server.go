@@ -58,7 +58,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 	// in 2026-05 (see PRD §3.3). The gateway now forwards the request body
 	// as-is; combo resolution and fallback happen upstream.
 	gatewayHandler := handler.NewGatewayHandler(models, entitlements, usage, rateLimit, routers, cliProxyClient, genfityCallback, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
-	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements)
+	customerHandler := handler.NewCustomerHandler(apiKeys, models, usage, entitlements, rateLimit)
 	adminHandler := handler.NewAdminHandler(models, routers, usage, store, entitlements, rateLimit)
 	monitoringHandler := handler.NewMonitoringHandler(cliProxyClient, usage, store)
 	routerProxyHandler := handler.NewRouterProxyHandler(cliProxyClient, routers, cfg.AIRouterCore2APIKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)

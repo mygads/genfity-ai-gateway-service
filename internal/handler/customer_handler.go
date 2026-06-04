@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,10 +19,11 @@ type CustomerHandler struct {
 	models       *service.ModelService
 	usage        *service.UsageService
 	entitlements *service.EntitlementService
+	rateLimit    *service.RateLimitService
 }
 
-func NewCustomerHandler(apiKeys *service.APIKeyService, models *service.ModelService, usage *service.UsageService, entitlements *service.EntitlementService) *CustomerHandler {
-	return &CustomerHandler{apiKeys: apiKeys, models: models, usage: usage, entitlements: entitlements}
+func NewCustomerHandler(apiKeys *service.APIKeyService, models *service.ModelService, usage *service.UsageService, entitlements *service.EntitlementService, rateLimit *service.RateLimitService) *CustomerHandler {
+	return &CustomerHandler{apiKeys: apiKeys, models: models, usage: usage, entitlements: entitlements, rateLimit: rateLimit}
 }
 
 func activeModels(models []store.AIModel) []store.AIModel {
@@ -58,6 +61,65 @@ func subscriptionCreditUsage(entries []store.UsageLedgerEntry, subscription *ser
 		}
 	}
 	return todayUsed, periodUsed
+}
+
+type subscriptionUsageSnapshot struct {
+	RPDUsed          int
+	RPPUsed          int
+	PeriodTokensUsed int64
+	CreditUsedToday  float64
+	CreditUsedPeriod float64
+}
+
+func isFreeUsageLedgerEntry(row store.UsageLedgerEntry) bool {
+	if strings.HasSuffix(row.PublicModel, ":free") {
+		return true
+	}
+	return row.RouterModel != nil && strings.HasSuffix(*row.RouterModel, ":free")
+}
+
+func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscription *service.ActiveSubscription, rateLimit *service.RateLimitService, userID string) subscriptionUsageSnapshot {
+	if subscription == nil || subscription.Entitlement == nil {
+		return subscriptionUsageSnapshot{}
+	}
+
+	now := time.Now().UTC()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	periodStart, periodEnd := activePeriod(subscription.Entitlement)
+
+	snapshot := subscriptionUsageSnapshot{}
+	if rateLimit != nil && userID != "" {
+		snapshot.RPDUsed = rateLimit.GetPlanRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
+		snapshot.RPPUsed = rateLimit.GetRequestsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
+		snapshot.CreditUsedToday = rateLimit.GetPlanCreditRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
+		snapshot.CreditUsedPeriod = rateLimit.GetPlanCreditsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
+	}
+
+	for _, row := range entries {
+		if row.Status != "success" || row.BillingMode == nil || *row.BillingMode != "unlimited" || isFreeUsageLedgerEntry(row) {
+			continue
+		}
+		if !row.StartedAt.Before(startOfDay) {
+			if rateLimit == nil {
+				snapshot.RPDUsed++
+			}
+			if row.AmountCredits != nil && rateLimit == nil {
+				snapshot.CreditUsedToday += parseFloatPtr(row.AmountCredits)
+			}
+		}
+		if row.StartedAt.Before(periodStart) || !row.StartedAt.Before(periodEnd) {
+			continue
+		}
+		snapshot.PeriodTokensUsed += row.TotalTokens
+		if rateLimit == nil {
+			snapshot.RPPUsed++
+		}
+		if row.AmountCredits != nil && rateLimit == nil {
+			snapshot.CreditUsedPeriod += parseFloatPtr(row.AmountCredits)
+		}
+	}
+
+	return snapshot
 }
 
 func (h *CustomerHandler) Overview(w http.ResponseWriter, r *http.Request) {
@@ -130,13 +192,16 @@ func (h *CustomerHandler) UsageSummary(w http.ResponseWriter, r *http.Request) {
 func (h *CustomerHandler) Quota(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
 	if subscription, err := h.entitlements.CheckActiveSubscription(r.Context(), user.ID); err == nil && subscription != nil && subscription.Entitlement != nil {
-		creditUsedToday, creditUsedPeriod := subscriptionCreditUsage(h.usage.ListByUser(r.Context(), user.ID), subscription)
+		usageSnapshot := collectSubscriptionUsageSnapshot(h.usage.ListByUser(r.Context(), user.ID), subscription, h.rateLimit, user.ID)
 		resp := map[string]any{
 			"balance_snapshot":   subscription.Entitlement.BalanceSnapshot,
 			"period_start":       subscription.Entitlement.PeriodStart,
 			"period_end":         subscription.Entitlement.PeriodEnd,
-			"credit_used_today":  creditUsedToday,
-			"credit_used_period": creditUsedPeriod,
+			"credit_used_today":  usageSnapshot.CreditUsedToday,
+			"credit_used_period": usageSnapshot.CreditUsedPeriod,
+			"rpd_used":           usageSnapshot.RPDUsed,
+			"rpp_used":           usageSnapshot.RPPUsed,
+			"period_tokens_used": usageSnapshot.PeriodTokensUsed,
 		}
 		if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
 			resp["quota_tokens_monthly"] = *quotaTokensMonthly
@@ -182,11 +247,16 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 	// Flatten plan limits onto the response so the customer dashboard
 	// can display RPD/RPM/concurrent/period/quota caps without making a
 	// second admin call. The frontend reads these fields directly.
+	usageSnapshot := collectSubscriptionUsageSnapshot(h.usage.ListByUser(r.Context(), user.ID), subscription, h.rateLimit, user.ID)
 	resp := map[string]any{
-		"subscription": subscription.Entitlement,
-		"plan":         subscription.Plan,
+		"subscription":       subscription.Entitlement,
+		"plan":               subscription.Plan,
+		"rpd_used":           usageSnapshot.RPDUsed,
+		"rpp_used":           usageSnapshot.RPPUsed,
+		"period_tokens_used": usageSnapshot.PeriodTokensUsed,
+		"credit_used_today":  usageSnapshot.CreditUsedToday,
+		"credit_used_period": usageSnapshot.CreditUsedPeriod,
 	}
-	creditUsedToday, creditUsedPeriod := subscriptionCreditUsage(h.usage.ListByUser(r.Context(), user.ID), subscription)
 	if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
 		resp["quota_tokens_monthly"] = *quotaTokensMonthly
 	}
@@ -201,8 +271,6 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		resp["rate_limit_rpd"] = subscription.Plan.RateLimitRPD
 		resp["credit_limit_per_day"] = subscription.Plan.CreditLimitPerDay
 		resp["credit_limit_per_period"] = subscription.Plan.CreditLimitPerPeriod
-		resp["credit_used_today"] = creditUsedToday
-		resp["credit_used_period"] = creditUsedPeriod
 		resp["concurrent_limit"] = subscription.Plan.ConcurrentLimit
 		resp["max_requests_per_period"] = subscription.Plan.MaxRequestsPerPeriod
 		if subscription.Entitlement.PricingGroup != nil {

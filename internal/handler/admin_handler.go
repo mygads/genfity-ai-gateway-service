@@ -833,40 +833,13 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 		if sub.Plan != nil {
 			s["plan_name"] = sub.Plan.DisplayName
 		}
-		// Live counters — read-only.
-		rpdUsed, rppUsed := 0, 0
-		var periodTokensUsed int64
-		var creditUsedToday float64
-		var creditUsedPeriod float64
-		nowUTC := time.Now().UTC()
-		startOfDayUTC := time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC)
-		if h.rateLimit != nil {
-			rpdUsed = h.rateLimit.GetPlanRPDCount(ctx, userID, ent.PlanCode)
-			rppUsed = h.rateLimit.GetRequestsPerPeriodCount(ctx, userID, periodKey(ent))
-		}
-		if ent.PeriodStart != nil && ent.PeriodEnd != nil {
-			for _, row := range h.store.ListUsageByUser(ctx, userID) {
-				if row.Status != "success" || row.BillingMode == nil || *row.BillingMode != "unlimited" {
-					continue
-				}
-				if !row.StartedAt.Before(startOfDayUTC) && row.AmountCredits != nil {
-					creditUsedToday += parseFloatPtr(row.AmountCredits)
-				}
-				if row.StartedAt.Before(*ent.PeriodStart) || row.StartedAt.After(*ent.PeriodEnd) {
-					continue
-				}
-				periodTokensUsed += row.TotalTokens
-				if row.AmountCredits != nil {
-					creditUsedPeriod += parseFloatPtr(row.AmountCredits)
-				}
-			}
-		}
+		usageSnapshot := collectSubscriptionUsageSnapshot(h.store.ListUsageByUser(ctx, userID), sub, h.rateLimit, userID)
 		s["usage"] = map[string]any{
-			"rpd_used":           rpdUsed,
-			"rpp_used":           rppUsed,
-			"period_tokens_used": periodTokensUsed,
-			"credit_used_today":  creditUsedToday,
-			"credit_used_period": creditUsedPeriod,
+			"rpd_used":           usageSnapshot.RPDUsed,
+			"rpp_used":           usageSnapshot.RPPUsed,
+			"period_tokens_used": usageSnapshot.PeriodTokensUsed,
+			"credit_used_today":  usageSnapshot.CreditUsedToday,
+			"credit_used_period": usageSnapshot.CreditUsedPeriod,
 		}
 		subSection = s
 	}
