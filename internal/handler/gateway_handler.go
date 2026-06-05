@@ -2516,10 +2516,13 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	var lastBody []byte
 	var lastStatusCode int
 
-	// Start sending keepalive to client immediately to prevent Cloudflare
-	// 120s idle timeout while waiting for CLIProxyAPI combo fallback / model
-	// reasoning. Applies to both streaming and non-streaming requests.
-	stopKeepalive := startPreResponseKeepalive(w, 25*time.Second)
+	// Only streaming responses can safely receive pre-response keepalive bytes.
+	// For non-streaming JSON responses, writing anything before the final body
+	// corrupts the response contract.
+	stopKeepalive := func() {}
+	if streamRequested {
+		stopKeepalive = startPreResponseKeepalive(w, 25*time.Second)
+	}
 
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
@@ -2900,9 +2903,13 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	var lastBody []byte
 	var lastStatusCode int
 
-	// Start sending keepalive to client immediately to prevent Cloudflare
-	// 120s idle timeout while waiting for CLIProxyAPI.
-	stopChatKeepalive := startPreResponseKeepalive(w, 25*time.Second)
+	// Only streaming responses can safely receive pre-response keepalive bytes.
+	// For non-streaming JSON responses, writing anything before the final body
+	// corrupts the response contract.
+	stopChatKeepalive := func() {}
+	if streamRequested {
+		stopChatKeepalive = startPreResponseKeepalive(w, 25*time.Second)
+	}
 
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
