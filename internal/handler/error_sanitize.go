@@ -291,6 +291,51 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 	return []byte(out)
 }
 
+type sseRewriteBuffer struct {
+	pending []byte
+}
+
+func (b *sseRewriteBuffer) append(chunk []byte, publicModel string) []byte {
+	if len(chunk) == 0 {
+		return nil
+	}
+	b.pending = append(b.pending, chunk...)
+	completeEnd, delimLen := findLastSSEEventBoundary(b.pending)
+	if completeEnd < 0 {
+		return nil
+	}
+	complete := append([]byte(nil), b.pending[:completeEnd+delimLen]...)
+	b.pending = append(b.pending[:0], b.pending[completeEnd+delimLen:]...)
+	return rewriteAndSanitizeSSEPayload(complete, publicModel)
+}
+
+func (b *sseRewriteBuffer) flush(publicModel string) []byte {
+	if len(b.pending) == 0 {
+		return nil
+	}
+	out := rewriteAndSanitizeSSEPayload(b.pending, publicModel)
+	b.pending = nil
+	return out
+}
+
+func rewriteAndSanitizeSSEPayload(chunk []byte, publicModel string) []byte {
+	safe := sanitizeSSEChunk(chunk)
+	return rewriteSSEChunkModel(safe, publicModel)
+}
+
+func findLastSSEEventBoundary(chunk []byte) (int, int) {
+	lastLF := bytes.LastIndex(chunk, []byte("\n\n"))
+	lastCRLF := bytes.LastIndex(chunk, []byte("\r\n\r\n"))
+	switch {
+	case lastLF < 0 && lastCRLF < 0:
+		return -1, 0
+	case lastLF > lastCRLF:
+		return lastLF, 2
+	default:
+		return lastCRLF, 4
+	}
+}
+
 func buildSafeErrorJSON(statusCode int, message string) []byte {
 	errType := "server_error"
 	code := "upstream_error"

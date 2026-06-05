@@ -1789,6 +1789,7 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 	w.WriteHeader(resp.StatusCode)
 
 	captured := tailCaptureBuffer{limit: maxStreamCaptureBytes}
+	rewriter := sseRewriteBuffer{}
 	buf := make([]byte, 32*1024)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -1798,22 +1799,24 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			// Sanitize each SSE chunk so internal provider errors
-			// (litellm, model names, cooldown messages) never reach
-			// the customer even in streaming responses.
-			safe := sanitizeSSEChunk(chunk)
-			// Rewrite the "model" field in each SSE event to the public
-			// model the customer requested (covers OpenAI chunk.model and
-			// Anthropic message_start's message.model) so a disguised
-			// combo's real upstream never leaks mid-stream.
-			safe = rewriteSSEChunkModel(safe, publicModel)
-			_, _ = w.Write(safe)
+			// Network reads split SSE payloads arbitrarily, so buffer until
+			// we have one or more complete events before sanitizing/rewriting.
+			safe := rewriter.append(chunk, publicModel)
+			if len(safe) > 0 {
+				_, _ = w.Write(safe)
+			}
 			_, _ = captured.Write(chunk)
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
+			if safe := rewriter.flush(publicModel); len(safe) > 0 {
+				_, _ = w.Write(safe)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
 			break
 		}
 	}

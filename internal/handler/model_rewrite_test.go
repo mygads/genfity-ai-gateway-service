@@ -102,3 +102,28 @@ func TestRewriteSSEChunkModel_NoOpCases(t *testing.T) {
 		t.Fatalf("no-model chunk should be no-op, got %q", got)
 	}
 }
+
+func TestSSERewriteBuffer_ReassemblesSplitEvents(t *testing.T) {
+	buffer := sseRewriteBuffer{}
+	part1 := []byte(": genflowaistreamopen\n")
+	part2 := []byte("data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"claude-opus-4.8-thinking-agentic\",\"choices\":[{\"delta\":{\"reasoning_content\":\"hidden\",\"role\":\"assistant\"}}]}\n\n")
+
+	if got := buffer.append(part1, "genfity/claude-opus-4.8"); len(got) != 0 {
+		t.Fatalf("expected no flushed output for partial SSE event, got %q", got)
+	}
+
+	got := buffer.append(part2, "genfity/claude-opus-4.8")
+	out := string(got)
+	if !strings.Contains(out, ": genflowaistreamopen") {
+		t.Fatalf("expected comment prelude to be preserved, got %q", out)
+	}
+	if !strings.Contains(out, "\"model\":\"genfity/claude-opus-4.8\"") {
+		t.Fatalf("expected public model rewrite, got %q", out)
+	}
+	if strings.Contains(out, "thinking-agentic") {
+		t.Fatalf("upstream model leaked after split reassembly: %q", out)
+	}
+	if strings.Contains(out, "reasoning_content") || strings.Contains(out, "hidden") {
+		t.Fatalf("reasoning_content leaked after split reassembly: %q", out)
+	}
+}
