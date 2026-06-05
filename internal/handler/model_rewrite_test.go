@@ -19,6 +19,18 @@ func TestRewriteResponseModel_OpenAINonStream(t *testing.T) {
 	}
 }
 
+func TestRewriteResponseModel_StripsThinkingTags(t *testing.T) {
+	body := []byte(`{"id":"x","object":"chat.completion","model":"kr/claude-haiku-4.5-thinking-agentic","choices":[{"message":{"role":"assistant","content":"<thinking>\ninternal reasoning\n</thinking>\n\nok"}}]}`)
+	out := rewriteResponseModel(body, 200, "genfity/claude-haiku-4.5")
+	text := string(out)
+	if strings.Contains(strings.ToLower(text), "<thinking>") || strings.Contains(text, "internal reasoning") {
+		t.Fatalf("thinking leaked: %s", out)
+	}
+	if !strings.Contains(text, `"content":"ok"`) {
+		t.Fatalf("sanitized content missing: %s", out)
+	}
+}
+
 func TestRewriteResponseModel_AnthropicNonStream(t *testing.T) {
 	body := []byte(`{"id":"x","type":"message","role":"assistant","model":"kimi-k2.6","content":[{"type":"text","text":"ok"}]}`)
 	out := rewriteResponseModel(body, 200, "genfity/claude-opus-4.8")
@@ -60,6 +72,21 @@ func TestRewriteSSEChunkModel_OpenAIChunk(t *testing.T) {
 	}
 	if !strings.HasSuffix(string(out), "\n\n") {
 		t.Fatalf("SSE framing (trailing newlines) not preserved: %q", out)
+	}
+}
+
+func TestRewriteSSEChunkModel_StripsThinkingTagsAndNormalizesPrelude(t *testing.T) {
+	chunk := []byte(": genflowaistreamopen\ndata: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"model\":\"genflowai/claude-opus-4.8-thinking-agentic\",\"choices\":[{\"delta\":{\"content\":\"<thinking>internal reasoning</thinking>ok\",\"role\":\"assistant\"}}]}\n\n")
+	out := rewriteSSEChunkModel(chunk, "genfity/claude-opus-4.8")
+	text := string(out)
+	if strings.Contains(text, "genflowai/claude-opus-4.8-thinking-agentic") || strings.Contains(text, "internal reasoning") || strings.Contains(strings.ToLower(text), "<thinking>") {
+		t.Fatalf("stream thinking/model leaked: %q", out)
+	}
+	if !strings.Contains(text, ": keep-alive") {
+		t.Fatalf("expected provider prelude normalization, got %q", out)
+	}
+	if !strings.Contains(text, `"content":"ok"`) {
+		t.Fatalf("sanitized stream content missing: %q", out)
 	}
 }
 
@@ -114,8 +141,8 @@ func TestSSERewriteBuffer_ReassemblesSplitEvents(t *testing.T) {
 
 	got := buffer.append(part2, "genfity/claude-opus-4.8")
 	out := string(got)
-	if !strings.Contains(out, ": genflowaistreamopen") {
-		t.Fatalf("expected comment prelude to be preserved, got %q", out)
+	if !strings.Contains(out, ": keep-alive") {
+		t.Fatalf("expected comment prelude to be normalized, got %q", out)
 	}
 	if !strings.Contains(out, "\"model\":\"genfity/claude-opus-4.8\"") {
 		t.Fatalf("expected public model rewrite, got %q", out)

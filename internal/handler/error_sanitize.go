@@ -3,10 +3,13 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
 const customerGatewayBusyMessage = "The requested model/provider is currently experiencing high traffic. Please try again later."
+
+var thinkingTagPattern = regexp.MustCompile(`(?is)<thinking>\s*.*?\s*</thinking>\s*`)
 
 func sanitizedMessageForStatus(statusCode int) string {
 	return customerGatewayBusyMessage
@@ -191,6 +194,19 @@ func stripReasoningContentInPlace(value any) bool {
 	}
 }
 
+func stripThinkingTags(text string) (string, bool) {
+	if text == "" {
+		return text, false
+	}
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "<thinking>") || !strings.Contains(lower, "</thinking>") {
+		return text, false
+	}
+	cleaned := thinkingTagPattern.ReplaceAllString(text, "")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned, cleaned != text
+}
+
 // rewriteModelInPayload sets the "model" field of a parsed response payload
 // to the public model name the customer requested, so the real router/
 // upstream model (e.g. "minimax-m2.5", "kimi-k2.6") never leaks. Handles
@@ -224,7 +240,9 @@ func rewriteResponseModel(body []byte, statusCode int, publicModel string) []byt
 	if len(body) == 0 || statusCode >= 400 {
 		return body
 	}
-	if !bytes.Contains(body, []byte(`"model"`)) && !bytes.Contains(body, []byte(`"reasoning_content"`)) {
+	if !bytes.Contains(body, []byte(`"model"`)) &&
+		!bytes.Contains(body, []byte(`"reasoning_content"`)) &&
+		!bytes.Contains(bytes.ToLower(body), []byte("<thinking>")) {
 		return body
 	}
 	var payload map[string]any
@@ -233,6 +251,9 @@ func rewriteResponseModel(body []byte, statusCode int, publicModel string) []byt
 	}
 	changed := rewriteModelInPayload(payload, publicModel)
 	if stripReasoningContentInPlace(payload) {
+		changed = true
+	}
+	if stripThinkingTagsInPlace(payload) {
 		changed = true
 	}
 	if !changed {
@@ -250,7 +271,9 @@ func rewriteResponseModel(body []byte, statusCode int, publicModel string) []byt
 // handling exactly so SSE framing is preserved. It also strips
 // reasoning_content from any JSON SSE data event.
 func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
-	if !bytes.Contains(chunk, []byte(`"model"`)) && !bytes.Contains(chunk, []byte(`"reasoning_content"`)) {
+	if !bytes.Contains(chunk, []byte(`"model"`)) &&
+		!bytes.Contains(chunk, []byte(`"reasoning_content"`)) &&
+		!bytes.Contains(bytes.ToLower(chunk), []byte("<thinking>")) {
 		return chunk
 	}
 	lines := strings.Split(string(chunk), "\n")
@@ -258,6 +281,11 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 	modified := false
 	for _, line := range lines {
 		trimmed := strings.TrimRight(line, "\r")
+		if strings.HasPrefix(trimmed, ":") && strings.TrimSpace(strings.TrimPrefix(trimmed, ":")) != "" {
+			result.WriteString(": keep-alive\n")
+			modified = true
+			continue
+		}
 		if strings.HasPrefix(trimmed, "data:") {
 			data := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 			if data != "" && data != "[DONE]" {
@@ -265,6 +293,9 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 				if err := json.Unmarshal([]byte(data), &payload); err == nil {
 					changed := rewriteModelInPayload(payload, publicModel)
 					if stripReasoningContentInPlace(payload) {
+						changed = true
+					}
+					if stripThinkingTagsInPlace(payload) {
 						changed = true
 					}
 					if changed {
@@ -275,6 +306,12 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 						result.WriteString("\n")
 						continue
 					}
+				} else if cleaned, changed := stripThinkingTags(data); changed {
+					modified = true
+					result.WriteString("data: ")
+					result.WriteString(cleaned)
+					result.WriteString("\n")
+					continue
 				}
 			}
 		}
@@ -289,6 +326,39 @@ func rewriteSSEChunkModel(chunk []byte, publicModel string) []byte {
 		out = out[:len(out)-1]
 	}
 	return []byte(out)
+}
+
+func stripThinkingTagsInPlace(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		changed := false
+		for key, nested := range typed {
+			lowerKey := strings.ToLower(key)
+			if (lowerKey == "content" || lowerKey == "text") && nested != nil {
+				if current, ok := nested.(string); ok {
+					if cleaned, modified := stripThinkingTags(current); modified {
+						typed[key] = cleaned
+						changed = true
+						continue
+					}
+				}
+			}
+			if stripThinkingTagsInPlace(nested) {
+				changed = true
+			}
+		}
+		return changed
+	case []any:
+		changed := false
+		for _, nested := range typed {
+			if stripThinkingTagsInPlace(nested) {
+				changed = true
+			}
+		}
+		return changed
+	default:
+		return false
+	}
 }
 
 type sseRewriteBuffer struct {
