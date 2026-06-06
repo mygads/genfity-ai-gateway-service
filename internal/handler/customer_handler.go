@@ -272,7 +272,18 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		resp["credit_limit_per_day"] = subscription.Plan.CreditLimitPerDay
 		resp["credit_limit_per_period"] = subscription.Plan.CreditLimitPerPeriod
 		resp["concurrent_limit"] = subscription.Plan.ConcurrentLimit
-		resp["max_requests_per_period"] = subscription.Plan.MaxRequestsPerPeriod
+		// Report the EFFECTIVE RPP cap (base × stacked-window multiplier),
+		// so the dashboard shows the quota the user actually has after
+		// stacking/extending the plan, matching enforcement in
+		// applyPreRequestLimits. base_max_requests_per_period exposes the
+		// unscaled plan value for reference.
+		if subscription.Plan.MaxRequestsPerPeriod != nil {
+			base := int(*subscription.Plan.MaxRequestsPerPeriod)
+			resp["base_max_requests_per_period"] = base
+			resp["max_requests_per_period"] = base * periodRPPMultiplier(subscription)
+		} else {
+			resp["max_requests_per_period"] = subscription.Plan.MaxRequestsPerPeriod
+		}
 		if subscription.Entitlement.PricingGroup != nil {
 			resp["pricing_group"] = *subscription.Entitlement.PricingGroup
 		}

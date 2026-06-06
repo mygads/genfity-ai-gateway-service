@@ -969,7 +969,14 @@ func (h *GatewayHandler) applyPreRequestLimits(
 		if ttl <= 0 {
 			ttl = 24 * time.Hour
 		}
-		if err := h.rateLimit.CheckRequestsPerPeriod(ctx, apiKey.GenfityUserID, pk, ttl, limits.MaxRequestsPerPeriod); err != nil {
+		// Scale the RPP cap by how many base purchase windows this period
+		// spans. Stacking a 1-day plan 4× extends the window to 4 days, so
+		// the user should get 4× the single-purchase RPP instead of being
+		// capped at one day's worth across the whole window. Multiplier is
+		// 1 when the base duration is unknown (fail safe). RPD still bounds
+		// daily burst independently.
+		effectiveRPP := limits.MaxRequestsPerPeriod * periodRPPMultiplier(subscription)
+		if err := h.rateLimit.CheckRequestsPerPeriod(ctx, apiKey.GenfityUserID, pk, ttl, effectiveRPP); err != nil {
 			return "plan_period_limit_exceeded", http.StatusTooManyRequests, tracker
 		}
 		tracker.periodConsumed = true
@@ -1025,6 +1032,68 @@ func periodKey(entitlement *store.CustomerEntitlement) string {
 	}
 	start, end := activePeriod(entitlement)
 	return fmt.Sprintf("%d-%d", start.Unix(), end.Unix())
+}
+
+// planBaseDurationDays reads the plan's base purchase duration (in days)
+// from the live plan snapshot metadata. Returns 0 when unknown — callers
+// must treat 0 as "no scaling" (multiplier 1) so a missing field can never
+// shrink or inflate a user's quota. The field is injected by genfity-app's
+// buildPlanSnapshotPayload from AiGatewayPlan.durationDays.
+func planBaseDurationDays(subscription *service.ActiveSubscription) int {
+	if subscription == nil || subscription.Plan == nil || len(subscription.Plan.Metadata) == 0 {
+		return 0
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(subscription.Plan.Metadata, &meta); err != nil {
+		return 0
+	}
+	switch v := meta["durationDays"].(type) {
+	case float64:
+		if v > 0 {
+			return int(v)
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil && n > 0 {
+			return int(n)
+		}
+	}
+	return 0
+}
+
+// periodRPPMultiplier returns how many base purchase windows the active
+// entitlement period spans, so the RPP (requests-per-period) cap scales
+// with stacked/extended purchases of the same plan.
+//
+// Why: a user who buys a 1-day plan 4× has the entitlement window extended
+// to 4 days (one row, period_start..period_end = 4 days), but the plan's
+// configured RPP is a single-purchase value (e.g. 750). Without scaling,
+// the 4-day window is capped at 750 total — the user paid for 4 days of
+// quota but gets 1 day's worth. We multiply RPP by round(windowDays /
+// baseDurationDays) so the effective cap matches what they purchased
+// (750 → 3000). RPD (per UTC-day) still bounds daily burst independently.
+//
+// Returns 1 (no scaling) when the base duration is unknown, the window is
+// shorter than one base period, or inputs are degenerate — failing safe to
+// the configured cap rather than guessing.
+func periodRPPMultiplier(subscription *service.ActiveSubscription) int {
+	if subscription == nil || subscription.Entitlement == nil {
+		return 1
+	}
+	baseDays := planBaseDurationDays(subscription)
+	if baseDays <= 0 {
+		return 1
+	}
+	start, end := activePeriod(subscription.Entitlement)
+	windowSeconds := end.Sub(start).Seconds()
+	baseSeconds := float64(baseDays) * 24 * 3600
+	if windowSeconds <= 0 || baseSeconds <= 0 {
+		return 1
+	}
+	multiplier := int(math.Round(windowSeconds / baseSeconds))
+	if multiplier < 1 {
+		return 1
+	}
+	return multiplier
 }
 
 func pricingGroup(subscription *service.ActiveSubscription) string {
