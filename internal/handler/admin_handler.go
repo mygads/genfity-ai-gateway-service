@@ -820,11 +820,18 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 		}
 		limits := service.PlanLimitsFromSnapshot(sub.Plan)
 		quotaTokensMonthly := quotaLimitPtr(sub)
+		// Report the EFFECTIVE RPP cap (base × stacked-window multiplier),
+		// matching runtime enforcement in applyPreRequestLimits and the
+		// customer /subscription endpoint. base_rpp exposes the unscaled
+		// plan value for reference.
+		baseRPP := limits.MaxRequestsPerPeriod
+		effectiveRPP := baseRPP * periodRPPMultiplier(sub)
 		s["limits"] = map[string]any{
 			"rpm":                     limits.RPM,
 			"tpm":                     limits.TPM,
 			"rpd":                     limits.RPD,
-			"rpp":                     limits.MaxRequestsPerPeriod,
+			"rpp":                     effectiveRPP,
+			"base_rpp":                baseRPP,
 			"credit_limit_per_day":    limits.CreditLimitPerDay,
 			"credit_limit_per_period": limits.CreditLimitPerPeriod,
 			"concurrent":              limits.ConcurrentLimit,
