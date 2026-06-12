@@ -969,6 +969,7 @@ func (h *GatewayHandler) applyPreRequestLimits(
 		if ttl <= 0 {
 			ttl = 24 * time.Hour
 		}
+		h.ensurePeriodCounterBaseline(ctx, apiKey.GenfityUserID, subscription, ttl, true, false)
 		// Scale the RPP cap by how many base purchase windows this period
 		// spans. Stacking a 1-day plan 4× extends the window to 4 days, so
 		// the user should get 4× the single-purchase RPP instead of being
@@ -1023,15 +1024,61 @@ func activePeriod(entitlement *store.CustomerEntitlement) (time.Time, time.Time)
 }
 
 // periodKey returns a stable string identifying the current entitlement
-// period for use as part of a Redis counter key. Buying a new
-// subscription cycle changes period_start/period_end and yields a
-// different key, so the counter starts fresh per cycle.
+// period for use as part of a Redis counter key. We anchor it on
+// period_start only so extending the same entitlement keeps the already-
+// consumed RPP / credit-per-period counters instead of silently starting
+// from zero mid-cycle.
 func periodKey(entitlement *store.CustomerEntitlement) string {
 	if entitlement == nil {
 		return ""
 	}
-	start, end := activePeriod(entitlement)
-	return fmt.Sprintf("%d-%d", start.Unix(), end.Unix())
+	start, _ := activePeriod(entitlement)
+	return fmt.Sprintf("%d", start.Unix())
+}
+
+func (h *GatewayHandler) ensurePeriodCounterBaseline(
+	ctx context.Context,
+	userID string,
+	subscription *service.ActiveSubscription,
+	ttl time.Duration,
+	ensureRequests bool,
+	ensureCredits bool,
+) {
+	if h == nil || h.rateLimit == nil || h.usage == nil || userID == "" || subscription == nil || subscription.Entitlement == nil {
+		return
+	}
+	pk := periodKey(subscription.Entitlement)
+	if pk == "" {
+		return
+	}
+	needRequests := ensureRequests && h.rateLimit.GetRequestsPerPeriodCount(ctx, userID, pk) == 0
+	needCredits := ensureCredits && h.rateLimit.GetPlanCreditsPerPeriodCount(ctx, userID, pk) == 0
+	if !needRequests && !needCredits {
+		return
+	}
+
+	start, end := activePeriod(subscription.Entitlement)
+	rows := h.usage.ListByUserSince(ctx, userID, start)
+	requests := 0
+	credits := 0.0
+	for _, row := range rows {
+		if row.Status != "success" || row.BillingMode == nil || *row.BillingMode != "unlimited" || isFreeUsageLedgerEntry(row) {
+			continue
+		}
+		if row.StartedAt.Before(start) || !row.StartedAt.Before(end) {
+			continue
+		}
+		requests++
+		if row.AmountCredits != nil {
+			credits += parseFloatPtr(row.AmountCredits)
+		}
+	}
+	if needRequests && requests > 0 {
+		_ = h.rateLimit.SetRequestsPerPeriod(ctx, userID, pk, ttl, requests)
+	}
+	if needCredits && credits > 0 {
+		_ = h.rateLimit.SetPlanCreditsPerPeriod(ctx, userID, pk, ttl, credits)
+	}
 }
 
 // planBaseDurationDays reads the plan's base purchase duration (in days)
@@ -1371,6 +1418,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 				if ttl <= 0 {
 					ttl = 24 * time.Hour
 				}
+				h.ensurePeriodCounterBaseline(ctx, apiKey.GenfityUserID, subscription, ttl, false, true)
 				if limits.HasCreditPerDay() {
 					if err := h.rateLimit.CheckPlanCreditRPD(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, reservedCredits, limits.CreditLimitPerDay); err != nil {
 						if res.QuotaTokens > 0 {

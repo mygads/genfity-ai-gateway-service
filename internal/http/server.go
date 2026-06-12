@@ -138,6 +138,7 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 		r.Get("/usage/analytics", adminHandler.ListUsageAnalytics)
 		r.Get("/usage/logs", adminHandler.ListUsageLogs)
 		r.Get("/users/{userId}/billing-detail", adminHandler.UserBillingDetail)
+		r.Post("/users/{userId}/usage-adjust", adminHandler.AdjustUserUsage)
 
 		r.Get("/routers/{code}/health", routerProxyHandler.Health)
 		r.Get("/routers/{code}/models", routerProxyHandler.Models)

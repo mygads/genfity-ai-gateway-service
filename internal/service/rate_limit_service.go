@@ -220,7 +220,7 @@ func (s *RateLimitService) CheckRequestsPerPeriod(ctx context.Context, userID, p
 	if err != nil {
 		return err
 	}
-	if count == 1 && ttl > 0 {
+	if ttl > 0 {
 		_ = s.client.Expire(ctx, key, ttl).Err()
 	}
 	if int(count) > limit {
@@ -271,6 +271,49 @@ func (s *RateLimitService) GetRequestsPerPeriodCount(ctx context.Context, userID
 	return n
 }
 
+// SetPlanRPD overwrites the per-(user,plan) RPD counter for the current
+// UTC day to value (clamped at 0). Used by the admin usage-adjust endpoint
+// to reset/compensate a user's daily usage without touching the plan cap.
+// Mirrors CheckPlanRPD's key + 25h TTL so the next request sees the new
+// count and the key still expires across the day boundary.
+func (s *RateLimitService) SetPlanRPD(ctx context.Context, userID, planCode string, value int) error {
+	if userID == "" || planCode == "" {
+		return fmt.Errorf("userID and planCode are required")
+	}
+	if value < 0 {
+		value = 0
+	}
+	day := time.Now().UTC().Format("20060102")
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	return s.client.Set(ctx, key, value, 25*time.Hour).Err()
+}
+
+// SetRequestsPerPeriod overwrites the per-(user,period) RPP counter to
+// value (clamped at 0). ttl should be the time until period_end so the
+// counter keeps expiring with the entitlement window; a non-positive ttl
+// leaves the key without an expiry. Mirrors CheckRequestsPerPeriod's key.
+func (s *RateLimitService) SetRequestsPerPeriod(ctx context.Context, userID, periodKey string, ttl time.Duration, value int) error {
+	if userID == "" || periodKey == "" {
+		return fmt.Errorf("userID and periodKey are required")
+	}
+	if value < 0 {
+		value = 0
+	}
+	key := fmt.Sprintf("%s:rl:plan-period:%s:%s", s.prefix, userID, periodKey)
+	return s.client.Set(ctx, key, value, ttl).Err()
+}
+
+func (s *RateLimitService) SetPlanCreditsPerPeriod(ctx context.Context, userID, periodKey string, ttl time.Duration, value float64) error {
+	if userID == "" || periodKey == "" {
+		return fmt.Errorf("userID and periodKey are required")
+	}
+	if value < 0 {
+		value = 0
+	}
+	key := fmt.Sprintf("%s:rl:plan-credit-period:%s:%s", s.prefix, userID, periodKey)
+	return s.client.Set(ctx, key, value, ttl).Err()
+}
+
 func (s *RateLimitService) CheckPlanCreditRPD(ctx context.Context, userID, planCode string, amount, limit float64) error {
 	if amount <= 0 || limit <= 0 || userID == "" || planCode == "" {
 		return nil
@@ -313,7 +356,7 @@ func (s *RateLimitService) CheckPlanCreditsPerPeriod(ctx context.Context, userID
 	if err != nil {
 		return err
 	}
-	if count == amount && ttl > 0 {
+	if ttl > 0 {
 		_ = s.client.Expire(ctx, key, ttl).Err()
 	}
 	if count > limit {

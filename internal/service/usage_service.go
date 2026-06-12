@@ -29,6 +29,10 @@ func (s *UsageService) ListByUser(ctx context.Context, userID string) []store.Us
 	return s.store.ListUsageByUser(ctx, userID)
 }
 
+func (s *UsageService) ListByUserSince(ctx context.Context, userID string, since time.Time) []store.UsageLedgerEntry {
+	return s.store.ListUsageByUserSince(ctx, userID, since)
+}
+
 func (s *UsageService) SummaryByUser(ctx context.Context, userID string) map[string]any {
 	return s.summaryForEntries(s.ListByUser(ctx, userID))
 }

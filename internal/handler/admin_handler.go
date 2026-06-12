@@ -896,6 +896,107 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// AdjustUserUsage lets an admin set/add/subtract a user's live RPD or RPP
+// usage counter (Redis), without touching the plan's configured caps. Use
+// cases: reset a user blocked by plan_rpd_exceeded/plan_period_limit_exceeded,
+// or compensate by lowering their consumed count. The customer dashboard
+// and the admin billing-detail modal both read these counters live, so an
+// adjustment is reflected everywhere on the next read.
+//
+// POST /admin/users/{userId}/usage-adjust
+//
+//	{ "counter": "rpd"|"rpp", "mode": "set"|"add"|"subtract", "value": <int >= 0> }
+func (h *AdminHandler) AdjustUserUsage(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("userId")
+	if userID == "" {
+		respondError(w, http.StatusBadRequest, "invalid_user_id")
+		return
+	}
+	if h.rateLimit == nil {
+		respondError(w, http.StatusServiceUnavailable, "rate_limit_unavailable")
+		return
+	}
+
+	var body struct {
+		Counter string `json:"counter"`
+		Mode    string `json:"mode"`
+		Value   int    `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
+	if body.Counter != "rpd" && body.Counter != "rpp" {
+		respondError(w, http.StatusBadRequest, "counter must be 'rpd' or 'rpp'")
+		return
+	}
+	if body.Mode != "set" && body.Mode != "add" && body.Mode != "subtract" {
+		respondError(w, http.StatusBadRequest, "mode must be 'set', 'add', or 'subtract'")
+		return
+	}
+	if body.Value < 0 {
+		respondError(w, http.StatusBadRequest, "value must be >= 0")
+		return
+	}
+
+	ctx := r.Context()
+	sub, err := h.entitlements.CheckActiveSubscription(ctx, userID)
+	if err != nil || sub == nil || sub.Entitlement == nil || sub.Plan == nil || !billingDetailIsSubscription(sub) {
+		respondError(w, http.StatusNotFound, "no_active_subscription")
+		return
+	}
+
+	// target computes the new counter value from the current one per mode.
+	target := func(current int) int {
+		switch body.Mode {
+		case "set":
+			return body.Value
+		case "add":
+			return current + body.Value
+		case "subtract":
+			if current-body.Value < 0 {
+				return 0
+			}
+			return current - body.Value
+		}
+		return current
+	}
+
+	var previous, newValue int
+	switch body.Counter {
+	case "rpd":
+		planCode := sub.Plan.PlanCode
+		previous = h.rateLimit.GetPlanRPDCount(ctx, userID, planCode)
+		newValue = target(previous)
+		if err := h.rateLimit.SetPlanRPD(ctx, userID, planCode, newValue); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed_to_set_rpd")
+			return
+		}
+	case "rpp":
+		pk := periodKey(sub.Entitlement)
+		_, end := activePeriod(sub.Entitlement)
+		ttl := time.Until(end)
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		previous = h.rateLimit.GetRequestsPerPeriodCount(ctx, userID, pk)
+		newValue = target(previous)
+		if err := h.rateLimit.SetRequestsPerPeriod(ctx, userID, pk, ttl, newValue); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed_to_set_rpp")
+			return
+		}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"user_id":   userID,
+		"counter":   body.Counter,
+		"mode":      body.Mode,
+		"previous":  previous,
+		"new_value": newValue,
+	})
+}
+
+
 // ListUsageAnalytics returns aggregated time-series and breakdowns for
 // the admin usage page charts. One round-trip surfaces:
 //

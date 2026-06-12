@@ -71,6 +71,20 @@ type subscriptionUsageSnapshot struct {
 	CreditUsedPeriod float64
 }
 
+func maxInt(a, b int) int {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+func maxFloat(a, b float64) float64 {
+	if b > a {
+		return b
+	}
+	return a
+}
+
 func isFreeUsageLedgerEntry(row store.UsageLedgerEntry) bool {
 	if strings.HasSuffix(row.PublicModel, ":free") {
 		return true
@@ -88,6 +102,10 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 	periodStart, periodEnd := activePeriod(subscription.Entitlement)
 
 	snapshot := subscriptionUsageSnapshot{}
+	ledgerRPDUsed := 0
+	ledgerRPPUsed := 0
+	ledgerCreditUsedToday := 0.0
+	ledgerCreditUsedPeriod := 0.0
 	if rateLimit != nil && userID != "" {
 		snapshot.RPDUsed = rateLimit.GetPlanRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
 		snapshot.RPPUsed = rateLimit.GetRequestsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
@@ -100,24 +118,24 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 			continue
 		}
 		if !row.StartedAt.Before(startOfDay) {
-			if rateLimit == nil {
-				snapshot.RPDUsed++
-			}
-			if row.AmountCredits != nil && rateLimit == nil {
-				snapshot.CreditUsedToday += parseFloatPtr(row.AmountCredits)
+			ledgerRPDUsed++
+			if row.AmountCredits != nil {
+				ledgerCreditUsedToday += parseFloatPtr(row.AmountCredits)
 			}
 		}
 		if row.StartedAt.Before(periodStart) || !row.StartedAt.Before(periodEnd) {
 			continue
 		}
 		snapshot.PeriodTokensUsed += row.TotalTokens
-		if rateLimit == nil {
-			snapshot.RPPUsed++
-		}
-		if row.AmountCredits != nil && rateLimit == nil {
-			snapshot.CreditUsedPeriod += parseFloatPtr(row.AmountCredits)
+		ledgerRPPUsed++
+		if row.AmountCredits != nil {
+			ledgerCreditUsedPeriod += parseFloatPtr(row.AmountCredits)
 		}
 	}
+	snapshot.RPDUsed = maxInt(snapshot.RPDUsed, ledgerRPDUsed)
+	snapshot.RPPUsed = maxInt(snapshot.RPPUsed, ledgerRPPUsed)
+	snapshot.CreditUsedToday = maxFloat(snapshot.CreditUsedToday, ledgerCreditUsedToday)
+	snapshot.CreditUsedPeriod = maxFloat(snapshot.CreditUsedPeriod, ledgerCreditUsedPeriod)
 
 	return snapshot
 }
