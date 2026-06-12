@@ -617,6 +617,14 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 	// to change (starter → developer top-up) so the user's current plan
 	// label always reflects the latest top-up. Reserved field is left
 	// alone (in-flight reservations belong to gateway runtime, not sync).
+	creditBalanceExpr := "COALESCE($8::numeric, credit_balance)"
+	paygBalanceExpr := "COALESCE($10::numeric, payg_usd_balance)"
+	if pricingGroup == "credit_package" {
+		paygBalanceExpr = "0"
+	}
+	if pricingGroup == "payg_topup" {
+		creditBalanceExpr = "0"
+	}
 	err = tx.QueryRow(ctx, `
 		UPDATE ai_gateway.customer_entitlements SET
 			genfity_tenant_id = $2,
@@ -625,9 +633,9 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 			period_end = $5,
 			quota_tokens_monthly = $6,
 			balance_snapshot = $7,
-			credit_balance = COALESCE($8::numeric, credit_balance),
+			credit_balance = `+creditBalanceExpr+`,
 			credit_expires_at = $9,
-			payg_usd_balance = COALESCE($10::numeric, payg_usd_balance),
+			payg_usd_balance = `+paygBalanceExpr+`,
 			pricing_group = $11,
 			metadata = $12,
 			updated_from_genfity_at = $13,
