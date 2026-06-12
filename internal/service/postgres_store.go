@@ -620,10 +620,10 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 	creditBalanceExpr := "COALESCE($8::numeric, credit_balance)"
 	paygBalanceExpr := "COALESCE($10::numeric, payg_usd_balance)"
 	if pricingGroup == "credit_package" {
-		paygBalanceExpr = "0"
+		paygBalanceExpr = "COALESCE($10::numeric, 0) * 0"
 	}
 	if pricingGroup == "payg_topup" {
-		creditBalanceExpr = "0"
+		creditBalanceExpr = "COALESCE($8::numeric, 0) * 0"
 	}
 	err = tx.QueryRow(ctx, `
 		UPDATE ai_gateway.customer_entitlements SET
