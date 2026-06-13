@@ -69,6 +69,8 @@ type subscriptionUsageSnapshot struct {
 	PeriodTokensUsed int64
 	CreditUsedToday  float64
 	CreditUsedPeriod float64
+	DebtFlagged      bool
+	DebtRemaining    int
 }
 
 func maxInt(a, b int) int {
@@ -136,6 +138,10 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 	snapshot.RPPUsed = maxInt(snapshot.RPPUsed, ledgerRPPUsed)
 	snapshot.CreditUsedToday = maxFloat(snapshot.CreditUsedToday, ledgerCreditUsedToday)
 	snapshot.CreditUsedPeriod = maxFloat(snapshot.CreditUsedPeriod, ledgerCreditUsedPeriod)
+
+	flagged, debtRemaining, _ := resolveAbuseDebt(subscription)
+	snapshot.DebtFlagged = flagged
+	snapshot.DebtRemaining = debtRemaining
 
 	return snapshot
 }
@@ -274,6 +280,8 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		"period_tokens_used": usageSnapshot.PeriodTokensUsed,
 		"credit_used_today":  usageSnapshot.CreditUsedToday,
 		"credit_used_period": usageSnapshot.CreditUsedPeriod,
+		"debt_flagged":       usageSnapshot.DebtFlagged,
+		"debt_remaining":     usageSnapshot.DebtRemaining,
 	}
 	if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
 		resp["quota_tokens_monthly"] = *quotaTokensMonthly

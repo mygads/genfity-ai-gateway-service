@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -826,12 +827,29 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 		// plan value for reference.
 		baseRPP := limits.MaxRequestsPerPeriod
 		effectiveRPP := baseRPP * periodRPPMultiplier(sub)
+		// Anti-abuse debt reserve mirrors applyPreRequestLimits: 75% of the
+		// scaled base is held back to repay flagged overage, so usable_rpp is
+		// what the user can actually spend this window.
+		flaggedDebt, debtRemaining, _ := resolveAbuseDebt(sub)
+		usableRPP := effectiveRPP
+		if flaggedDebt && debtRemaining > 0 {
+			debtReserve := int(math.Round(float64(baseRPP)*0.75)) * periodRPPMultiplier(sub)
+			reserve := debtRemaining
+			if reserve > debtReserve {
+				reserve = debtReserve
+			}
+			usableRPP = effectiveRPP - reserve
+			if usableRPP < 0 {
+				usableRPP = 0
+			}
+		}
 		s["limits"] = map[string]any{
 			"rpm":                     limits.RPM,
 			"tpm":                     limits.TPM,
 			"rpd":                     limits.RPD,
 			"rpp":                     effectiveRPP,
 			"base_rpp":                baseRPP,
+			"usable_rpp":              usableRPP,
 			"credit_limit_per_day":    limits.CreditLimitPerDay,
 			"credit_limit_per_period": limits.CreditLimitPerPeriod,
 			"concurrent":              limits.ConcurrentLimit,
@@ -847,6 +865,8 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 			"period_tokens_used": usageSnapshot.PeriodTokensUsed,
 			"credit_used_today":  usageSnapshot.CreditUsedToday,
 			"credit_used_period": usageSnapshot.CreditUsedPeriod,
+			"debt_flagged":       usageSnapshot.DebtFlagged,
+			"debt_remaining":     usageSnapshot.DebtRemaining,
 		}
 		subSection = s
 	}

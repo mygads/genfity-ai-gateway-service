@@ -303,6 +303,35 @@ func (s *RateLimitService) SetRequestsPerPeriod(ctx context.Context, userID, per
 	return s.client.Set(ctx, key, value, ttl).Err()
 }
 
+// ResetRequestsPerPeriodOnce zeroes the per-(user,period) RPP counter exactly
+// once per period, guarded by a sentinel key. Used when an abuse debt is paid
+// off and the user should start the fresh window at 0 — without the sentinel
+// the metadata-driven reset would re-fire on every request (since the app
+// clears needsRppReset only on the next sync), effectively granting unlimited
+// requests. Returns true when it performed the reset, false when already done.
+func (s *RateLimitService) ResetRequestsPerPeriodOnce(ctx context.Context, userID, periodKey string, ttl time.Duration) (bool, error) {
+	if userID == "" || periodKey == "" {
+		return false, fmt.Errorf("userID and periodKey are required")
+	}
+	sentinel := fmt.Sprintf("%s:rl:plan-period-reset:%s:%s", s.prefix, userID, periodKey)
+	sentinelTTL := ttl
+	if sentinelTTL <= 0 {
+		sentinelTTL = 24 * time.Hour
+	}
+	ok, err := s.client.SetNX(ctx, sentinel, 1, sentinelTTL).Result()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	key := fmt.Sprintf("%s:rl:plan-period:%s:%s", s.prefix, userID, periodKey)
+	if err := s.client.Set(ctx, key, 0, ttl).Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *RateLimitService) SetPlanCreditsPerPeriod(ctx context.Context, userID, periodKey string, ttl time.Duration, value float64) error {
 	if userID == "" || periodKey == "" {
 		return fmt.Errorf("userID and periodKey are required")

@@ -969,15 +969,55 @@ func (h *GatewayHandler) applyPreRequestLimits(
 		if ttl <= 0 {
 			ttl = 24 * time.Hour
 		}
-		h.ensurePeriodCounterBaseline(ctx, apiKey.GenfityUserID, subscription, ttl, true, false)
+		// When the app cleared an abuse debt on a purchase it marks
+		// needsRppReset so the user starts the fresh window at 0. Honor it
+		// exactly once (sentinel-guarded) BEFORE the baseline ensure so the
+		// ledger reseed does not immediately refill it from the period's prior
+		// (debt-era) usage. Without the once-guard this would re-fire on every
+		// request (the app clears needsRppReset only on the next sync) and
+		// hand the user unlimited requests. After a successful reset we skip
+		// the baseline reseed for this request.
+		didReset := false
+		if _, _, needsRppReset := resolveAbuseDebt(subscription); needsRppReset {
+			didReset, _ = h.rateLimit.ResetRequestsPerPeriodOnce(ctx, apiKey.GenfityUserID, pk, ttl)
+		}
+		if !didReset {
+			h.ensurePeriodCounterBaseline(ctx, apiKey.GenfityUserID, subscription, ttl, true, false)
+		}
 		// Scale the RPP cap by how many base purchase windows this period
 		// spans. Stacking a 1-day plan 4× extends the window to 4 days, so
 		// the user should get 4× the single-purchase RPP instead of being
 		// capped at one day's worth across the whole window. Multiplier is
 		// 1 when the base duration is unknown (fail safe). RPD still bounds
 		// daily burst independently.
-		effectiveRPP := limits.MaxRequestsPerPeriod * periodRPPMultiplier(subscription)
+		mult := periodRPPMultiplier(subscription)
+		effectiveRPP := limits.MaxRequestsPerPeriod * mult
+		// Anti-abuse debt: when an admin has flagged this user for bypassing
+		// the RPP cap (historical leak from the period-key bug), reserve part
+		// of each purchase window's RPP to repay the overage. 75% of the base
+		// per-purchase RPP (scaled by the stacked-window multiplier) is held
+		// back for repayment; only the remaining 25% is usable. The reserve is
+		// capped at the remaining debt so the user is never penalised beyond
+		// what they owe. debtRepayment marks that the reserve is the binding
+		// constraint, so we can surface a clearer error than a generic cap hit.
+		flagged, debtRemaining, _ := resolveAbuseDebt(subscription)
+		debtRepayment := false
+		if flagged && debtRemaining > 0 {
+			debtReserve := int(math.Round(float64(limits.MaxRequestsPerPeriod)*0.75)) * mult
+			reserve := debtRemaining
+			if reserve > debtReserve {
+				reserve = debtReserve
+			}
+			effectiveRPP -= reserve
+			if effectiveRPP < 0 {
+				effectiveRPP = 0
+			}
+			debtRepayment = true
+		}
 		if err := h.rateLimit.CheckRequestsPerPeriod(ctx, apiKey.GenfityUserID, pk, ttl, effectiveRPP); err != nil {
+			if debtRepayment {
+				return "plan_debt_repayment", http.StatusTooManyRequests, tracker
+			}
 			return "plan_period_limit_exceeded", http.StatusTooManyRequests, tracker
 		}
 		tracker.periodConsumed = true
@@ -1157,6 +1197,40 @@ func pricingGroup(subscription *service.ActiveSubscription) string {
 	_ = json.Unmarshal(subscription.Entitlement.Metadata, &meta)
 	value, _ := meta["pricingGroup"].(string)
 	return value
+}
+
+// resolveAbuseDebt reads the anti-abuse debt block from the entitlement
+// metadata (written by genfity-app when an admin flags a user for bypassing
+// the RPP cap). Returns whether the user is flagged, the remaining debt in
+// requests, and whether a one-time RPP counter reset is pending (set by the
+// app when the debt reaches zero on a purchase). All values default to the
+// no-debt case on any parse failure so a malformed blob can never penalise a
+// user. Mirrors the json.Unmarshal pattern in pricingGroup().
+func resolveAbuseDebt(subscription *service.ActiveSubscription) (flagged bool, debtRemaining int, needsRppReset bool) {
+	if subscription == nil || subscription.Entitlement == nil || len(subscription.Entitlement.Metadata) == 0 {
+		return false, 0, false
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(subscription.Entitlement.Metadata, &meta); err != nil {
+		return false, 0, false
+	}
+	debt, ok := meta["abuseDebt"].(map[string]any)
+	if !ok {
+		return false, 0, false
+	}
+	flagged, _ = debt["flagged"].(bool)
+	needsRppReset, _ = debt["needsRppReset"].(bool)
+	switch v := debt["debtRemaining"].(type) {
+	case float64:
+		if v > 0 {
+			debtRemaining = int(v)
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil && n > 0 {
+			debtRemaining = int(n)
+		}
+	}
+	return flagged, debtRemaining, needsRppReset
 }
 
 func quotaLimit(subscription *service.ActiveSubscription) int64 {
