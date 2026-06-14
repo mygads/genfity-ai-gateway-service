@@ -73,20 +73,6 @@ type subscriptionUsageSnapshot struct {
 	DebtRemaining    int
 }
 
-func maxInt(a, b int) int {
-	if b > a {
-		return b
-	}
-	return a
-}
-
-func maxFloat(a, b float64) float64 {
-	if b > a {
-		return b
-	}
-	return a
-}
-
 func isFreeUsageLedgerEntry(row store.UsageLedgerEntry) bool {
 	if strings.HasSuffix(row.PublicModel, ":free") {
 		return true
@@ -108,11 +94,13 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 	ledgerRPPUsed := 0
 	ledgerCreditUsedToday := 0.0
 	ledgerCreditUsedPeriod := 0.0
+	redisAvailable := false
 	if rateLimit != nil && userID != "" {
 		snapshot.RPDUsed = rateLimit.GetPlanRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
 		snapshot.RPPUsed = rateLimit.GetRequestsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
 		snapshot.CreditUsedToday = rateLimit.GetPlanCreditRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
 		snapshot.CreditUsedPeriod = rateLimit.GetPlanCreditsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
+		redisAvailable = true
 	}
 
 	for _, row := range entries {
@@ -134,10 +122,19 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 			ledgerCreditUsedPeriod += parseFloatPtr(row.AmountCredits)
 		}
 	}
-	snapshot.RPDUsed = maxInt(snapshot.RPDUsed, ledgerRPDUsed)
-	snapshot.RPPUsed = maxInt(snapshot.RPPUsed, ledgerRPPUsed)
-	snapshot.CreditUsedToday = maxFloat(snapshot.CreditUsedToday, ledgerCreditUsedToday)
-	snapshot.CreditUsedPeriod = maxFloat(snapshot.CreditUsedPeriod, ledgerCreditUsedPeriod)
+	// Redis is the source of truth — it's exactly what the request path
+	// enforces against (CheckPlanRPD / CheckRequestsPerPeriod). The ledger is
+	// only a fallback for when Redis is unavailable. We must NOT max() the two:
+	// the ledger counts ALL unlimited requests today across every plan/period,
+	// so after a plan switch (new plan's counter resets to a fresh low value)
+	// or an admin "Atur" reset (Redis lowered), the stale higher ledger count
+	// would mask the real enforced value and the change would look unsaved.
+	if !redisAvailable {
+		snapshot.RPDUsed = ledgerRPDUsed
+		snapshot.RPPUsed = ledgerRPPUsed
+		snapshot.CreditUsedToday = ledgerCreditUsedToday
+		snapshot.CreditUsedPeriod = ledgerCreditUsedPeriod
+	}
 
 	flagged, debtRemaining, _ := resolveAbuseDebt(subscription)
 	snapshot.DebtFlagged = flagged
