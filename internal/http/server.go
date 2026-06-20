@@ -35,12 +35,12 @@ func New(cfg config.Config, redisClient *redis.Client, dbPool *pgxpool.Pool, sto
 	routers := service.NewRouterService(store, logger)
 	entitlements := service.NewEntitlementService(store, logger).WithCache(hotCache)
 	usage := service.NewUsageService(store, logger)
-	syncService := service.NewSyncService(store, entitlements, models, usage, logger)
 
 	var rateLimit *service.RateLimitService
 	if redisClient != nil {
 		rateLimit = service.NewRateLimitService(redisClient, cfg.RedisPrefix, logger)
 	}
+	syncService := service.NewSyncService(store, entitlements, models, usage, rateLimit, logger)
 
 	cliProxyClient := router.NewCLIProxyClientWithManagementKey(cfg.AIRouterCore2InternalURL, cfg.AIRouterCore2APIKey, cfg.AIRouterCore2ManagementKey, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
 

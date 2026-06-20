@@ -288,6 +288,31 @@ func (s *RateLimitService) SetPlanRPD(ctx context.Context, userID, planCode stri
 	return s.client.Set(ctx, key, value, 25*time.Hour).Err()
 }
 
+// ResetPlanRPDOnce zeroes today's per-(user,plan) RPD counter exactly once
+// for a purchase/extension event. Same-plan renewals extend the entitlement
+// period while keeping the same plan/day Redis key, so without this a user
+// who already hit today's RPD cap remains blocked after buying the same plan
+// again. resetID must be stable for the purchase, typically the transaction id.
+func (s *RateLimitService) ResetPlanRPDOnce(ctx context.Context, userID, planCode, resetID string) (bool, error) {
+	if userID == "" || planCode == "" || resetID == "" {
+		return false, fmt.Errorf("userID, planCode, and resetID are required")
+	}
+	day := time.Now().UTC().Format("20060102")
+	sentinel := fmt.Sprintf("%s:rl:plan-day-reset:%s:%s:%s", s.prefix, userID, planCode, resetID)
+	ok, err := s.client.SetNX(ctx, sentinel, 1, 90*24*time.Hour).Result()
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	if err := s.client.Set(ctx, key, 0, 25*time.Hour).Err(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // SetRequestsPerPeriod overwrites the per-(user,period) RPP counter to
 // value (clamped at 0). ttl should be the time until period_end so the
 // counter keeps expiring with the entitlement window; a non-positive ttl

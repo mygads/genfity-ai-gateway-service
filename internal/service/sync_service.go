@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
 	"strconv"
@@ -18,15 +19,17 @@ type SyncService struct {
 	entitlements *EntitlementService
 	models       *ModelService
 	usage        *UsageService
+	rateLimit    *RateLimitService
 	log          zerolog.Logger
 }
 
-func NewSyncService(store Store, entitlements *EntitlementService, models *ModelService, usage *UsageService, logger zerolog.Logger) *SyncService {
+func NewSyncService(store Store, entitlements *EntitlementService, models *ModelService, usage *UsageService, rateLimit *RateLimitService, logger zerolog.Logger) *SyncService {
 	return &SyncService{
 		store:        store,
 		entitlements: entitlements,
 		models:       models,
 		usage:        usage,
+		rateLimit:    rateLimit,
 		log:          logger.With().Str("component", "sync_service").Logger(),
 	}
 }
@@ -80,9 +83,41 @@ func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []st
 			})
 			continue
 		}
+		s.resetPlanRPDForSamePlanExtension(ctx, item)
 		count++
 	}
 	return count, failures, nil
+}
+
+func (s *SyncService) resetPlanRPDForSamePlanExtension(ctx context.Context, item store.CustomerEntitlement) {
+	if s == nil || s.rateLimit == nil {
+		return
+	}
+	if item.Status != "active" || item.GenfityUserID == "" || item.PlanCode == "" || len(item.Metadata) == 0 {
+		return
+	}
+
+	var meta map[string]any
+	if err := json.Unmarshal(item.Metadata, &meta); err != nil {
+		return
+	}
+	resetID, _ := meta["extensionTransactionId"].(string)
+	if resetID == "" {
+		return
+	}
+	if didReset, err := s.rateLimit.ResetPlanRPDOnce(ctx, item.GenfityUserID, item.PlanCode, resetID); err != nil {
+		s.log.Warn().Err(err).
+			Str("genfity_user_id", item.GenfityUserID).
+			Str("plan_code", item.PlanCode).
+			Str("reset_id", resetID).
+			Msg("failed to reset RPD after same-plan extension")
+	} else if didReset {
+		s.log.Info().
+			Str("genfity_user_id", item.GenfityUserID).
+			Str("plan_code", item.PlanCode).
+			Str("reset_id", resetID).
+			Msg("reset RPD after same-plan extension")
+	}
 }
 
 func (s *SyncService) SyncCustomerBalance(ctx context.Context, userID string, balance string, paygBalance *string, creditExpiresAt *time.Time) error {
@@ -273,16 +308,16 @@ func (s *SyncService) SyncPaygTopupRates(ctx context.Context, payload []store.Pa
 // route; otherwise we leave any existing route untouched so manual
 // admin route configuration is not clobbered.
 type ModelSyncItem struct {
-	PublicModel        string `json:"public_model"`
-	DisplayName        string `json:"display_name"`
-	Description        string `json:"description,omitempty"`
-	Status             string `json:"status,omitempty"` // "active" | "draft"
-	ModelType          string `json:"model_type,omitempty"` // "text" | "image" | "embedding"
-	ContextWindow      *int32 `json:"context_window,omitempty"`
-	SupportsStreaming  bool   `json:"supports_streaming"`
-	SupportsTools      bool   `json:"supports_tools"`
-	SupportsVision     bool   `json:"supports_vision"`
-	PaygExposed        bool   `json:"payg_exposed"`
+	PublicModel       string `json:"public_model"`
+	DisplayName       string `json:"display_name"`
+	Description       string `json:"description,omitempty"`
+	Status            string `json:"status,omitempty"`     // "active" | "draft"
+	ModelType         string `json:"model_type,omitempty"` // "text" | "image" | "embedding"
+	ContextWindow     *int32 `json:"context_window,omitempty"`
+	SupportsStreaming bool   `json:"supports_streaming"`
+	SupportsTools     bool   `json:"supports_tools"`
+	SupportsVision    bool   `json:"supports_vision"`
+	PaygExposed       bool   `json:"payg_exposed"`
 	// IsFree marks the model as free-tier; when true the gateway enforces
 	// per-(user,model) limits below in addition to plan-level limits.
 	IsFree             bool   `json:"is_free"`
@@ -293,11 +328,11 @@ type ModelSyncItem struct {
 	RouterModel        string `json:"router_model,omitempty"`
 	// PAYG pricing fields — when present, SyncModels upserts an
 	// ai_model_prices row so the gateway can bill PAYG requests.
-	PriceInputPer1M    *string `json:"price_input_per_1m,omitempty"`
-	PriceOutputPer1M   *string `json:"price_output_per_1m,omitempty"`
-	PriceCachedPer1M   *string `json:"price_cached_per_1m,omitempty"`
+	PriceInputPer1M     *string `json:"price_input_per_1m,omitempty"`
+	PriceOutputPer1M    *string `json:"price_output_per_1m,omitempty"`
+	PriceCachedPer1M    *string `json:"price_cached_per_1m,omitempty"`
 	PriceReasoningPer1M *string `json:"price_reasoning_per_1m,omitempty"`
-	PriceCurrency      string  `json:"price_currency,omitempty"`
+	PriceCurrency       string  `json:"price_currency,omitempty"`
 }
 
 func (s *SyncService) SyncModels(ctx context.Context, payload []ModelSyncItem) (int, error) {
