@@ -903,8 +903,19 @@ func (p *preRequestCounters) rollback(ctx context.Context) {
 // (success or non-retriable failure) and the usage_ledger entry has
 // been recorded — at that point the request "exists" and should count
 // against the period cap.
-func (p *preRequestCounters) commit() {
+//
+// If the client has already disconnected (RTO/cancel) by the time we
+// settle, commit is skipped: the request never reached the customer, so
+// it must not burn their rate-limit slot (RPD/RPP/free-RPM). The deferred
+// rollback (which runs on a background context) then releases the slot.
+// Token billing is handled separately in recordAndFinalizeRuntime and is
+// NOT governed by this — the provider already processed the tokens, so
+// that cost stands regardless of client disconnect.
+func (p *preRequestCounters) commit(ctx context.Context) {
 	if p == nil {
+		return
+	}
+	if ctx != nil && ctx.Err() != nil {
 		return
 	}
 	p.committed = true
@@ -2341,7 +2352,7 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 	// in-body provider errors leave the deferred rollback to release
 	// the slot.
 	if shouldCountAsSuccess(resp.StatusCode, body) {
-		preCounters.commit()
+		preCounters.commit(ctx)
 	}
 	h.recordUsageWithLegacyBilling(ctx, apiKey, subscription, model, route, started, resp.StatusCode, body, publicModel)
 	h.writeUpstreamResponse(w, resp, body, publicModel)
@@ -2651,7 +2662,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	// Roll back the period/RPD/free-model counters on any abnormal exit
 	// (concurrency rejected, billing reservation failed, payload clone
 	// failed, every candidate upstream failed). The success/non-retriable
-	// branches below call preCounters.commit() right before returning, at
+	// branches below call preCounters.commit(ctx) right before returning, at
 	// which point this defer becomes a no-op.
 	defer func() {
 		bgCtx := context.Background()
@@ -2775,7 +2786,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			// this check, every failed streaming attempt ticked the
 			// counter even though recordUsage flagged the row as failed.
 			if shouldCountAsSuccess(statusCode, body) {
-				preCounters.commit()
+				preCounters.commit(ctx)
 			}
 			return
 		}
@@ -2803,7 +2814,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			settled = true
 			if shouldCountAsSuccess(statusCode, body) {
-				preCounters.commit()
+				preCounters.commit(ctx)
 			}
 			// Rewrite the response "model" field to the requested public
 			// model so a disguised combo's real upstream (e.g. minimax)
@@ -2841,7 +2852,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			// 4xx/5xx provider errors and in-body provider errors leave
 			// the deferred rollback to release the slot.
 			if shouldCountAsSuccess(statusCode, body) {
-				preCounters.commit()
+				preCounters.commit(ctx)
 			}
 			safeBody := sanitizeErrorBody(body, statusCode)
 			for k, v := range resp.Header {
@@ -2870,7 +2881,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		}
 		settled = true
 		if shouldCountAsSuccess(lastStatusCode, lastBody) {
-			preCounters.commit()
+			preCounters.commit(ctx)
 		}
 		safeLastBody := sanitizeErrorBody(lastBody, lastStatusCode)
 		for k, v := range lastResp.Header {
@@ -3036,7 +3047,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	// Roll back the period/RPD/free-model counters on any abnormal exit
 	// (concurrency rejected, billing reservation failed, payload clone
 	// failed, every candidate upstream failed). The success/non-retriable
-	// branches below call preCounters.commit() right before returning, at
+	// branches below call preCounters.commit(ctx) right before returning, at
 	// which point this defer becomes a no-op.
 	defer func() {
 		bgCtx := context.Background()
@@ -3159,7 +3170,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			// shouldCountAsSuccess to avoid charging the user when the
 			// stream errored out or never produced content.
 			if shouldCountAsSuccess(statusCode, body) {
-				preCounters.commit()
+				preCounters.commit(ctx)
 			}
 			return
 		}
@@ -3179,7 +3190,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			resp.Body.Close()
 			settled = true
 			if shouldCountAsSuccess(statusCode, body) {
-				preCounters.commit()
+				preCounters.commit(ctx)
 			}
 			h.writeUpstreamResponse(w, resp, body, publicModel)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
@@ -3206,7 +3217,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			// the deferred rollback to release the slot — the caller
 			// shouldn't be charged for our or the provider's failure.
 			if shouldCountAsSuccess(statusCode, body) {
-				preCounters.commit()
+				preCounters.commit(ctx)
 			}
 			h.writeUpstreamResponse(w, resp, body, publicModel)
 			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
@@ -3229,7 +3240,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		// Same rule as above: only commit if the final response is a
 		// genuine success.
 		if shouldCountAsSuccess(lastStatusCode, lastBody) {
-			preCounters.commit()
+			preCounters.commit(ctx)
 		}
 		safeLastBody := sanitizeErrorBody(lastBody, lastStatusCode)
 		for k, v := range lastResp.Header {
