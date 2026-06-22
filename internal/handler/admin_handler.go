@@ -862,6 +862,8 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 		s["usage"] = map[string]any{
 			"rpd_used":           usageSnapshot.RPDUsed,
 			"rpp_used":           usageSnapshot.RPPUsed,
+			"rpm_used":           usageSnapshot.RPMUsed,
+			"concurrent_used":    usageSnapshot.ConcurrentUsed,
 			"period_tokens_used": usageSnapshot.PeriodTokensUsed,
 			"credit_used_today":  usageSnapshot.CreditUsedToday,
 			"credit_used_period": usageSnapshot.CreditUsedPeriod,

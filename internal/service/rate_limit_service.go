@@ -231,6 +231,41 @@ func (s *RateLimitService) CheckRequestsPerPeriod(ctx context.Context, userID, p
 	return nil
 }
 
+// GetRPMCount reads (does NOT increment) the current per-user requests-this-
+// minute counter. Mirrors CheckRPM's key scheme so the dashboard/admin modal
+// can show "rpm_used / rpm_limit" without consuming a slot. The counter is a
+// fixed 60s window (not a sliding one), so the value resets each minute.
+// Returns 0 when the key is missing/expired or on any read error.
+func (s *RateLimitService) GetRPMCount(ctx context.Context, userID string) int {
+	if userID == "" {
+		return 0
+	}
+	key := fmt.Sprintf("%s:rl:api-key:%s:rpm", s.prefix, userID)
+	n, err := s.client.Get(ctx, key).Int()
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// GetConcurrencyCount reads (does NOT change) the number of in-flight requests
+// currently holding a concurrency slot for the user. Mirrors
+// AcquireConcurrency's key scheme. Returns 0 when missing/expired or on error.
+// A stale value can linger up to the 10-min slot TTL if a request died without
+// releasing, but the deferred release on the request path normally keeps it
+// accurate.
+func (s *RateLimitService) GetConcurrencyCount(ctx context.Context, userID string) int {
+	if userID == "" {
+		return 0
+	}
+	key := fmt.Sprintf("%s:concurrent:account:%s", s.prefix, userID)
+	n, err := s.client.Get(ctx, key).Int()
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 // GetPlanRPDCount reads (does NOT increment) the per-(user,plan) request
 // count for the current UTC day. Mirrors the key scheme of CheckPlanRPD
 // so the admin billing-detail modal can show "rpd_used / rpd_limit"

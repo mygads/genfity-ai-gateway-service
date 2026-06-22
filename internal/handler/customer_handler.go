@@ -66,6 +66,8 @@ func subscriptionCreditUsage(entries []store.UsageLedgerEntry, subscription *ser
 type subscriptionUsageSnapshot struct {
 	RPDUsed          int
 	RPPUsed          int
+	RPMUsed          int
+	ConcurrentUsed   int
 	PeriodTokensUsed int64
 	CreditUsedToday  float64
 	CreditUsedPeriod float64
@@ -98,6 +100,8 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 	if rateLimit != nil && userID != "" {
 		snapshot.RPDUsed = rateLimit.GetPlanRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
 		snapshot.RPPUsed = rateLimit.GetRequestsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
+		snapshot.RPMUsed = rateLimit.GetRPMCount(context.Background(), userID)
+		snapshot.ConcurrentUsed = rateLimit.GetConcurrencyCount(context.Background(), userID)
 		snapshot.CreditUsedToday = rateLimit.GetPlanCreditRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
 		snapshot.CreditUsedPeriod = rateLimit.GetPlanCreditsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
 		redisAvailable = true
@@ -222,6 +226,8 @@ func (h *CustomerHandler) Quota(w http.ResponseWriter, r *http.Request) {
 			"credit_used_period": usageSnapshot.CreditUsedPeriod,
 			"rpd_used":           usageSnapshot.RPDUsed,
 			"rpp_used":           usageSnapshot.RPPUsed,
+			"rpm_used":           usageSnapshot.RPMUsed,
+			"concurrent_used":    usageSnapshot.ConcurrentUsed,
 			"period_tokens_used": usageSnapshot.PeriodTokensUsed,
 		}
 		if quotaTokensMonthly := quotaLimitPtr(subscription); quotaTokensMonthly != nil {
@@ -274,6 +280,8 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 		"plan":               subscription.Plan,
 		"rpd_used":           usageSnapshot.RPDUsed,
 		"rpp_used":           usageSnapshot.RPPUsed,
+		"rpm_used":           usageSnapshot.RPMUsed,
+		"concurrent_used":    usageSnapshot.ConcurrentUsed,
 		"period_tokens_used": usageSnapshot.PeriodTokensUsed,
 		"credit_used_today":  usageSnapshot.CreditUsedToday,
 		"credit_used_period": usageSnapshot.CreditUsedPeriod,

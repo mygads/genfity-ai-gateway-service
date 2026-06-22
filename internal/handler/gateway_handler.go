@@ -2674,8 +2674,8 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		var acquireErr error
 		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, accountID, limits.ConcurrentLimit)
 		if acquireErr != nil {
-			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
-			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			h.recordFailedRequest(ctx, apiKey, publicModel, "concurrency_limit_exceeded", http.StatusTooManyRequests, started)
+			respondError(w, http.StatusTooManyRequests, "concurrency_limit_exceeded")
 			return
 		}
 	}
@@ -3059,8 +3059,8 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		var acquireErr error
 		release, acquireErr = h.rateLimit.AcquireConcurrency(ctx, accountID, limits.ConcurrentLimit)
 		if acquireErr != nil {
-			h.recordFailedRequest(ctx, apiKey, publicModel, "rate_limit_exceeded", http.StatusTooManyRequests, started)
-			respondError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
+			h.recordFailedRequest(ctx, apiKey, publicModel, "concurrency_limit_exceeded", http.StatusTooManyRequests, started)
+			respondError(w, http.StatusTooManyRequests, "concurrency_limit_exceeded")
 			return
 		}
 	}
