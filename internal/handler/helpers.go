@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 func respondJSON(w http.ResponseWriter, status int, data any) {
@@ -12,6 +13,12 @@ func respondJSON(w http.ResponseWriter, status int, data any) {
 }
 
 func publicErrorMessage(message string) string {
+	// upstream_* codes are provider-side failures (busy/rate-limited leaf),
+	// not the customer's account hitting a limit — always the "high traffic"
+	// message regardless of the specific provider code.
+	if strings.HasPrefix(message, "upstream_") {
+		return customerGatewayBusyMessage
+	}
 	switch message {
 	// Billing / entitlement errors — tell the customer what's actually wrong.
 	case "insufficient_credit_balance", "insufficient_balance",
@@ -25,6 +32,8 @@ func publicErrorMessage(message string) string {
 		return "Your current plan does not include this model. Please upgrade your plan."
 	case "rate_limit_exceeded":
 		return "Rate limit exceeded. Please slow down and try again shortly."
+	case "concurrency_limit_exceeded":
+		return "Too many concurrent requests. Please wait for in-flight requests to finish, then retry."
 	case "credit_cost_not_configured", "payg_price_not_configured":
 		return "This model is not available for your billing type. Please contact support."
 	// Model/request validation — actionable but generic.

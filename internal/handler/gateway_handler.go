@@ -345,7 +345,20 @@ func detectErrorFromPayload(payload map[string]any) string {
 	return ""
 }
 
-// looksLikeSuccessfulCompletion returns true only when the body has the
+// namespaceUpstreamErrorCode prefixes a provider-body error code with
+// "upstream_" so the ledger can distinguish a provider-side failure from a
+// gateway-side limit. Without this, a leaf returning {"error":{"code":
+// "rate_limit_exceeded"}} is recorded identically to a gateway RPM rejection,
+// making "model busy" indistinguishable from "account hit its quota". An empty
+// code stays empty; already-namespaced codes are left untouched.
+func namespaceUpstreamErrorCode(code string) string {
+	if code == "" || strings.HasPrefix(code, "upstream_") {
+		return code
+	}
+	return "upstream_" + code
+}
+
+
 // expected shape of a real completion (OpenAI choices[], Anthropic
 // content[], or an SSE stream that started emitting). Used as the
 // "is this really a success" gate for tick-on-success counters —
@@ -3327,7 +3340,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	// those as failed so the ledger and reservation finalize reflect reality.
 	bodyErrorCode := ""
 	if statusCode < 400 {
-		bodyErrorCode = detectProviderErrorFromBody(body)
+		bodyErrorCode = namespaceUpstreamErrorCode(detectProviderErrorFromBody(body))
 		if bodyErrorCode != "" {
 			statusStr = "failed"
 		}
