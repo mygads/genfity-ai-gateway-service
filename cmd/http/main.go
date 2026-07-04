@@ -165,13 +165,15 @@ func main() {
 		errCh <- httpServer.ListenAndServe()
 	}()
 
-	// Background sweeper: release credit reservations on rows whose
+	// Background sweeper: release credit/quota reservations on rows whose
 	// updated_at is older than 5 minutes. Reservations are normally
 	// finalized within seconds; anything older is by definition orphan
 	// — left behind by panic / crash / client-disconnect mid-request.
 	// Without this sweep, every panic permanently locks a slice of the
 	// user's balance ("insufficient_credit_balance" while UI shows
-	// money). Runs every 60s; cheap UPDATE keyed on a partial index.
+	// money) or tokens_reserved in the quota path ("quota_exceeded"
+	// while the user still has budget). Runs every 60s; cheap UPDATEs
+	// keyed on partial indexes.
 	sweepCtx, cancelSweep := context.WithCancel(ctx)
 	defer cancelSweep()
 	go func() {
@@ -191,6 +193,17 @@ func main() {
 				}
 				if released > 0 {
 					logger.Info().Int64("released", released).Msg("released stale credit reservations")
+				}
+
+				qCtx, qCancel := context.WithTimeout(sweepCtx, 10*time.Second)
+				quotaReleased, err := store.ReleaseStaleQuotaReservations(qCtx, 5*time.Minute)
+				qCancel()
+				if err != nil {
+					logger.Warn().Err(err).Msg("orphan quota reservation sweep failed")
+					continue
+				}
+				if quotaReleased > 0 {
+					logger.Info().Int64("released", quotaReleased).Msg("released stale quota reservations")
 				}
 			}
 		}

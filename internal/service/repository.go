@@ -95,6 +95,14 @@ type Store interface {
 	// disturbed.
 	ReleaseStaleReservations(ctx context.Context, olderThan time.Duration) (int64, error)
 
+	// ReleaseStaleQuotaReservations zeroes out quota_counters.tokens_reserved
+	// on rows whose updated_at is older than the supplied threshold. Mirrors
+	// ReleaseStaleReservations for the token-quota path. Without this, a
+	// panic/crash/client-disconnect mid-request can strand the reserved
+	// tokens forever, causing every future request in the same period to
+	// fail with quota_exceeded even though the user has plenty of budget.
+	ReleaseStaleQuotaReservations(ctx context.Context, olderThan time.Duration) (int64, error)
+
 	// Pending callback queue: durable retry for usage-debit callbacks
 	// to genfity-app that fail at the network layer. genfity-app's
 	// handler is idempotent on (request_id, kind), so a row added

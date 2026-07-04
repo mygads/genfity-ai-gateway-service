@@ -623,6 +623,22 @@ func (s *MemoryStore) ReleaseStaleReservations(_ context.Context, olderThan time
 	return released, nil
 }
 
+func (s *MemoryStore) ReleaseStaleQuotaReservations(_ context.Context, _ time.Duration) (int64, error) {
+	// MemoryStore is test-only and doesn't track per-row updated_at,
+	// so we reset every positive quota_reserved entry. Tests that need
+	// deterministic state should manage their own timing.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var released int64
+	for k, v := range s.quotaReserved {
+		if v > 0 {
+			s.quotaReserved[k] = 0
+			released++
+		}
+	}
+	return released, nil
+}
+
 func (s *MemoryStore) UpsertModelCreditCost(_ context.Context, cost store.ModelCreditCost) (store.ModelCreditCost, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

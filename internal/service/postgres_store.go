@@ -1440,6 +1440,30 @@ func (s *PostgresStore) ReleaseStaleReservations(ctx context.Context, olderThan 
 	return cmd.RowsAffected(), nil
 }
 
+func (s *PostgresStore) ReleaseStaleQuotaReservations(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		olderThan = 5 * time.Minute
+	}
+	// Release quota token reservations whose row hasn't been touched
+	// within the threshold. Mirrors ReleaseStaleReservations for the
+	// quota_counters table. A live in-flight request bumps updated_at
+	// on every reserve/finalize; anything older is an orphan left by a
+	// panic/crash or a client disconnect before the deferred rollback
+	// could run. Stuck tokens_reserved permanently blocks every future
+	// request in the same period with quota_exceeded.
+	cmd, err := s.pool.Exec(ctx, `
+		UPDATE ai_gateway.quota_counters
+		   SET tokens_reserved = 0,
+		       updated_at = now()
+		 WHERE tokens_reserved > 0
+		   AND updated_at < now() - ($1::bigint || ' milliseconds')::interval`,
+		olderThan.Milliseconds())
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
+}
+
 func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	// PRD v3 Phase 4: target by (user, pricing_group='credit_package',
 	// status='active') instead of plan_code. plan_code may have changed
