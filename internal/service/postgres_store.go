@@ -754,9 +754,9 @@ func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQu
 		ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
 			genfity_tenant_id = EXCLUDED.genfity_tenant_id,
 			status = EXCLUDED.status,
-			period_start = EXCLUDED.period_start,
-			period_end = EXCLUDED.period_end,
-			quota_tokens_monthly = EXCLUDED.quota_tokens_monthly,
+			period_start = LEAST(ce.period_start, EXCLUDED.period_start),
+			period_end = GREATEST(ce.period_end, EXCLUDED.period_end),
+			quota_tokens_monthly = COALESCE(ce.quota_tokens_monthly, 0) + COALESCE(EXCLUDED.quota_tokens_monthly, 0),
 			balance_snapshot = EXCLUDED.balance_snapshot,
 			credit_balance = EXCLUDED.credit_balance,
 			credit_expires_at = EXCLUDED.credit_expires_at,
@@ -1432,30 +1432,6 @@ func (s *PostgresStore) ReleaseStaleReservations(ctx context.Context, olderThan 
 		       updated_at = now()
 		 WHERE status = 'active'
 		   AND (COALESCE(credit_balance_reserved, 0) > 0 OR COALESCE(payg_usd_balance_reserved, 0) > 0)
-		   AND updated_at < now() - ($1::bigint || ' milliseconds')::interval`,
-		olderThan.Milliseconds())
-	if err != nil {
-		return 0, err
-	}
-	return cmd.RowsAffected(), nil
-}
-
-func (s *PostgresStore) ReleaseStaleQuotaReservations(ctx context.Context, olderThan time.Duration) (int64, error) {
-	if olderThan <= 0 {
-		olderThan = 5 * time.Minute
-	}
-	// Release quota token reservations whose row hasn't been touched
-	// within the threshold. Mirrors ReleaseStaleReservations for the
-	// quota_counters table. A live in-flight request bumps updated_at
-	// on every reserve/finalize; anything older is an orphan left by a
-	// panic/crash or a client disconnect before the deferred rollback
-	// could run. Stuck tokens_reserved permanently blocks every future
-	// request in the same period with quota_exceeded.
-	cmd, err := s.pool.Exec(ctx, `
-		UPDATE ai_gateway.quota_counters
-		   SET tokens_reserved = 0,
-		       updated_at = now()
-		 WHERE tokens_reserved > 0
 		   AND updated_at < now() - ($1::bigint || ' milliseconds')::interval`,
 		olderThan.Milliseconds())
 	if err != nil {

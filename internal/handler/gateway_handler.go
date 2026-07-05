@@ -1269,13 +1269,25 @@ func quotaLimitPtr(subscription *service.ActiveSubscription) *int64 {
 	if subscription == nil {
 		return nil
 	}
-	if subscription.Plan != nil && subscription.Plan.QuotaTokensMonthly != nil {
-		return subscription.Plan.QuotaTokensMonthly
+	var planQuota, entQuota *int64
+	if subscription.Plan != nil {
+		planQuota = subscription.Plan.QuotaTokensMonthly
 	}
-	if subscription.Entitlement != nil && subscription.Entitlement.QuotaTokensMonthly != nil {
-		return subscription.Entitlement.QuotaTokensMonthly
+	if subscription.Entitlement != nil {
+		entQuota = subscription.Entitlement.QuotaTokensMonthly
 	}
-	return nil
+	// Prefer the larger value: re-buy stacking accumulates on the entitlement
+	// row, but the plan snapshot may carry the original single-purchase value.
+	if planQuota != nil && entQuota != nil {
+		if *entQuota > *planQuota {
+			return entQuota
+		}
+		return planQuota
+	}
+	if planQuota != nil {
+		return planQuota
+	}
+	return entQuota
 }
 
 func balanceAmount(subscription *service.ActiveSubscription) float64 {
