@@ -17,9 +17,9 @@ INSERT INTO ai_gateway.customer_entitlements (
 ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
     genfity_tenant_id = EXCLUDED.genfity_tenant_id,
     status = EXCLUDED.status,
-    period_start = EXCLUDED.period_start,
-    period_end = EXCLUDED.period_end,
-    quota_tokens_monthly = EXCLUDED.quota_tokens_monthly,
+    period_start = LEAST(customer_entitlements.period_start, EXCLUDED.period_start),
+    period_end = GREATEST(customer_entitlements.period_end, EXCLUDED.period_end),
+    quota_tokens_monthly = COALESCE(customer_entitlements.quota_tokens_monthly, 0) + COALESCE(EXCLUDED.quota_tokens_monthly, 0),
     balance_snapshot = EXCLUDED.balance_snapshot,
     metadata = EXCLUDED.metadata,
     updated_from_genfity_at = now(),

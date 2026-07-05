@@ -629,9 +629,9 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 		UPDATE ai_gateway.customer_entitlements SET
 			genfity_tenant_id = $2,
 			plan_code = $3,
-			period_start = $4,
-			period_end = $5,
-			quota_tokens_monthly = $6,
+			period_start = LEAST(period_start, $4),
+			period_end = GREATEST(period_end, $5),
+			quota_tokens_monthly = COALESCE(quota_tokens_monthly, 0) + COALESCE($6, 0),
 			balance_snapshot = $7,
 			credit_balance = `+creditBalanceExpr+`,
 			credit_expires_at = $9,
