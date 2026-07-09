@@ -139,6 +139,14 @@ func (s *UsageService) FinalizeQuotaTokens(ctx context.Context, userID string, p
 	return s.store.FinalizeQuotaTokens(ctx, userID, periodStart, periodEnd, reservedTokens, usedTokens, countRequest)
 }
 
+func (s *UsageService) GetQuotaCounter(ctx context.Context, userID string, periodStart, periodEnd time.Time) (*store.QuotaCounter, error) {
+	return s.store.GetQuotaCounter(ctx, userID, periodStart, periodEnd)
+}
+
+func (s *UsageService) SetQuotaTokensUsed(ctx context.Context, userID string, periodStart, periodEnd time.Time, value int64) error {
+	return s.store.SetQuotaTokensUsed(ctx, userID, periodStart, periodEnd, value)
+}
+
 func (s *UsageService) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	return s.store.DebitCreditBalance(ctx, userID, planCode, debitUsd)
 }

@@ -1466,6 +1466,62 @@ func (s *PostgresStore) ReleaseStaleQuotaReservations(ctx context.Context, older
 	return cmd.RowsAffected(), nil
 }
 
+func (s *PostgresStore) GetQuotaCounter(ctx context.Context, userID string, periodStart, periodEnd time.Time) (*store.QuotaCounter, error) {
+	var qc store.QuotaCounter
+	err := s.pool.QueryRow(ctx, `
+		SELECT tokens_used, tokens_reserved, request_count
+		  FROM ai_gateway.quota_counters
+		 WHERE genfity_user_id = $1 AND period_start = $2 AND period_end = $3`,
+		userID, periodStart, periodEnd,
+	).Scan(&qc.TokensUsed, &qc.TokensReserved, &qc.RequestCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &qc, nil
+}
+
+func (s *PostgresStore) MigrateQuotaCounterPeriodEnd(ctx context.Context, userID string, periodStart, newEnd time.Time) (bool, error) {
+	// Move whatever row exists for (user, period_start) to the new
+	// period_end so tokens_used / reserved / request_count carry over an
+	// admin expiry extension. Keyed on period_start only (regardless of
+	// the old end) so we don't need a pre-read. The NOT EXISTS guard skips
+	// the move when a new-end row already exists, avoiding a unique-key
+	// collision on (genfity_user_id, period_start, period_end).
+	cmd, err := s.pool.Exec(ctx, `
+		UPDATE ai_gateway.quota_counters AS qc
+		   SET period_end = $3, updated_at = now()
+		 WHERE qc.genfity_user_id = $1
+		   AND qc.period_start = $2
+		   AND qc.period_end <> $3
+		   AND NOT EXISTS (
+		       SELECT 1 FROM ai_gateway.quota_counters x
+		        WHERE x.genfity_user_id = $1
+		          AND x.period_start = $2
+		          AND x.period_end = $3
+		   )`,
+		userID, periodStart, newEnd)
+	if err != nil {
+		return false, err
+	}
+	return cmd.RowsAffected() > 0, nil
+}
+
+func (s *PostgresStore) SetQuotaTokensUsed(ctx context.Context, userID string, periodStart, periodEnd time.Time, value int64) error {
+	if value < 0 {
+		value = 0
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO ai_gateway.quota_counters (genfity_user_id, period_start, period_end, tokens_used, tokens_reserved, request_count, updated_at)
+		VALUES ($1, $2, $3, $4, 0, 0, now())
+		ON CONFLICT (genfity_user_id, period_start, period_end)
+		DO UPDATE SET tokens_used = $4, updated_at = now()`,
+		userID, periodStart, periodEnd, value)
+	return err
+}
+
 func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	// PRD v3 Phase 4: target by (user, pricing_group='credit_package',
 	// status='active') instead of plan_code. plan_code may have changed

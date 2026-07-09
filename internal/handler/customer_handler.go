@@ -82,7 +82,7 @@ func isFreeUsageLedgerEntry(row store.UsageLedgerEntry) bool {
 	return row.RouterModel != nil && strings.HasSuffix(*row.RouterModel, ":free")
 }
 
-func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscription *service.ActiveSubscription, rateLimit *service.RateLimitService, userID string) subscriptionUsageSnapshot {
+func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscription *service.ActiveSubscription, rateLimit *service.RateLimitService, usage *service.UsageService, userID string) subscriptionUsageSnapshot {
 	if subscription == nil || subscription.Entitlement == nil {
 		return subscriptionUsageSnapshot{}
 	}
@@ -126,6 +126,20 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 			ledgerCreditUsedPeriod += parseFloatPtr(row.AmountCredits)
 		}
 	}
+	// Durable quota_counters is the authoritative per-period tally for
+	// token-quota (unlimited-limit) plans: unlike usage_ledger it is never
+	// retention-pruned, so on a long (e.g. 30-day) plan it still reflects
+	// requests older than the ledger's ~7-day raw window. Prefer it for
+	// period_tokens_used and the unlimited-plan RPP fallback below; fall
+	// back to the ledger-derived counts when the row hasn't been created.
+	var quotaCounter *store.QuotaCounter
+	if usage != nil && userID != "" {
+		quotaCounter, _ = usage.GetQuotaCounter(context.Background(), userID, periodStart, periodEnd)
+	}
+	if quotaCounter != nil {
+		snapshot.PeriodTokensUsed = quotaCounter.TokensUsed
+	}
+
 	// Redis is the source of truth — it's exactly what the request path
 	// enforces against (CheckPlanRPD / CheckRequestsPerPeriod). The ledger is
 	// only a fallback for when Redis is unavailable. We must NOT max() the two:
@@ -143,16 +157,22 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 		// its Redis enforcement counter (CheckPlanRPD/CheckRequestsPerPeriod
 		// both no-op on limit<=0), so the Redis read is a permanent 0 even
 		// though the user is making requests (e.g. a token-quota plan with
-		// RPD=∞/RPP=∞). Show the ledger-derived count in that case so the
-		// dashboard reflects actual usage. The "Redis is truth" concern only
-		// applies to enforced (capped) limits, where the reset/plan-switch
-		// masking described above matters.
+		// RPD=∞/RPP=∞). Show the actual usage in that case so the dashboard
+		// reflects reality. The "Redis is truth" concern only applies to
+		// enforced (capped) limits, where the reset/plan-switch masking
+		// described above matters.
 		limits := service.PlanLimitsFromSnapshot(subscription.Plan)
 		if !limits.HasRPD() {
 			snapshot.RPDUsed = ledgerRPDUsed
 		}
 		if !limits.HasMaxRequestsPerPeriod() {
-			snapshot.RPPUsed = ledgerRPPUsed
+			// Prefer the durable request_count (survives ledger pruning on
+			// long plans); fall back to the ledger tally when absent.
+			if quotaCounter != nil {
+				snapshot.RPPUsed = int(quotaCounter.RequestCount)
+			} else {
+				snapshot.RPPUsed = ledgerRPPUsed
+			}
 		}
 		if !limits.HasCreditPerDay() {
 			snapshot.CreditUsedToday = ledgerCreditUsedToday
@@ -239,7 +259,7 @@ func (h *CustomerHandler) UsageSummary(w http.ResponseWriter, r *http.Request) {
 func (h *CustomerHandler) Quota(w http.ResponseWriter, r *http.Request) {
 	user := middleware.GetAuthUser(r.Context())
 	if subscription, err := h.entitlements.CheckActiveSubscription(r.Context(), user.ID); err == nil && subscription != nil && subscription.Entitlement != nil {
-		usageSnapshot := collectSubscriptionUsageSnapshot(h.usage.ListByUser(r.Context(), user.ID), subscription, h.rateLimit, user.ID)
+		usageSnapshot := collectSubscriptionUsageSnapshot(h.usage.ListByUser(r.Context(), user.ID), subscription, h.rateLimit, h.usage, user.ID)
 		resp := map[string]any{
 			"balance_snapshot":   subscription.Entitlement.BalanceSnapshot,
 			"period_start":       subscription.Entitlement.PeriodStart,
@@ -296,7 +316,7 @@ func (h *CustomerHandler) Subscription(w http.ResponseWriter, r *http.Request) {
 	// Flatten plan limits onto the response so the customer dashboard
 	// can display RPD/RPM/concurrent/period/quota caps without making a
 	// second admin call. The frontend reads these fields directly.
-	usageSnapshot := collectSubscriptionUsageSnapshot(h.usage.ListByUser(r.Context(), user.ID), subscription, h.rateLimit, user.ID)
+	usageSnapshot := collectSubscriptionUsageSnapshot(h.usage.ListByUser(r.Context(), user.ID), subscription, h.rateLimit, h.usage, user.ID)
 	resp := map[string]any{
 		"subscription":       subscription.Entitlement,
 		"plan":               subscription.Plan,

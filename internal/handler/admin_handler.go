@@ -858,7 +858,7 @@ func (h *AdminHandler) UserBillingDetail(w http.ResponseWriter, r *http.Request)
 		if sub.Plan != nil {
 			s["plan_name"] = sub.Plan.DisplayName
 		}
-		usageSnapshot := collectSubscriptionUsageSnapshot(h.store.ListUsageByUser(ctx, userID), sub, h.rateLimit, userID)
+		usageSnapshot := collectSubscriptionUsageSnapshot(h.store.ListUsageByUser(ctx, userID), sub, h.rateLimit, h.usage, userID)
 		s["usage"] = map[string]any{
 			"rpd_used":           usageSnapshot.RPDUsed,
 			"rpp_used":           usageSnapshot.RPPUsed,
@@ -948,8 +948,8 @@ func (h *AdminHandler) AdjustUserUsage(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
-	if body.Counter != "rpd" && body.Counter != "rpp" {
-		respondError(w, http.StatusBadRequest, "counter must be 'rpd' or 'rpp'")
+	if body.Counter != "rpd" && body.Counter != "rpp" && body.Counter != "tokens" {
+		respondError(w, http.StatusBadRequest, "counter must be 'rpd', 'rpp', or 'tokens'")
 		return
 	}
 	if body.Mode != "set" && body.Mode != "add" && body.Mode != "subtract" {
@@ -1007,6 +1007,40 @@ func (h *AdminHandler) AdjustUserUsage(w http.ResponseWriter, r *http.Request) {
 			respondError(w, http.StatusInternalServerError, "failed_to_set_rpp")
 			return
 		}
+	case "tokens":
+		// Adjust the durable per-period token usage counter
+		// (quota_counters.tokens_used). Enforced against the plan's token
+		// quota on the next request. Same (period_start, period_end) key the
+		// reserve/finalize path uses, so the change is picked up live.
+		periodStart, periodEnd := activePeriod(sub.Entitlement)
+		var prevTokens int64
+		if qc, qErr := h.usage.GetQuotaCounter(ctx, userID, periodStart, periodEnd); qErr == nil && qc != nil {
+			prevTokens = qc.TokensUsed
+		}
+		newTokens := prevTokens
+		switch body.Mode {
+		case "set":
+			newTokens = int64(body.Value)
+		case "add":
+			newTokens = prevTokens + int64(body.Value)
+		case "subtract":
+			newTokens = prevTokens - int64(body.Value)
+			if newTokens < 0 {
+				newTokens = 0
+			}
+		}
+		if err := h.usage.SetQuotaTokensUsed(ctx, userID, periodStart, periodEnd, newTokens); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed_to_set_tokens")
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{
+			"user_id":   userID,
+			"counter":   body.Counter,
+			"mode":      body.Mode,
+			"previous":  prevTokens,
+			"new_value": newTokens,
+		})
+		return
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{

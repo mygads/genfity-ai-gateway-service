@@ -71,7 +71,8 @@ func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []st
 		if item.ID == uuid.Nil {
 			item.ID = uuid.New()
 		}
-		if _, err := s.entitlements.Upsert(ctx, item); err != nil {
+		saved, err := s.entitlements.Upsert(ctx, item)
+		if err != nil {
 			s.log.Error().Err(err).
 				Str("genfity_user_id", item.GenfityUserID).
 				Str("plan_code", item.PlanCode).
@@ -84,9 +85,44 @@ func (s *SyncService) SyncCustomerEntitlements(ctx context.Context, payload []st
 			continue
 		}
 		s.resetPlanRPDForSamePlanExtension(ctx, item)
+		s.carryQuotaCounterOnExtension(ctx, saved)
 		count++
 	}
 	return count, failures, nil
+}
+
+// carryQuotaCounterOnExtension keeps token usage intact when an admin (or a
+// same-plan re-buy) extends a subscription's expiry. The token counter row is
+// keyed on (period_start, period_end), so a widened period_end would otherwise
+// leave the used/reserved tokens stranded in the old-end row and reset the
+// live counter to 0. period_start is unchanged by an extension, so we migrate
+// whatever row exists for (user, period_start) onto the current period_end.
+// RPD/RPP Redis counters are anchored on period_start and need no move.
+func (s *SyncService) carryQuotaCounterOnExtension(ctx context.Context, item store.CustomerEntitlement) {
+	if s == nil || s.store == nil {
+		return
+	}
+	// Only subscription/unlimited rows carry a monthly token quota; skip
+	// credit_package / payg_topup rows (no quota_counters usage to move).
+	if item.Status != "active" || item.GenfityUserID == "" ||
+		item.PeriodStart == nil || item.PeriodEnd == nil || item.QuotaTokensMonthly == nil {
+		return
+	}
+	moved, err := s.store.MigrateQuotaCounterPeriodEnd(ctx, item.GenfityUserID, item.PeriodStart.UTC(), item.PeriodEnd.UTC())
+	if err != nil {
+		s.log.Warn().Err(err).
+			Str("genfity_user_id", item.GenfityUserID).
+			Str("plan_code", item.PlanCode).
+			Msg("failed to migrate quota counter on period extension")
+		return
+	}
+	if moved {
+		s.log.Info().
+			Str("genfity_user_id", item.GenfityUserID).
+			Str("plan_code", item.PlanCode).
+			Time("period_end", item.PeriodEnd.UTC()).
+			Msg("migrated quota counter to extended period_end (token usage carried over)")
+	}
 }
 
 func (s *SyncService) resetPlanRPDForSamePlanExtension(ctx context.Context, item store.CustomerEntitlement) {

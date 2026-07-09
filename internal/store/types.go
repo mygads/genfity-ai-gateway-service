@@ -315,6 +315,16 @@ type UsageRollupResult struct {
 	RetentionDays int      `json:"retention_days"`
 }
 
+// QuotaCounter is the durable per-(user, period) token/request tally kept
+// in ai_gateway.quota_counters. Unlike usage_ledger it is never pruned, so
+// it's the authoritative source for period-scoped request/token totals on
+// long-duration plans where raw ledger rows have aged out.
+type QuotaCounter struct {
+	TokensUsed     int64 `json:"tokens_used"`
+	TokensReserved int64 `json:"tokens_reserved"`
+	RequestCount   int64 `json:"request_count"`
+}
+
 // StatusBreakdownRow surfaces success/error counts plus an explicit
 // error_code histogram so admins can scan for misbehaving providers
 // or auth/quota issues without paging through the logs modal.

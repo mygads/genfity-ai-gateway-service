@@ -103,6 +103,31 @@ type Store interface {
 	// fail with quota_exceeded even though the user has plenty of budget.
 	ReleaseStaleQuotaReservations(ctx context.Context, olderThan time.Duration) (int64, error)
 
+	// GetQuotaCounter reads the durable per-(user, period) token/request
+	// tally. Returns (nil, nil) when no row exists. Used for period-scoped
+	// display (e.g. RPP on unlimited plans) since it survives usage_ledger
+	// retention pruning. periodStart/periodEnd must match the reserve/
+	// finalize key exactly (derive via the same activePeriod()).
+	GetQuotaCounter(ctx context.Context, userID string, periodStart, periodEnd time.Time) (*store.QuotaCounter, error)
+
+	// MigrateQuotaCounterPeriodEnd moves the quota_counters row for
+	// (user, periodStart) to a new period_end, preserving tokens_used /
+	// tokens_reserved / request_count. Called when an admin extends a
+	// subscription's expiry: the token counter is keyed on
+	// (period_start, period_end) so a changed end would otherwise strand
+	// the used tokens in the old-end row and reset display to 0. No-op
+	// (returns false) when there's nothing to move or a new-end row
+	// already exists. periodStart is unchanged so RPP/RPD Redis counters
+	// (anchored on period_start) are untouched.
+	MigrateQuotaCounterPeriodEnd(ctx context.Context, userID string, periodStart, newEnd time.Time) (bool, error)
+
+	// SetQuotaTokensUsed overwrites the per-(user, period) tokens_used to
+	// value (clamped >= 0), leaving tokens_reserved / request_count
+	// untouched. Used by the admin usage-adjust endpoint to compensate a
+	// user's token consumption without touching the plan quota. Same key
+	// as the reserve/finalize path.
+	SetQuotaTokensUsed(ctx context.Context, userID string, periodStart, periodEnd time.Time, value int64) error
+
 	// Pending callback queue: durable retry for usage-debit callbacks
 	// to genfity-app that fail at the network layer. genfity-app's
 	// handler is idempotent on (request_id, kind), so a row added

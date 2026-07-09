@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -307,6 +308,52 @@ func (s *MemoryStore) FinalizeQuotaTokens(_ context.Context, userID string, peri
 		return nil
 	}
 	s.quotaReserved[key] = next
+	return nil
+}
+
+func (s *MemoryStore) GetQuotaCounter(_ context.Context, userID string, periodStart, periodEnd time.Time) (*store.QuotaCounter, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := memoryQuotaKey(userID, periodStart, periodEnd)
+	used, reserved, requests := s.quotaUsed[key], s.quotaReserved[key], s.quotaRequests[key]
+	if used == 0 && reserved == 0 && requests == 0 {
+		return nil, nil
+	}
+	return &store.QuotaCounter{TokensUsed: used, TokensReserved: reserved, RequestCount: requests}, nil
+}
+
+func (s *MemoryStore) MigrateQuotaCounterPeriodEnd(_ context.Context, userID string, periodStart, newEnd time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := userID + ":" + periodStart.UTC().Format(time.RFC3339Nano) + ":"
+	newKey := memoryQuotaKey(userID, periodStart, newEnd)
+	moved := false
+	for k := range s.quotaUsed {
+		if !strings.HasPrefix(k, prefix) || k == newKey {
+			continue
+		}
+		if _, exists := s.quotaUsed[newKey]; exists {
+			continue
+		}
+		s.quotaUsed[newKey] = s.quotaUsed[k]
+		s.quotaReserved[newKey] = s.quotaReserved[k]
+		s.quotaRequests[newKey] = s.quotaRequests[k]
+		delete(s.quotaUsed, k)
+		delete(s.quotaReserved, k)
+		delete(s.quotaRequests, k)
+		moved = true
+		break
+	}
+	return moved, nil
+}
+
+func (s *MemoryStore) SetQuotaTokensUsed(_ context.Context, userID string, periodStart, periodEnd time.Time, value int64) error {
+	if value < 0 {
+		value = 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.quotaUsed[memoryQuotaKey(userID, periodStart, periodEnd)] = value
 	return nil
 }
 
