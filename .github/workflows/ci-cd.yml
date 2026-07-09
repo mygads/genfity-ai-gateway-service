@@ -97,6 +97,7 @@ jobs:
           tags: |
             type=ref,event=branch
             type=sha,prefix=
+            type=sha,prefix=,format=long
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
@@ -178,10 +179,34 @@ jobs:
             # workflow which works in production).
             echo "$GHCR_TOKEN" | sudo docker login ghcr.io -u mygads --password-stdin
 
-            # Pull and recreate
-            export IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:latest
-            sudo -E docker compose pull
-            sudo -E docker compose up -d --force-recreate
+            # Pin to the IMMUTABLE commit-SHA tag, never :latest. :latest is
+            # mutable and has raced to an older digest before (a concurrent
+            # push re-pointing it), so a deploy that "succeeds" could run
+            # stale code. The SHA tag (format=long) is unique per commit.
+            export IMAGE=ghcr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+            # IMPORTANT: pass IMAGE THROUGH sudo. This box has sudoers
+            # 'Defaults env_reset', which drops the caller's env — so
+            # 'sudo -E docker compose' silently loses IMAGE and compose falls
+            # back to its ':latest' default (the root cause of stale deploys).
+            # 'sudo env IMAGE=... docker compose' is the only reliable form.
+            sudo env IMAGE="\$IMAGE" docker compose pull
+            sudo env IMAGE="\$IMAGE" docker compose up -d --force-recreate
+
+            # Verify the running container is ACTUALLY the image we just
+            # deployed. Health check alone (curl the port) can't tell stale
+            # from fresh, so compare the running revision label against this
+            # commit and fail loudly on mismatch.
+            EXPECTED="${{ github.sha }}"
+            RUNNING=\$(sudo docker inspect genfity-ai-gateway --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+            echo "Expected revision: \$EXPECTED"
+            echo "Running revision:  \$RUNNING"
+            if [ "\$RUNNING" != "\$EXPECTED" ]; then
+              echo "❌ Deployed revision mismatch — container is NOT running the pushed commit"
+              sudo docker ps -a | grep genfity-ai-gateway || true
+              exit 1
+            fi
+            echo "✅ Running revision matches deployed commit"
 
             # Cleanup old images
             echo "🧹 Cleaning up..."
