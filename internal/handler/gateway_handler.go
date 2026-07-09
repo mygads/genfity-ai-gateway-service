@@ -2794,7 +2794,13 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			body := h.streamUpstreamResponse(w, resp, publicModel)
 			resp.Body.Close()
-			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+			// The client already has the full stream, so settle on a
+			// detached context: if the client disconnected mid-stream the
+			// request ctx is cancelled, which would fail the finalize DB
+			// write and strand tokens_reserved (false quota_exceeded until
+			// the sweeper runs). WithoutCancel keeps the settlement alive.
+			settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).
 					Str("public_model", publicModel).
 					Str("router_instance_code", cand.routerInstanceCode).
@@ -2802,6 +2808,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 					Str("api_key_id", apiKey.ID.String()).
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
+			settleCancel()
 			settled = true
 			// Streaming HTTP 200 doesn't guarantee a real completion — the
 			// upstream can emit `data: {"error": ...}` or close mid-stream
@@ -3181,7 +3188,12 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			}
 			body := h.streamUpstreamResponse(w, resp, publicModel)
 			resp.Body.Close()
-			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+			// Settle on a detached context — see the /v1/messages streaming
+			// branch: a client disconnect mid-stream cancels the request
+			// ctx, which would fail the finalize DB write and strand
+			// tokens_reserved (false quota_exceeded until the sweeper runs).
+			settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).
 					Str("public_model", publicModel).
 					Str("router_instance_code", cand.routerInstanceCode).
@@ -3189,6 +3201,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 					Str("api_key_id", apiKey.ID.String()).
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
 			}
+			settleCancel()
 			settled = true
 			// See /v1/messages streaming branch — HTTP 200 alone is not
 			// proof of a real completion, so gate the counter commit on

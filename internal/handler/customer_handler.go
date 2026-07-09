@@ -138,6 +138,28 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 		snapshot.RPPUsed = ledgerRPPUsed
 		snapshot.CreditUsedToday = ledgerCreditUsedToday
 		snapshot.CreditUsedPeriod = ledgerCreditUsedPeriod
+	} else {
+		// When a limit is unlimited (≤0), the request path never increments
+		// its Redis enforcement counter (CheckPlanRPD/CheckRequestsPerPeriod
+		// both no-op on limit<=0), so the Redis read is a permanent 0 even
+		// though the user is making requests (e.g. a token-quota plan with
+		// RPD=∞/RPP=∞). Show the ledger-derived count in that case so the
+		// dashboard reflects actual usage. The "Redis is truth" concern only
+		// applies to enforced (capped) limits, where the reset/plan-switch
+		// masking described above matters.
+		limits := service.PlanLimitsFromSnapshot(subscription.Plan)
+		if !limits.HasRPD() {
+			snapshot.RPDUsed = ledgerRPDUsed
+		}
+		if !limits.HasMaxRequestsPerPeriod() {
+			snapshot.RPPUsed = ledgerRPPUsed
+		}
+		if !limits.HasCreditPerDay() {
+			snapshot.CreditUsedToday = ledgerCreditUsedToday
+		}
+		if !limits.HasCreditPerPeriod() {
+			snapshot.CreditUsedPeriod = ledgerCreditUsedPeriod
+		}
 	}
 
 	flagged, debtRemaining, _ := resolveAbuseDebt(subscription)

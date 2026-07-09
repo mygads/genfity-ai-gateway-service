@@ -1440,6 +1440,32 @@ func (s *PostgresStore) ReleaseStaleReservations(ctx context.Context, olderThan 
 	return cmd.RowsAffected(), nil
 }
 
+func (s *PostgresStore) ReleaseStaleQuotaReservations(ctx context.Context, olderThan time.Duration) (int64, error) {
+	if olderThan <= 0 {
+		olderThan = 5 * time.Minute
+	}
+	// Mirror of ReleaseStaleReservations for the token-quota path. A live
+	// in-flight request bumps quota_counters.updated_at on every
+	// reserve/finalize, so any row still carrying tokens_reserved after
+	// the threshold is orphaned — the settlement write never landed
+	// (panic, crash, or client disconnect cancelling the request context
+	// mid-finalize). Zeroing tokens_reserved unblocks the user without
+	// touching tokens_used, so already-committed usage is preserved. The
+	// partial index quota_counters_stale_reserved_idx (migration 00025)
+	// keeps this a cheap indexed update.
+	cmd, err := s.pool.Exec(ctx, `
+		UPDATE ai_gateway.quota_counters
+		   SET tokens_reserved = 0,
+		       updated_at = now()
+		 WHERE tokens_reserved > 0
+		   AND updated_at < now() - ($1::bigint || ' milliseconds')::interval`,
+		olderThan.Milliseconds())
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
+}
+
 func (s *PostgresStore) DebitCreditBalance(ctx context.Context, userID string, planCode string, debitUsd float64) error {
 	// PRD v3 Phase 4: target by (user, pricing_group='credit_package',
 	// status='active') instead of plan_code. plan_code may have changed
