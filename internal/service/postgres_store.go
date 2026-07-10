@@ -625,13 +625,20 @@ func (s *PostgresStore) upsertSingleRowEntitlement(ctx context.Context, item sto
 	if pricingGroup == "payg_topup" {
 		creditBalanceExpr = "COALESCE($8::numeric, 0) * 0"
 	}
+	// genfity-app is the source of truth for period_start, period_end,
+	// and quota_tokens_monthly. Mirror the incoming values exactly rather
+	// than accumulating or widening: the app already computes stacking
+	// (extend) and resets (lapsed re-buy) and sends the absolute window
+	// and quota. Accumulating here double-counted quota on every sync
+	// (e.g. app 100M became gateway 150M) and LEAST/GREATEST prevented
+	// resets from shrinking the window after a lapsed re-buy.
 	err = tx.QueryRow(ctx, `
 		UPDATE ai_gateway.customer_entitlements SET
 			genfity_tenant_id = $2,
 			plan_code = $3,
-			period_start = LEAST(period_start, $4),
-			period_end = GREATEST(period_end, $5),
-			quota_tokens_monthly = COALESCE(quota_tokens_monthly, 0) + COALESCE($6, 0),
+			period_start = $4,
+			period_end = $5,
+			quota_tokens_monthly = $6,
 			balance_snapshot = $7,
 			credit_balance = `+creditBalanceExpr+`,
 			credit_expires_at = $9,
@@ -743,6 +750,12 @@ func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQu
 	// period_start), so an admin editing the SAME purchase keeps the same
 	// period_start and always updates — only a genuinely older purchase
 	// row is rejected. An incoming active row always updates.
+	//
+	// genfity-app is the source of truth for period_start, period_end, and
+	// quota_tokens_monthly. Mirror EXCLUDED values exactly; the app already
+	// decides whether a same-plan re-buy extends (stack) or resets (lapsed
+	// re-buy). Accumulating or widening here caused double-counted quota and
+	// prevented resets from shrinking the window after expiry.
 	err := q.QueryRow(ctx, `
 		INSERT INTO ai_gateway.customer_entitlements AS ce (
 			id, genfity_user_id, genfity_tenant_id, plan_code, status,
@@ -754,9 +767,9 @@ func (s *PostgresStore) insertEntitlementByPlanCode(ctx context.Context, q pgxQu
 		ON CONFLICT (genfity_user_id, plan_code) DO UPDATE SET
 			genfity_tenant_id = EXCLUDED.genfity_tenant_id,
 			status = EXCLUDED.status,
-			period_start = LEAST(ce.period_start, EXCLUDED.period_start),
-			period_end = GREATEST(ce.period_end, EXCLUDED.period_end),
-			quota_tokens_monthly = COALESCE(ce.quota_tokens_monthly, 0) + COALESCE(EXCLUDED.quota_tokens_monthly, 0),
+			period_start = EXCLUDED.period_start,
+			period_end = EXCLUDED.period_end,
+			quota_tokens_monthly = EXCLUDED.quota_tokens_monthly,
 			balance_snapshot = EXCLUDED.balance_snapshot,
 			credit_balance = EXCLUDED.credit_balance,
 			credit_expires_at = EXCLUDED.credit_expires_at,
