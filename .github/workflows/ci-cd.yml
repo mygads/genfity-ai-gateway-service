@@ -152,9 +152,10 @@ jobs:
           if [ -n "$ENV_FILE" ]; then
             echo "📝 Updating .env file on server (full replace)..."
             # Write the file directly as the deploy user. The .env is owned by
-            # $VPS_USER (cicddeploy), so no sudo/install needed — and this box's
+            # $VPS_USER (cicddeploy), so no sudo needed — and this box's
             # restricted sudoers does NOT permit 'sudo install' anyway.
-            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "install -m 600 /dev/stdin /home/$VPS_USER/genfity/genfity-ai-gateway/.env"
+            # Use redirect + chmod (install /dev/stdin gets EACCES here).
+            printf '%s' "$ENV_FILE" | ssh $VPS_USER@$VPS_HOST "cat > /home/$VPS_USER/genfity/genfity-ai-gateway/.env && chmod 600 /home/$VPS_USER/genfity/genfity-ai-gateway/.env"
             echo "✅ ENV file updated with full replace!"
           else
             echo "⏭️ ENV_FILE secret not set, skipping .env update"
