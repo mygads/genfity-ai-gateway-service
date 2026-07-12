@@ -875,7 +875,6 @@ type preRequestCounters struct {
 	rateLimit       *service.RateLimitService
 	userID          string
 	periodKey       string
-	planCode        string
 	publicModel     string
 	periodConsumed  bool
 	rpdConsumed     bool
@@ -898,7 +897,7 @@ func (p *preRequestCounters) rollback(ctx context.Context) {
 		p.periodConsumed = false
 	}
 	if p.rpdConsumed {
-		p.rateLimit.RollbackPlanRPD(ctx, p.userID, p.planCode)
+		p.rateLimit.RollbackPlanRPD(ctx, p.userID, p.periodKey)
 		p.rpdConsumed = false
 	}
 	if p.freeRPMConsumed {
@@ -963,9 +962,6 @@ func (h *GatewayHandler) applyPreRequestLimits(
 	}
 	if model != nil {
 		tracker.publicModel = model.PublicModel
-	}
-	if subscription != nil && subscription.Plan != nil {
-		tracker.planCode = subscription.Plan.PlanCode
 	}
 	// Only count this request against the unlimited plan's per-period and
 	// per-day caps when it will actually be billed via the unlimited
@@ -1046,8 +1042,13 @@ func (h *GatewayHandler) applyPreRequestLimits(
 		}
 		tracker.periodConsumed = true
 	}
-	if willConsumePlanCounters && limits.HasRPD() && subscription != nil && subscription.Plan != nil {
-		if err := h.rateLimit.CheckPlanRPD(ctx, apiKey.GenfityUserID, subscription.Plan.PlanCode, limits.RPD); err != nil {
+	if willConsumePlanCounters && limits.HasRPD() && subscription != nil && subscription.Plan != nil && subscription.Entitlement != nil {
+		rpdKey := periodKey(subscription.Entitlement)
+		// Ensure the tracker carries the period key even when the RPP block
+		// above didn't run (a plan with an RPD cap but no RPP cap), so a later
+		// rollback decrements the right RPD counter.
+		tracker.periodKey = rpdKey
+		if err := h.rateLimit.CheckPlanRPD(ctx, apiKey.GenfityUserID, rpdKey, limits.RPD); err != nil {
 			tracker.rollback(ctx)
 			return "plan_rpd_exceeded", http.StatusTooManyRequests, tracker
 		}
@@ -1524,13 +1525,19 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 			if !cost.IsFree && creditsPer20k > 0 {
 				reservedCredits := estimateReservedRequestCredits(creditsPer20k, estimate)
 				periodKeyValue := periodKey(subscription.Entitlement)
+				// Carry the period key onto the reservation so the finalize path
+				// reconciles the credit-day / credit-period counters against the
+				// SAME key the reserve used. Both daily and period credit counters
+				// are period_start-anchored (not plan_code) so a plan rename or
+				// same-plan extend can't re-key and reset them.
+				res.PlanCreditPeriodKey = periodKeyValue
 				ttl := time.Until(periodEnd)
 				if ttl <= 0 {
 					ttl = 24 * time.Hour
 				}
 				h.ensurePeriodCounterBaseline(ctx, apiKey.GenfityUserID, subscription, ttl, false, true)
 				if limits.HasCreditPerDay() {
-					if err := h.rateLimit.CheckPlanCreditRPD(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, reservedCredits, limits.CreditLimitPerDay); err != nil {
+					if err := h.rateLimit.CheckPlanCreditRPD(ctx, apiKey.GenfityUserID, periodKeyValue, reservedCredits, limits.CreditLimitPerDay); err != nil {
 						if res.QuotaTokens > 0 {
 							_ = h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, res.PeriodStart, res.PeriodEnd, res.QuotaTokens, 0, false)
 						}
@@ -1541,7 +1548,7 @@ func (h *GatewayHandler) tryPriorityBilling(ctx context.Context, apiKey store.AP
 				if limits.HasCreditPerPeriod() {
 					if err := h.rateLimit.CheckPlanCreditsPerPeriod(ctx, apiKey.GenfityUserID, periodKeyValue, ttl, reservedCredits, limits.CreditLimitPerPeriod); err != nil {
 						if res.PlanCreditsPerDay > 0 {
-							_ = h.rateLimit.FinalizePlanCreditRPD(ctx, apiKey.GenfityUserID, subscription.Entitlement.PlanCode, res.PlanCreditsPerDay, 0)
+							_ = h.rateLimit.FinalizePlanCreditRPD(ctx, apiKey.GenfityUserID, periodKeyValue, res.PlanCreditsPerDay, 0)
 							res.PlanCreditsPerDay = 0
 						}
 						if res.QuotaTokens > 0 {
@@ -1871,7 +1878,7 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 	}
 	if h.rateLimit != nil {
 		if reservation.PlanCreditsPerDay > 0 {
-			if err := h.rateLimit.FinalizePlanCreditRPD(ctx, apiKey.GenfityUserID, reservation.PlanCode, reservation.PlanCreditsPerDay, actualCredits); err != nil {
+			if err := h.rateLimit.FinalizePlanCreditRPD(ctx, apiKey.GenfityUserID, reservation.PlanCreditPeriodKey, reservation.PlanCreditsPerDay, actualCredits); err != nil {
 				return err
 			}
 		}

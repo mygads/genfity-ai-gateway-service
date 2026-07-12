@@ -178,17 +178,24 @@ func (l PlanLimits) TPMExceeded(actualTotalTokens int64) bool {
 	return l.HasTPM() && actualTotalTokens > int64(l.TPM)
 }
 
-// CheckPlanRPD enforces the per-(user,plan) request count for the current
+// CheckPlanRPD enforces the per-(user,period) request count for the current
 // UTC calendar day. Independent of MaxRequestsPerPeriod, which is scoped
 // to the entitlement period; RPD resets at UTC midnight every day. The
 // counter expires after 25 hours so it survives clock skew across the
 // day boundary. limit <= 0 means no daily cap.
-func (s *RateLimitService) CheckPlanRPD(ctx context.Context, userID, planCode string, limit int) error {
-	if limit <= 0 || userID == "" {
+//
+// periodKey identifies the subscription period (period_start-anchored, same
+// as RPP) — NOT the plan_code. plan_code is editable in the admin UI, so
+// keying on it meant a plan rename re-keyed the daily counter to 0 and
+// handed every affected user a full fresh RPD allowance until UTC midnight.
+// period_start is immutable across renames and same-plan extensions, so the
+// counter now survives both.
+func (s *RateLimitService) CheckPlanRPD(ctx context.Context, userID, periodKey string, limit int) error {
+	if limit <= 0 || userID == "" || periodKey == "" {
 		return nil
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	count, err := s.client.Incr(ctx, key).Result()
 	if err != nil {
 		return err
@@ -266,17 +273,17 @@ func (s *RateLimitService) GetConcurrencyCount(ctx context.Context, userID strin
 	return n
 }
 
-// GetPlanRPDCount reads (does NOT increment) the per-(user,plan) request
+// GetPlanRPDCount reads (does NOT increment) the per-(user,period) request
 // count for the current UTC day. Mirrors the key scheme of CheckPlanRPD
 // so the admin billing-detail modal can show "rpd_used / rpd_limit"
 // without consuming the user's daily quota. Returns 0 when the key is
 // missing/expired or on any read error.
-func (s *RateLimitService) GetPlanRPDCount(ctx context.Context, userID, planCode string) int {
-	if userID == "" || planCode == "" {
+func (s *RateLimitService) GetPlanRPDCount(ctx context.Context, userID, periodKey string) int {
+	if userID == "" || periodKey == "" {
 		return 0
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	n, err := s.client.Get(ctx, key).Int()
 	if err != nil {
 		return 0
@@ -306,34 +313,34 @@ func (s *RateLimitService) GetRequestsPerPeriodCount(ctx context.Context, userID
 	return n
 }
 
-// SetPlanRPD overwrites the per-(user,plan) RPD counter for the current
+// SetPlanRPD overwrites the per-(user,period) RPD counter for the current
 // UTC day to value (clamped at 0). Used by the admin usage-adjust endpoint
 // to reset/compensate a user's daily usage without touching the plan cap.
 // Mirrors CheckPlanRPD's key + 25h TTL so the next request sees the new
 // count and the key still expires across the day boundary.
-func (s *RateLimitService) SetPlanRPD(ctx context.Context, userID, planCode string, value int) error {
-	if userID == "" || planCode == "" {
-		return fmt.Errorf("userID and planCode are required")
+func (s *RateLimitService) SetPlanRPD(ctx context.Context, userID, periodKey string, value int) error {
+	if userID == "" || periodKey == "" {
+		return fmt.Errorf("userID and periodKey are required")
 	}
 	if value < 0 {
 		value = 0
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	return s.client.Set(ctx, key, value, 25*time.Hour).Err()
 }
 
-// ResetPlanRPDOnce zeroes today's per-(user,plan) RPD counter exactly once
+// ResetPlanRPDOnce zeroes today's per-(user,period) RPD counter exactly once
 // for a purchase/extension event. Same-plan renewals extend the entitlement
-// period while keeping the same plan/day Redis key, so without this a user
+// period while keeping the same period/day Redis key, so without this a user
 // who already hit today's RPD cap remains blocked after buying the same plan
 // again. resetID must be stable for the purchase, typically the transaction id.
-func (s *RateLimitService) ResetPlanRPDOnce(ctx context.Context, userID, planCode, resetID string) (bool, error) {
-	if userID == "" || planCode == "" || resetID == "" {
-		return false, fmt.Errorf("userID, planCode, and resetID are required")
+func (s *RateLimitService) ResetPlanRPDOnce(ctx context.Context, userID, periodKey, resetID string) (bool, error) {
+	if userID == "" || periodKey == "" || resetID == "" {
+		return false, fmt.Errorf("userID, periodKey, and resetID are required")
 	}
 	day := time.Now().UTC().Format("20060102")
-	sentinel := fmt.Sprintf("%s:rl:plan-day-reset:%s:%s:%s", s.prefix, userID, planCode, resetID)
+	sentinel := fmt.Sprintf("%s:rl:plan-day-reset:%s:%s:%s", s.prefix, userID, periodKey, resetID)
 	ok, err := s.client.SetNX(ctx, sentinel, 1, 90*24*time.Hour).Result()
 	if err != nil {
 		return false, err
@@ -341,7 +348,7 @@ func (s *RateLimitService) ResetPlanRPDOnce(ctx context.Context, userID, planCod
 	if !ok {
 		return false, nil
 	}
-	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	if err := s.client.Set(ctx, key, 0, 25*time.Hour).Err(); err != nil {
 		return false, err
 	}
@@ -403,12 +410,12 @@ func (s *RateLimitService) SetPlanCreditsPerPeriod(ctx context.Context, userID, 
 	return s.client.Set(ctx, key, value, ttl).Err()
 }
 
-func (s *RateLimitService) CheckPlanCreditRPD(ctx context.Context, userID, planCode string, amount, limit float64) error {
-	if amount <= 0 || limit <= 0 || userID == "" || planCode == "" {
+func (s *RateLimitService) CheckPlanCreditRPD(ctx context.Context, userID, periodKey string, amount, limit float64) error {
+	if amount <= 0 || limit <= 0 || userID == "" || periodKey == "" {
 		return nil
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	count, err := s.client.IncrByFloat(ctx, key, amount).Result()
 	if err != nil {
 		return err
@@ -423,12 +430,12 @@ func (s *RateLimitService) CheckPlanCreditRPD(ctx context.Context, userID, planC
 	return nil
 }
 
-func (s *RateLimitService) FinalizePlanCreditRPD(ctx context.Context, userID, planCode string, reserved, actual float64) error {
-	if reserved <= 0 || userID == "" || planCode == "" {
+func (s *RateLimitService) FinalizePlanCreditRPD(ctx context.Context, userID, periodKey string, reserved, actual float64) error {
+	if reserved <= 0 || userID == "" || periodKey == "" {
 		return nil
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	delta := actual - reserved
 	if delta == 0 {
 		return nil
@@ -467,12 +474,12 @@ func (s *RateLimitService) FinalizePlanCreditsPerPeriod(ctx context.Context, use
 	return s.client.IncrByFloat(ctx, key, delta).Err()
 }
 
-func (s *RateLimitService) GetPlanCreditRPDCount(ctx context.Context, userID, planCode string) float64 {
-	if userID == "" || planCode == "" {
+func (s *RateLimitService) GetPlanCreditRPDCount(ctx context.Context, userID, periodKey string) float64 {
+	if userID == "" || periodKey == "" {
 		return 0
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-credit-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	n, err := s.client.Get(ctx, key).Float64()
 	if err != nil || n < 0 {
 		return 0
@@ -577,14 +584,14 @@ func (s *RateLimitService) RollbackRequestsPerPeriod(ctx context.Context, userID
 	_, _ = s.client.Decr(ctx, key).Result()
 }
 
-// RollbackPlanRPD undoes one increment of the per-(user,plan) daily
+// RollbackPlanRPD undoes one increment of the per-(user,period) daily
 // counter. Same rationale as RollbackRequestsPerPeriod.
-func (s *RateLimitService) RollbackPlanRPD(ctx context.Context, userID, planCode string) {
-	if userID == "" {
+func (s *RateLimitService) RollbackPlanRPD(ctx context.Context, userID, periodKey string) {
+	if userID == "" || periodKey == "" {
 		return
 	}
 	day := time.Now().UTC().Format("20060102")
-	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, planCode, day)
+	key := fmt.Sprintf("%s:rl:plan-day:%s:%s:%s", s.prefix, userID, periodKey, day)
 	_, _ = s.client.Decr(ctx, key).Result()
 }
 

@@ -987,10 +987,10 @@ func (h *AdminHandler) AdjustUserUsage(w http.ResponseWriter, r *http.Request) {
 	var previous, newValue int
 	switch body.Counter {
 	case "rpd":
-		planCode := sub.Plan.PlanCode
-		previous = h.rateLimit.GetPlanRPDCount(ctx, userID, planCode)
+		pk := periodKey(sub.Entitlement)
+		previous = h.rateLimit.GetPlanRPDCount(ctx, userID, pk)
 		newValue = target(previous)
-		if err := h.rateLimit.SetPlanRPD(ctx, userID, planCode, newValue); err != nil {
+		if err := h.rateLimit.SetPlanRPD(ctx, userID, pk, newValue); err != nil {
 			respondError(w, http.StatusInternalServerError, "failed_to_set_rpd")
 			return
 		}

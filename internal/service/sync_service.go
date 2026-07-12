@@ -141,7 +141,14 @@ func (s *SyncService) resetPlanRPDForSamePlanExtension(ctx context.Context, item
 	if resetID == "" {
 		return
 	}
-	if didReset, err := s.rateLimit.ResetPlanRPDOnce(ctx, item.GenfityUserID, item.PlanCode, resetID); err != nil {
+	// RPD is keyed on the period_start Unix timestamp (same as the handler's
+	// periodKey()), NOT plan_code — so the reset must target that same key.
+	// A same-plan extension always carries a period_start; skip if absent.
+	if item.PeriodStart == nil {
+		return
+	}
+	periodKey := strconv.FormatInt(item.PeriodStart.UTC().Unix(), 10)
+	if didReset, err := s.rateLimit.ResetPlanRPDOnce(ctx, item.GenfityUserID, periodKey, resetID); err != nil {
 		s.log.Warn().Err(err).
 			Str("genfity_user_id", item.GenfityUserID).
 			Str("plan_code", item.PlanCode).

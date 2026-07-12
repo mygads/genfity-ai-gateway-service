@@ -98,12 +98,13 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 	ledgerCreditUsedPeriod := 0.0
 	redisAvailable := false
 	if rateLimit != nil && userID != "" {
-		snapshot.RPDUsed = rateLimit.GetPlanRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
-		snapshot.RPPUsed = rateLimit.GetRequestsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
+		pk := periodKey(subscription.Entitlement)
+		snapshot.RPDUsed = rateLimit.GetPlanRPDCount(context.Background(), userID, pk)
+		snapshot.RPPUsed = rateLimit.GetRequestsPerPeriodCount(context.Background(), userID, pk)
 		snapshot.RPMUsed = rateLimit.GetRPMCount(context.Background(), userID)
 		snapshot.ConcurrentUsed = rateLimit.GetConcurrencyCount(context.Background(), userID)
-		snapshot.CreditUsedToday = rateLimit.GetPlanCreditRPDCount(context.Background(), userID, subscription.Entitlement.PlanCode)
-		snapshot.CreditUsedPeriod = rateLimit.GetPlanCreditsPerPeriodCount(context.Background(), userID, periodKey(subscription.Entitlement))
+		snapshot.CreditUsedToday = rateLimit.GetPlanCreditRPDCount(context.Background(), userID, pk)
+		snapshot.CreditUsedPeriod = rateLimit.GetPlanCreditsPerPeriodCount(context.Background(), userID, pk)
 		redisAvailable = true
 	}
 
