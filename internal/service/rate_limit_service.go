@@ -39,11 +39,16 @@ func NewRateLimitService(client *redis.Client, prefix string, logger zerolog.Log
 	}
 }
 
-func (s *RateLimitService) CheckRPM(ctx context.Context, apiKeyID string, limit int) error {
+// CheckRPM enforces the per-user requests-per-minute cap. The counter is
+// keyed on the genfity_user_id (all callers pass apiKey.GenfityUserID) — the
+// "api-key" segment in the Redis key is legacy naming, NOT the api_key_id.
+// GetRPMCount reads the SAME user-keyed counter, so the admin/customer
+// rpm_used display matches what enforcement counts.
+func (s *RateLimitService) CheckRPM(ctx context.Context, userID string, limit int) error {
 	if limit <= 0 {
 		return nil
 	}
-	key := fmt.Sprintf("%s:rl:api-key:%s:rpm", s.prefix, apiKeyID)
+	key := fmt.Sprintf("%s:rl:api-key:%s:rpm", s.prefix, userID)
 	count, err := s.client.Incr(ctx, key).Result()
 	if err != nil {
 		return err
