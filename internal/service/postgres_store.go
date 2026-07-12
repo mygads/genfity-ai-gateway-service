@@ -1497,26 +1497,67 @@ func (s *PostgresStore) GetQuotaCounter(ctx context.Context, userID string, peri
 }
 
 func (s *PostgresStore) MigrateQuotaCounterPeriodEnd(ctx context.Context, userID string, periodStart, newEnd time.Time) (bool, error) {
-	// Move whatever row exists for (user, period_start) to the new
-	// period_end so tokens_used / reserved / request_count carry over an
-	// admin expiry extension. Keyed on period_start only (regardless of
-	// the old end) so we don't need a pre-read. The NOT EXISTS guard skips
-	// the move when a new-end row already exists, avoiding a unique-key
-	// collision on (genfity_user_id, period_start, period_end).
-	cmd, err := s.pool.Exec(ctx, `
-		UPDATE ai_gateway.quota_counters AS qc
-		   SET period_end = $3, updated_at = now()
-		 WHERE qc.genfity_user_id = $1
-		   AND qc.period_start = $2
-		   AND qc.period_end <> $3
-		   AND NOT EXISTS (
-		       SELECT 1 FROM ai_gateway.quota_counters x
-		        WHERE x.genfity_user_id = $1
-		          AND x.period_start = $2
-		          AND x.period_end = $3
-		   )`,
+	// Consolidate EVERY quota_counters row for (user, period_start) onto the
+	// current period_end, summing tokens_used / tokens_reserved /
+	// request_count. The counter row is keyed on (period_start, period_end),
+	// so each time a subscription's expiry is extended the live counter used
+	// to re-key to a fresh period_end and start from 0 — leaking token usage
+	// (the dashboard reads only the current-end row) and letting a user blow
+	// past their quota unbounded across repeated extensions.
+	//
+	// The previous implementation moved a single row with a NOT EXISTS guard,
+	// which threw 23505 (duplicate key) the moment two or more stale rows
+	// already shared this period_start (3+ extensions) — so nothing moved and
+	// every extension spawned another zeroed row. This version folds all rows
+	// into one in a single statement: sum the older rows into the target end,
+	// then delete the folded-away rows. Runs in a tx so the merge is atomic.
+	// Idempotent — a second call finds a single row already at newEnd and is a
+	// no-op. Also self-heals windows already leaked by the old bug.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Upsert the summed totals of all OTHER-end rows onto the target end row,
+	// creating it if absent. tokens_reserved is intentionally NOT carried:
+	// stale reserved on an old-end row belongs to a request that settled long
+	// ago; the live sweeper zeroes in-flight reserves on the current row.
+	cmd, err := tx.Exec(ctx, `
+		WITH agg AS (
+			SELECT COALESCE(SUM(tokens_used), 0)   AS used,
+			       COALESCE(SUM(request_count), 0) AS reqs,
+			       (array_agg(genfity_tenant_id) FILTER (WHERE genfity_tenant_id IS NOT NULL))[1] AS tenant
+			  FROM ai_gateway.quota_counters
+			 WHERE genfity_user_id = $1
+			   AND period_start = $2
+			   AND period_end <> $3
+		)
+		INSERT INTO ai_gateway.quota_counters
+			(genfity_user_id, genfity_tenant_id, period_start, period_end, tokens_used, tokens_reserved, request_count, updated_at)
+		SELECT $1, agg.tenant, $2, $3, agg.used, 0, agg.reqs, now()
+		  FROM agg
+		 WHERE agg.used > 0 OR agg.reqs > 0
+		ON CONFLICT (genfity_user_id, period_start, period_end)
+		DO UPDATE SET tokens_used   = ai_gateway.quota_counters.tokens_used   + EXCLUDED.tokens_used,
+		              request_count = ai_gateway.quota_counters.request_count + EXCLUDED.request_count,
+		              updated_at    = now()`,
 		userID, periodStart, newEnd)
 	if err != nil {
+		return false, err
+	}
+
+	// Drop the now-folded stale-end rows.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM ai_gateway.quota_counters
+		 WHERE genfity_user_id = $1
+		   AND period_start = $2
+		   AND period_end <> $3`,
+		userID, periodStart, newEnd); err != nil {
+		return false, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
 	return cmd.RowsAffected() > 0, nil

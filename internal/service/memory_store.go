@@ -328,21 +328,19 @@ func (s *MemoryStore) MigrateQuotaCounterPeriodEnd(_ context.Context, userID str
 	prefix := userID + ":" + periodStart.UTC().Format(time.RFC3339Nano) + ":"
 	newKey := memoryQuotaKey(userID, periodStart, newEnd)
 	moved := false
+	// Fold EVERY stale-end row for this period_start into the target-end row
+	// (summing used/requests), mirroring the Postgres consolidation. The old
+	// first-match-only move left later rows stranded once 3+ ends existed.
 	for k := range s.quotaUsed {
 		if !strings.HasPrefix(k, prefix) || k == newKey {
 			continue
 		}
-		if _, exists := s.quotaUsed[newKey]; exists {
-			continue
-		}
-		s.quotaUsed[newKey] = s.quotaUsed[k]
-		s.quotaReserved[newKey] = s.quotaReserved[k]
-		s.quotaRequests[newKey] = s.quotaRequests[k]
+		s.quotaUsed[newKey] += s.quotaUsed[k]
+		s.quotaRequests[newKey] += s.quotaRequests[k]
 		delete(s.quotaUsed, k)
 		delete(s.quotaReserved, k)
 		delete(s.quotaRequests, k)
 		moved = true
-		break
 	}
 	return moved, nil
 }

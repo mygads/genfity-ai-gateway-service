@@ -3370,6 +3370,20 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 			statusStr = "failed"
 		}
 	}
+	// An HTTP 200 with an empty or non-completion body is NOT a success:
+	// ai-core2 returns 200 then a body of only keep-alive newlines when the
+	// upstream stalls/times out, or the client disconnects before any content
+	// lands. Those rows were recorded status=success with 0/0/0 tokens and $0
+	// cost — polluting analytics and, worse, never burning the unlimited
+	// plan's token quota, so a timed-out request looked free. Reuse
+	// looksLikeSuccessfulCompletion (the same gate the counter-commit path
+	// already trusts) so the ledger status matches whether real output landed.
+	if statusStr == "success" && !looksLikeSuccessfulCompletion(body) {
+		statusStr = "failed"
+		if bodyErrorCode == "" {
+			bodyErrorCode = "empty_upstream_response"
+		}
+	}
 	success := statusStr == "success"
 	actualCredits := 0.0
 	if success && reservation != nil {
