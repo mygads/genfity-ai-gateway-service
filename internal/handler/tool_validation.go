@@ -33,9 +33,16 @@ type observedToolCall struct {
 // Chat Completions and Anthropic Messages:
 //   - declarations and call IDs are unique;
 //   - every call names a currently declared tool;
-//   - arguments are JSON objects compatible with the declared input schema;
+//   - arguments are syntactically valid JSON objects;
 //   - every result refers to one earlier call and every historical call has a
 //     single result.
+//
+// Historical calls are deliberately not revalidated against today's JSON
+// schema. Tool executors commonly return an error result for a model-produced
+// call that omitted a required field, allowing the model to recover on its
+// next turn. Rejecting that history at the gateway would lock the conversation
+// in a retry loop. Provider-specific schema constraints belong in candidate
+// preflight where an incompatible provider can be skipped.
 //
 // It deliberately does not impose Kiro-specific limits such as tool count,
 // name pattern, or request byte size; those belong in CLIProxy's candidate
@@ -58,15 +65,11 @@ func validateToolHistory(payload map[string]any) *toolHistoryValidationError {
 		if _, exists := calls[id]; exists {
 			return &toolHistoryValidationError{Code: "duplicate_tool_call_id", Reason: "tool call ID must be unique", ToolName: name, ToolCallID: id}
 		}
-		tool, ok := declared[name]
+		_, ok := declared[name]
 		if !ok || name == "" {
 			return &toolHistoryValidationError{Code: "undeclared_tool", Reason: "tool call name is not present in tools", ToolName: name, ToolCallID: id}
 		}
-		args, err := decodeToolArguments(arguments)
-		if err != nil {
-			return &toolHistoryValidationError{Code: "invalid_tool_arguments", Reason: err.Error(), ToolName: name, ToolCallID: id}
-		}
-		if err := validateJSONSchemaValue(args, tool.schema, "arguments"); err != nil {
+		if _, err := decodeToolArguments(arguments); err != nil {
 			return &toolHistoryValidationError{Code: "invalid_tool_arguments", Reason: err.Error(), ToolName: name, ToolCallID: id}
 		}
 		calls[id] = &observedToolCall{name: name, messageNo: messageNo}

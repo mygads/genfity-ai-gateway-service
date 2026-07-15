@@ -62,11 +62,6 @@ func TestValidateToolHistoryRejectsStructuralProblems(t *testing.T) {
 			code: "invalid_tool_arguments",
 		},
 		{
-			name: "required schema property",
-			raw:  `{"tools":[{"type":"function","function":{"name":"search","parameters":{"type":"object","required":["q"]}}}],"messages":[{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"search","arguments":"{}"}}]}]}`,
-			code: "invalid_tool_arguments",
-		},
-		{
 			name: "orphan result",
 			raw:  `{"tools":[],"messages":[{"role":"tool","tool_call_id":"missing","content":"x"}]}`,
 			code: "unmatched_tool_result",
@@ -84,5 +79,17 @@ func TestValidateToolHistoryRejectsStructuralProblems(t *testing.T) {
 				t.Fatalf("issue=%#v want code=%s", issue, tc.code)
 			}
 		})
+	}
+}
+
+func TestValidateToolHistoryAllowsHistoricalSchemaMismatchForRecovery(t *testing.T) {
+	payload := decodeToolTestPayload(t, `{
+        "tools":[{"name":"Glob","input_schema":{"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]}}],
+        "messages":[
+          {"role":"assistant","content":[{"type":"tool_use","id":"toolu_bad","name":"Glob","input":{}}]},
+          {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_bad","is_error":true,"content":"pattern is required"}]}
+        ]}`)
+	if issue := validateToolHistory(payload); issue != nil {
+		t.Fatalf("schema-mismatched historical call with an error result must remain recoverable: %+v", issue)
 	}
 }
