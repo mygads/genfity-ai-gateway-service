@@ -17,6 +17,56 @@ type RateLimitService struct {
 	log    zerolog.Logger
 }
 
+const rpmWindow = time.Minute
+
+// rpmCheckScript keeps the fixed-window counter and its expiry in one atomic
+// Redis operation. Older versions used INCR followed by a best-effort EXPIRE;
+// a process interruption or Redis error between those commands left a
+// permanent counter that blocked the user forever. Existing counters without
+// a TTL are treated as stale and replaced with a fresh window.
+//
+// Once the limit is reached, rejected requests do not increment the counter.
+// A negative return value means the request must be rejected.
+var rpmCheckScript = redis.NewScript(`
+local current = redis.call("GET", KEYS[1])
+local ttl = redis.call("PTTL", KEYS[1])
+
+if not current or ttl < 0 then
+  redis.call("SET", KEYS[1], 1, "PX", ARGV[2])
+  return 1
+end
+
+current = tonumber(current)
+local limit = tonumber(ARGV[1])
+if not current then
+  redis.call("SET", KEYS[1], 1, "PX", ARGV[2])
+  return 1
+end
+if current >= limit then
+  return -current
+end
+return redis.call("INCR", KEYS[1])
+`)
+
+// rpmReadScript heals legacy counters without an expiry while reading the
+// dashboard value. This prevents a stale key from continuing to display e.g.
+// 180/120 even before the user's next API request arrives.
+var rpmReadScript = redis.NewScript(`
+local current = redis.call("GET", KEYS[1])
+if not current then
+  return 0
+end
+if redis.call("PTTL", KEYS[1]) < 0 then
+  redis.call("DEL", KEYS[1])
+  return 0
+end
+current = tonumber(current)
+if not current or current < 0 then
+  return 0
+end
+return current
+`)
+
 type PlanLimits struct {
 	RPM             int
 	TPM             int
@@ -49,14 +99,11 @@ func (s *RateLimitService) CheckRPM(ctx context.Context, userID string, limit in
 		return nil
 	}
 	key := fmt.Sprintf("%s:rl:api-key:%s:rpm", s.prefix, userID)
-	count, err := s.client.Incr(ctx, key).Result()
+	count, err := rpmCheckScript.Run(ctx, s.client, []string{key}, limit, rpmWindow.Milliseconds()).Int64()
 	if err != nil {
 		return err
 	}
-	if count == 1 {
-		_ = s.client.Expire(ctx, key, time.Minute).Err()
-	}
-	if int(count) > limit {
+	if count < 0 {
 		return fmt.Errorf("rate_limit_exceeded")
 	}
 	return nil
@@ -253,7 +300,7 @@ func (s *RateLimitService) GetRPMCount(ctx context.Context, userID string) int {
 		return 0
 	}
 	key := fmt.Sprintf("%s:rl:api-key:%s:rpm", s.prefix, userID)
-	n, err := s.client.Get(ctx, key).Int()
+	n, err := rpmReadScript.Run(ctx, s.client, []string{key}).Int()
 	if err != nil || n < 0 {
 		return 0
 	}
