@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	httpmiddleware "genfity-ai-gateway-service/internal/http/middleware"
 	"golang.org/x/net/http2"
 )
 
@@ -169,6 +170,9 @@ func (c *CLIProxyClient) forwardJSON(ctx context.Context, path string, payload m
 	req.Header.Set("Content-Type", "application/json")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	if requestID := httpmiddleware.GetRequestID(ctx); requestID != "" {
+		req.Header.Set("X-Request-ID", requestID)
 	}
 	return c.httpClient.Do(req)
 }

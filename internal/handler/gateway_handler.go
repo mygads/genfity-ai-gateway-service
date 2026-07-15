@@ -225,7 +225,7 @@ func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.A
 
 	entry := store.UsageLedgerEntry{
 		ID:              uuid.New(),
-		RequestID:       uuid.New().String(),
+		RequestID:       requestIDForContext(ctx),
 		GenfityUserID:   apiKey.GenfityUserID,
 		GenfityTenantID: apiKey.GenfityTenantID,
 		APIKeyID:        &apiKeyID,
@@ -243,6 +243,13 @@ func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.A
 		zerolog.Ctx(ctx).Warn().Err(err).Str("error_code", errorCode).Msg("failed to record failed-request usage entry")
 	}
 	_ = statusCode
+}
+
+func requestIDForContext(ctx context.Context) string {
+	if requestID := middleware.GetRequestID(ctx); requestID != "" {
+		return requestID
+	}
+	return uuid.NewString()
 }
 
 type usageMetrics struct {
@@ -357,7 +364,6 @@ func namespaceUpstreamErrorCode(code string) string {
 	}
 	return "upstream_" + code
 }
-
 
 // expected shape of a real completion (OpenAI choices[], Anthropic
 // content[], or an SSE stream that started emitting). Used as the
@@ -2013,7 +2019,7 @@ func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKe
 	}()
 }
 
-func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel string) []byte {
+func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel, streamProtocol string) []byte {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
@@ -2023,7 +2029,7 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 	w.WriteHeader(resp.StatusCode)
 
 	captured := tailCaptureBuffer{limit: maxStreamCaptureBytes}
-	rewriter := sseRewriteBuffer{}
+	rewriter := sseRewriteBuffer{streamProtocol: streamProtocol}
 	buf := make([]byte, 32*1024)
 	flusher, _ := w.(http.Flusher)
 	if flusher != nil {
@@ -2111,50 +2117,6 @@ func readBodyWithKeepalive(w http.ResponseWriter, body io.ReadCloser, interval t
 				flusher.Flush()
 			}
 		}
-	}
-}
-
-// startPreResponseKeepalive starts sending SSE-style keep-alive comments to the
-// client before the upstream response arrives. This prevents Cloudflare from
-// timing out (120s) while the gateway waits for CLIProxyAPI to finish combo
-// fallback or model reasoning. Returns a stop function that must be called
-// once the upstream response is received.
-func startPreResponseKeepalive(w http.ResponseWriter, interval time.Duration) func() {
-	if interval <= 0 {
-		interval = 25 * time.Second
-	}
-	flusher, canFlush := w.(http.Flusher)
-	if !canFlush {
-		return func() {}
-	}
-
-	// Commit headers early with streaming-compatible settings so keepalive
-	// bytes actually reach Cloudflare.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	stopCh := make(chan struct{})
-	var once sync.Once
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				_, _ = w.Write([]byte(": keep-alive\n\n"))
-				flusher.Flush()
-			}
-		}
-	}()
-
-	return func() {
-		once.Do(func() { close(stopCh) })
 	}
 }
 
@@ -2315,7 +2277,6 @@ func (h *GatewayHandler) Embeddings(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "missing_model")
 		return
 	}
-
 	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
 		respondError(w, http.StatusPaymentRequired, mapSubscriptionError(ctx, err))
@@ -2493,7 +2454,7 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 	apiKeyID := apiKey.ID
 	entry := store.UsageLedgerEntry{
 		ID:              uuid.New(),
-		RequestID:       uuid.New().String(),
+		RequestID:       requestIDForContext(ctx),
 		GenfityUserID:   apiKey.GenfityUserID,
 		GenfityTenantID: apiKey.GenfityTenantID,
 		APIKeyID:        &apiKeyID,
@@ -2610,7 +2571,7 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 	apiKeyID := apiKey.ID
 	entry := store.UsageLedgerEntry{
 		ID:              uuid.New(),
-		RequestID:       uuid.New().String(),
+		RequestID:       requestIDForContext(ctx),
 		GenfityUserID:   apiKey.GenfityUserID,
 		GenfityTenantID: apiKey.GenfityTenantID,
 		APIKeyID:        &apiKeyID,
@@ -2648,6 +2609,17 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	if !ok || publicModel == "" {
 		h.recordFailedRequest(ctx, apiKey, "", "missing_model", http.StatusBadRequest, started)
 		respondError(w, http.StatusBadRequest, "missing_model")
+		return
+	}
+	if issue := validateToolHistory(payload); issue != nil {
+		zerolog.Ctx(ctx).Warn().
+			Str("request_id", middleware.GetRequestID(ctx)).
+			Str("validation_code", issue.Code).
+			Str("tool_name", issue.ToolName).
+			Str("tool_call_id", issue.ToolCallID).
+			Msg("rejected invalid tool history")
+		h.recordFailedRequest(ctx, apiKey, publicModel, issue.Code, http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, issue.Code)
 		return
 	}
 
@@ -2750,18 +2722,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	var lastBody []byte
 	var lastStatusCode int
 
-	// Only streaming responses can safely receive pre-response keepalive bytes.
-	// For non-streaming JSON responses, writing anything before the final body
-	// corrupts the response contract.
-	stopKeepalive := func() {}
-	if streamRequested {
-		stopKeepalive = startPreResponseKeepalive(w, 25*time.Second)
-	}
-
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
 		if cloneErr != nil {
-			stopKeepalive()
 			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone messages payload failed")
 			respondError(w, http.StatusInternalServerError, "internal_error")
 			return
@@ -2788,9 +2751,6 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 
 		statusCode := resp.StatusCode
 		if streamRequested && statusCode < 400 {
-			if stopKeepalive != nil {
-				stopKeepalive()
-			}
 			effectiveRoute := &store.AIModelRoute{
 				ID:                 route.ID,
 				ModelID:            route.ModelID,
@@ -2799,7 +2759,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body := h.streamUpstreamResponse(w, resp, publicModel)
+			body := h.streamUpstreamResponse(w, resp, publicModel, "anthropic")
 			resp.Body.Close()
 			// The client already has the full stream, so settle on a
 			// detached context: if the client disconnected mid-stream the
@@ -2911,9 +2871,6 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastResp != nil {
-		if stopKeepalive != nil {
-			stopKeepalive()
-		}
 		if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, lastStatusCode, lastBody, publicModel); err != nil {
 			respondError(w, http.StatusInternalServerError, "settlement_failed")
 			return
@@ -2934,9 +2891,6 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if stopKeepalive != nil {
-		stopKeepalive()
-	}
 	// All candidates failed without ever reaching upstream successfully —
 	// release the period slot so the user isn't penalized for our outage.
 	// preCounters rollback runs via the deferred call above.
@@ -3042,6 +2996,17 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusBadRequest, "missing_model")
 		return
 	}
+	if issue := validateToolHistory(payload); issue != nil {
+		zerolog.Ctx(ctx).Warn().
+			Str("request_id", middleware.GetRequestID(ctx)).
+			Str("validation_code", issue.Code).
+			Str("tool_name", issue.ToolName).
+			Str("tool_call_id", issue.ToolCallID).
+			Msg("rejected invalid tool history")
+		h.recordFailedRequest(ctx, apiKey, publicModel, issue.Code, http.StatusBadRequest, started)
+		respondError(w, http.StatusBadRequest, issue.Code)
+		return
+	}
 
 	subscription, err := h.resolveSubscription(ctx, apiKey.GenfityUserID)
 	if err != nil {
@@ -3144,18 +3109,9 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 	var lastBody []byte
 	var lastStatusCode int
 
-	// Only streaming responses can safely receive pre-response keepalive bytes.
-	// For non-streaming JSON responses, writing anything before the final body
-	// corrupts the response contract.
-	stopChatKeepalive := func() {}
-	if streamRequested {
-		stopChatKeepalive = startPreResponseKeepalive(w, 25*time.Second)
-	}
-
 	for _, cand := range candidates {
 		p, cloneErr := clonePayload(payload)
 		if cloneErr != nil {
-			stopChatKeepalive()
 			zerolog.Ctx(ctx).Error().Err(cloneErr).Msg("clone chat payload failed")
 			respondError(w, http.StatusInternalServerError, "internal_error")
 			return
@@ -3182,9 +3138,6 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 		statusCode := resp.StatusCode
 		if streamRequested && statusCode < 400 {
-			if stopChatKeepalive != nil {
-				stopChatKeepalive()
-			}
 			effectiveRoute := &store.AIModelRoute{
 				ID:                 route.ID,
 				ModelID:            route.ModelID,
@@ -3193,7 +3146,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body := h.streamUpstreamResponse(w, resp, publicModel)
+			body := h.streamUpstreamResponse(w, resp, publicModel, "openai")
 			resp.Body.Close()
 			// Settle on a detached context — see the /v1/messages streaming
 			// branch: a client disconnect mid-stream cancels the request
@@ -3277,9 +3230,6 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 
 	// All candidates exhausted, write the last known response.
 	if lastResp != nil {
-		if stopChatKeepalive != nil {
-			stopChatKeepalive()
-		}
 		effectiveRoute := route
 		settled = true
 		// Same rule as above: only commit if the final response is a
@@ -3300,9 +3250,6 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if stopChatKeepalive != nil {
-		stopChatKeepalive()
-	}
 	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
@@ -3556,7 +3503,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 
 	entry := store.UsageLedgerEntry{
 		ID:                       uuid.New(),
-		RequestID:                uuid.New().String(),
+		RequestID:                requestIDForContext(ctx),
 		GenfityUserID:            apiKey.GenfityUserID,
 		GenfityTenantID:          apiKey.GenfityTenantID,
 		APIKeyID:                 &apiKeyID,

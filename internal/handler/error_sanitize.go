@@ -362,7 +362,8 @@ func stripThinkingTagsInPlace(value any) bool {
 }
 
 type sseRewriteBuffer struct {
-	pending []byte
+	pending        []byte
+	streamProtocol string
 }
 
 func (b *sseRewriteBuffer) append(chunk []byte, publicModel string) []byte {
@@ -376,21 +377,79 @@ func (b *sseRewriteBuffer) append(chunk []byte, publicModel string) []byte {
 	}
 	complete := append([]byte(nil), b.pending[:completeEnd+delimLen]...)
 	b.pending = append(b.pending[:0], b.pending[completeEnd+delimLen:]...)
-	return rewriteAndSanitizeSSEPayload(complete, publicModel)
+	return rewriteAndSanitizeSSEPayload(complete, publicModel, b.streamProtocol)
 }
 
 func (b *sseRewriteBuffer) flush(publicModel string) []byte {
 	if len(b.pending) == 0 {
 		return nil
 	}
-	out := rewriteAndSanitizeSSEPayload(b.pending, publicModel)
+	out := rewriteAndSanitizeSSEPayload(b.pending, publicModel, b.streamProtocol)
 	b.pending = nil
 	return out
 }
 
-func rewriteAndSanitizeSSEPayload(chunk []byte, publicModel string) []byte {
+func rewriteAndSanitizeSSEPayload(chunk []byte, publicModel, streamProtocol string) []byte {
 	safe := sanitizeSSEChunk(chunk)
-	return rewriteSSEChunkModel(safe, publicModel)
+	rewritten := rewriteSSEChunkModel(safe, publicModel)
+	return replaceSSECommentHeartbeats(rewritten, publicModel, streamProtocol)
+}
+
+// replaceSSECommentHeartbeats prevents compatibility failures in clients that
+// correctly parse `data:` frames but incorrectly attempt JSON.parse on SSE
+// comment heartbeats such as `: keep-alive`. We retain the liveness signal by
+// converting comment-only events into protocol-native no-op events:
+// OpenAI receives an empty chat chunk; Anthropic receives a standard ping.
+// Comments attached to a real data event are simply removed.
+func replaceSSECommentHeartbeats(chunk []byte, publicModel, streamProtocol string) []byte {
+	if !bytes.Contains(chunk, []byte(":")) {
+		return chunk
+	}
+	normalized := strings.ReplaceAll(string(chunk), "\r\n", "\n")
+	events := strings.Split(normalized, "\n\n")
+	changed := false
+	var out strings.Builder
+	for _, event := range events {
+		if event == "" {
+			continue
+		}
+		lines := strings.Split(event, "\n")
+		kept := make([]string, 0, len(lines))
+		hadComment := false
+		hasPayload := false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, ":") {
+				hadComment = true
+				changed = true
+				continue
+			}
+			if trimmed != "" {
+				hasPayload = true
+				kept = append(kept, line)
+			}
+		}
+		if hadComment && !hasPayload {
+			switch streamProtocol {
+			case "anthropic":
+				out.WriteString("event: ping\ndata: {\"type\":\"ping\"}\n\n")
+			default:
+				modelJSON, _ := json.Marshal(publicModel)
+				out.WriteString("data: {\"id\":\"chatcmpl-keepalive\",\"object\":\"chat.completion.chunk\",\"model\":")
+				out.Write(modelJSON)
+				out.WriteString(",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":null}]}\n\n")
+			}
+			continue
+		}
+		if len(kept) > 0 {
+			out.WriteString(strings.Join(kept, "\n"))
+			out.WriteString("\n\n")
+		}
+	}
+	if !changed {
+		return chunk
+	}
+	return []byte(out.String())
 }
 
 func findLastSSEEventBoundary(chunk []byte) (int, int) {

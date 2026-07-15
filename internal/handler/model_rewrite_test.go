@@ -141,8 +141,8 @@ func TestSSERewriteBuffer_ReassemblesSplitEvents(t *testing.T) {
 
 	got := buffer.append(part2, "genfity/claude-opus-4.8")
 	out := string(got)
-	if !strings.Contains(out, ": keep-alive") {
-		t.Fatalf("expected comment prelude to be normalized, got %q", out)
+	if strings.Contains(out, ": keep-alive") || strings.Contains(out, ": genflow") {
+		t.Fatalf("SSE comment leaked to JSON-oriented client, got %q", out)
 	}
 	if !strings.Contains(out, "\"model\":\"genfity/claude-opus-4.8\"") {
 		t.Fatalf("expected public model rewrite, got %q", out)
@@ -152,5 +152,21 @@ func TestSSERewriteBuffer_ReassemblesSplitEvents(t *testing.T) {
 	}
 	if strings.Contains(out, "reasoning_content") || strings.Contains(out, "hidden") {
 		t.Fatalf("reasoning_content leaked after split reassembly: %q", out)
+	}
+}
+
+func TestSSERewriteBuffer_ReplacesCommentOnlyHeartbeatWithOpenAIChunk(t *testing.T) {
+	buffer := sseRewriteBuffer{streamProtocol: "openai"}
+	out := string(buffer.append([]byte(": keep-alive\n\n"), "genfity/claude-opus-4.8"))
+	if strings.Contains(out, ": keep-alive") || !strings.Contains(out, `"object":"chat.completion.chunk"`) || !strings.Contains(out, `"delta":{}`) {
+		t.Fatalf("unexpected heartbeat rewrite: %q", out)
+	}
+}
+
+func TestSSERewriteBuffer_ReplacesCommentOnlyHeartbeatWithAnthropicPing(t *testing.T) {
+	buffer := sseRewriteBuffer{streamProtocol: "anthropic"}
+	out := string(buffer.append([]byte(": ka\n\n"), "genfity/claude-opus-4.8"))
+	if strings.Contains(out, ": ka") || !strings.Contains(out, "event: ping") || !strings.Contains(out, `{"type":"ping"}`) {
+		t.Fatalf("unexpected heartbeat rewrite: %q", out)
 	}
 }
