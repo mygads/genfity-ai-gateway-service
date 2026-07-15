@@ -53,8 +53,10 @@ func Logging(logger zerolog.Logger) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+			requestLogger := logger.With().Str("request_id", GetRequestID(r.Context())).Logger()
+			requestContext := requestLogger.WithContext(r.Context())
 
-			next.ServeHTTP(rw, r)
+			next.ServeHTTP(rw, r.WithContext(requestContext))
 
 			latency := time.Since(start)
 			line := fmt.Sprintf(
@@ -64,11 +66,11 @@ func Logging(logger zerolog.Logger) func(http.Handler) http.Handler {
 				formatLatency(latency),
 			)
 
-			event := logger.Info()
+			event := requestLogger.Info()
 			if rw.status >= http.StatusInternalServerError {
-				event = logger.Error()
+				event = requestLogger.Error()
 			} else if rw.status >= http.StatusBadRequest {
-				event = logger.Warn()
+				event = requestLogger.Warn()
 			}
 			event.Msg(line)
 		})

@@ -218,10 +218,18 @@ func (b *tailCaptureBuffer) Bytes() []byte {
 // issues that customers need to debug. Tokens stay 0 because no upstream
 // work happened.
 func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.APIKey, publicModel, errorCode string, statusCode int, started time.Time) {
+	h.recordFailedRequestWithMetadata(ctx, apiKey, publicModel, errorCode, statusCode, started, nil)
+}
+
+func (h *GatewayHandler) recordFailedRequestWithMetadata(ctx context.Context, apiKey store.APIKey, publicModel, errorCode string, statusCode int, started time.Time, metadata map[string]any) {
 	finished := time.Now().UTC()
 	latencyMs := int32(finished.Sub(started).Milliseconds())
 	apiKeyID := apiKey.ID
 	ec := errorCode
+	var metadataJSON json.RawMessage
+	if len(metadata) > 0 {
+		metadataJSON, _ = json.Marshal(metadata)
+	}
 
 	entry := store.UsageLedgerEntry{
 		ID:              uuid.New(),
@@ -238,6 +246,7 @@ func (h *GatewayHandler) recordFailedRequest(ctx context.Context, apiKey store.A
 		InputCost:       "0",
 		OutputCost:      "0",
 		TotalCost:       "0",
+		Metadata:        metadataJSON,
 	}
 	if _, err := h.usage.Record(ctx, entry); err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Str("error_code", errorCode).Msg("failed to record failed-request usage entry")
@@ -2618,7 +2627,11 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			Str("tool_name", issue.ToolName).
 			Str("tool_call_id", issue.ToolCallID).
 			Msg("rejected invalid tool history")
-		h.recordFailedRequest(ctx, apiKey, publicModel, issue.Code, http.StatusBadRequest, started)
+		h.recordFailedRequestWithMetadata(ctx, apiKey, publicModel, issue.Code, http.StatusBadRequest, started, map[string]any{
+			"validation_reason": issue.Reason,
+			"tool_name":         issue.ToolName,
+			"tool_call_id":      issue.ToolCallID,
+		})
 		respondError(w, http.StatusBadRequest, issue.Code)
 		return
 	}
@@ -3003,7 +3016,11 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			Str("tool_name", issue.ToolName).
 			Str("tool_call_id", issue.ToolCallID).
 			Msg("rejected invalid tool history")
-		h.recordFailedRequest(ctx, apiKey, publicModel, issue.Code, http.StatusBadRequest, started)
+		h.recordFailedRequestWithMetadata(ctx, apiKey, publicModel, issue.Code, http.StatusBadRequest, started, map[string]any{
+			"validation_reason": issue.Reason,
+			"tool_name":         issue.ToolName,
+			"tool_call_id":      issue.ToolCallID,
+		})
 		respondError(w, http.StatusBadRequest, issue.Code)
 		return
 	}
