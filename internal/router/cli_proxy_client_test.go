@@ -95,6 +95,30 @@ func TestForwardJSONRetriesOnlySafePreconnectFailures(t *testing.T) {
 	}
 }
 
+func TestForwardJSONRequestsProviderEvidenceOnlyForStreams(t *testing.T) {
+	transport := &preconnectRetryTransport{}
+	client := NewCLIProxyClient("http://cli-proxy-api:8317", "key", 5*time.Second)
+	client.httpClient.Transport = transport
+
+	resp, err := client.ChatCompletions(context.Background(), map[string]any{"model": "test", "stream": true})
+	if err != nil {
+		t.Fatalf("stream request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := transport.lastHeader.Get("X-Genfity-Provider-Evidence"); got != "1" {
+		t.Fatalf("stream provider evidence header = %q, want 1", got)
+	}
+
+	resp, err = client.ChatCompletions(context.Background(), map[string]any{"model": "test"})
+	if err != nil {
+		t.Fatalf("non-stream request: %v", err)
+	}
+	_ = resp.Body.Close()
+	if got := transport.lastHeader.Get("X-Genfity-Provider-Evidence"); got != "" {
+		t.Fatalf("non-stream provider evidence header leaked: %q", got)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {

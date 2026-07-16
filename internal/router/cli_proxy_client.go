@@ -178,6 +178,11 @@ func (c *CLIProxyClient) forwardJSON(ctx context.Context, path string, payload m
 			return nil, requestErr
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if stream, _ := payload["stream"].(bool); stream {
+			// Ask CLIProxy to emit its internal SSE provider-start marker. The
+			// Gateway consumes and removes it before forwarding the stream.
+			req.Header.Set("X-Genfity-Provider-Evidence", "1")
+		}
 		if c.apiKey != "" {
 			req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		}

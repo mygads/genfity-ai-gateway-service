@@ -362,9 +362,12 @@ func stripThinkingTagsInPlace(value any) bool {
 }
 
 type sseRewriteBuffer struct {
-	pending        []byte
-	streamProtocol string
+	pending         []byte
+	streamProtocol  string
+	providerStarted bool
 }
+
+const providerStartedSSEMarker = ": genfity-provider-started\n\n"
 
 func (b *sseRewriteBuffer) append(chunk []byte, publicModel string) []byte {
 	if len(chunk) == 0 {
@@ -377,6 +380,7 @@ func (b *sseRewriteBuffer) append(chunk []byte, publicModel string) []byte {
 	}
 	complete := append([]byte(nil), b.pending[:completeEnd+delimLen]...)
 	b.pending = append(b.pending[:0], b.pending[completeEnd+delimLen:]...)
+	complete = b.stripProviderStartedMarker(complete)
 	return rewriteAndSanitizeSSEPayload(complete, publicModel, b.streamProtocol)
 }
 
@@ -384,9 +388,17 @@ func (b *sseRewriteBuffer) flush(publicModel string) []byte {
 	if len(b.pending) == 0 {
 		return nil
 	}
-	out := rewriteAndSanitizeSSEPayload(b.pending, publicModel, b.streamProtocol)
+	out := rewriteAndSanitizeSSEPayload(b.stripProviderStartedMarker(b.pending), publicModel, b.streamProtocol)
 	b.pending = nil
 	return out
+}
+
+func (b *sseRewriteBuffer) stripProviderStartedMarker(chunk []byte) []byte {
+	if !bytes.Contains(chunk, []byte(providerStartedSSEMarker)) {
+		return chunk
+	}
+	b.providerStarted = true
+	return bytes.ReplaceAll(chunk, []byte(providerStartedSSEMarker), nil)
 }
 
 func rewriteAndSanitizeSSEPayload(chunk []byte, publicModel, streamProtocol string) []byte {

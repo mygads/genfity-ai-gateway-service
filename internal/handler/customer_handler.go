@@ -46,7 +46,7 @@ func subscriptionCreditUsage(entries []store.UsageLedgerEntry, subscription *ser
 	var todayUsed float64
 	var periodUsed float64
 	for _, row := range entries {
-		if row.Status != "success" || row.BillingMode == nil || *row.BillingMode != "unlimited" || row.AmountCredits == nil {
+		if !usageLedgerEntryBillable(row) || row.BillingMode == nil || *row.BillingMode != "unlimited" || row.AmountCredits == nil {
 			continue
 		}
 		credits := parseFloatPtr(row.AmountCredits)
@@ -61,6 +61,16 @@ func subscriptionCreditUsage(entries []store.UsageLedgerEntry, subscription *ser
 		}
 	}
 	return todayUsed, periodUsed
+}
+
+func usageLedgerEntryBillable(row store.UsageLedgerEntry) bool {
+	if row.Status == "success" {
+		return true
+	}
+	var metadata struct {
+		Billable bool `json:"billable"`
+	}
+	return len(row.Metadata) > 0 && json.Unmarshal(row.Metadata, &metadata) == nil && metadata.Billable
 }
 
 type subscriptionUsageSnapshot struct {
@@ -109,7 +119,7 @@ func collectSubscriptionUsageSnapshot(entries []store.UsageLedgerEntry, subscrip
 	}
 
 	for _, row := range entries {
-		if row.Status != "success" || row.BillingMode == nil || *row.BillingMode != "unlimited" || isFreeUsageLedgerEntry(row) {
+		if !usageLedgerEntryBillable(row) || row.BillingMode == nil || *row.BillingMode != "unlimited" || isFreeUsageLedgerEntry(row) {
 			continue
 		}
 		if !row.StartedAt.Before(startOfDay) {

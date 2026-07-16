@@ -43,9 +43,12 @@ func TestStreamUpstreamResponseStopsOnDownstreamWriteFailure(t *testing.T) {
 	}
 	w := &failingStreamWriter{header: make(http.Header)}
 
-	_, disconnected := (&GatewayHandler{}).streamUpstreamResponse(w, resp, "genfity/test", "openai")
-	if !disconnected {
+	result := (&GatewayHandler{}).streamUpstreamResponse(w, resp, "genfity/test", "openai")
+	if !result.DownstreamWriteFailed {
 		t.Fatal("downstream write failure was not reported")
+	}
+	if !strings.Contains(string(result.Body), "hello") {
+		t.Fatalf("provider payload was not captured before the failed write: %q", result.Body)
 	}
 	if !body.closed {
 		t.Fatal("upstream body was not closed immediately")
@@ -53,4 +56,29 @@ func TestStreamUpstreamResponseStopsOnDownstreamWriteFailure(t *testing.T) {
 	if w.writes != 1 {
 		t.Fatalf("writes=%d, want exactly one failed downstream write", w.writes)
 	}
+}
+
+func TestStreamUpstreamResponseConsumesProviderStartedMarker(t *testing.T) {
+	body := &closeTrackingBody{Reader: strings.NewReader(providerStartedSSEMarker + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n")}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+	w := &recordingStreamWriter{header: make(http.Header)}
+
+	result := (&GatewayHandler{}).streamUpstreamResponse(w, resp, "genfity/test", "openai")
+	if !result.ProviderStarted {
+		t.Fatal("provider-started marker was not detected")
+	}
+	if strings.Contains(w.body.String(), "genfity-provider-started") {
+		t.Fatalf("internal marker leaked downstream: %q", w.body.String())
+	}
+}
+
+type recordingStreamWriter struct {
+	header http.Header
+	body   strings.Builder
+}
+
+func (w *recordingStreamWriter) Header() http.Header { return w.header }
+func (w *recordingStreamWriter) WriteHeader(int)     {}
+func (w *recordingStreamWriter) Write(p []byte) (int, error) {
+	return w.body.Write(p)
 }

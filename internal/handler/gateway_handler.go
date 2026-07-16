@@ -1044,13 +1044,9 @@ func (p *preRequestCounters) rollback(ctx context.Context) {
 // been recorded — at that point the request "exists" and should count
 // against the period cap.
 //
-// If the client has already disconnected (RTO/cancel) by the time we
-// settle, commit is skipped: the request never reached the customer, so
-// it must not burn their rate-limit slot (RPD/RPP/free-RPM). The deferred
-// rollback (which runs on a background context) then releases the slot.
-// Token billing is handled separately in recordAndFinalizeRuntime and is
-// NOT governed by this — the provider already processed the tokens, so
-// that cost stands regardless of client disconnect.
+// A canceled request normally skips commit so deferred rollback can release
+// its slot. The detached settlement path may deliberately call commit with a
+// live context when reliable provider evidence makes the request billable.
 func (p *preRequestCounters) commit(ctx context.Context) {
 	if p == nil {
 		return
@@ -1490,14 +1486,62 @@ type runtimeReservation struct {
 }
 
 type usageSettlement struct {
-	PromptTokens     int64
-	CompletionTokens int64
-	TotalTokens      int64
-	TotalCostUSD     float64
-	ActualCredits    float64
-	Success          bool
-	ErrorCode        string
-	RequestID        string
+	PromptTokens      int64
+	CompletionTokens  int64
+	TotalTokens       int64
+	TotalCostUSD      float64
+	ActualCredits     float64
+	Success           bool
+	ProviderStarted   bool
+	ProviderCompleted bool
+	Billable          bool
+	ChargeUsage       bool
+	CountRequest      bool
+	BillingReason     string
+	ErrorCode         string
+	RequestID         string
+}
+
+type settlementBillingDecision struct {
+	Billable      bool
+	ChargeUsage   bool
+	CountRequest  bool
+	BillingReason string
+}
+
+func decideSettlementBilling(reservation *runtimeReservation, success bool, statusCode int, totalTokens int64, providerStarted bool) settlementBillingDecision {
+	if success {
+		return settlementBillingDecision{
+			Billable:      true,
+			ChargeUsage:   true,
+			CountRequest:  true,
+			BillingReason: "completed",
+		}
+	}
+	if statusCode != statusClientClosedRequest {
+		return settlementBillingDecision{BillingReason: "not_billable_failure"}
+	}
+	if totalTokens > 0 {
+		return settlementBillingDecision{
+			Billable:      true,
+			ChargeUsage:   true,
+			CountRequest:  true,
+			BillingReason: "client_disconnected_with_usage",
+		}
+	}
+	if providerStarted && reservation != nil && reservation.BillingMode == "unlimited" {
+		return settlementBillingDecision{
+			Billable:      true,
+			CountRequest:  true,
+			BillingReason: "client_disconnected_after_provider_started",
+		}
+	}
+	return settlementBillingDecision{BillingReason: "client_disconnected_without_usage"}
+}
+
+func shouldCountSettlementRequest(reservation runtimeReservation, statusCode int, body []byte, providerStarted bool) bool {
+	metrics := parseUsageFromBody(body)
+	return decideSettlementBilling(&reservation, shouldCountAsSuccess(statusCode, body), statusCode, metrics.TotalTokens, providerStarted).CountRequest
 }
 
 func reservationNeedsFinalize(reservation runtimeReservation) bool {
@@ -1990,17 +2034,17 @@ func (h *GatewayHandler) reserveRuntimeLimits(ctx context.Context, apiKey store.
 	return reservation, 0, ""
 }
 
-func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey store.APIKey, reservation runtimeReservation, settlement usageSettlement, success bool, countRequest bool) error {
+func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey store.APIKey, reservation runtimeReservation, settlement usageSettlement) error {
 	usedTokens := int64(0)
 	actualUSD := 0.0
 	actualCredits := 0.0
-	if success {
+	if settlement.ChargeUsage {
 		usedTokens = settlement.TotalTokens
 		actualUSD = settlement.TotalCostUSD
 		actualCredits = settlement.ActualCredits
 	}
-	if reservation.QuotaTokens > 0 || countRequest {
-		if err := h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, reservation.PeriodStart, reservation.PeriodEnd, reservation.QuotaTokens, usedTokens, countRequest); err != nil {
+	if reservation.QuotaTokens > 0 || settlement.CountRequest {
+		if err := h.usage.FinalizeQuotaTokens(ctx, apiKey.GenfityUserID, reservation.PeriodStart, reservation.PeriodEnd, reservation.QuotaTokens, usedTokens, settlement.CountRequest); err != nil {
 			return err
 		}
 	}
@@ -2023,11 +2067,11 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 	}
 	// PRD v3 Phase 2 — request-credit finalize. creditsPerReq stores the
 	// configured price per 20k tokens; runtime billing charges in 20k
-	// buckets based on actual successful usage. On failure we release the
-	// full reservation back to the balance.
+	// buckets based on actual billable usage. Failures without reliable usage
+	// release the full reservation back to the balance.
 	if reservation.RequestCredits > 0 {
 		actual := 0.0
-		if success {
+		if settlement.ChargeUsage {
 			actual = settlement.ActualCredits
 		}
 		if err := h.usage.FinalizeRequestCredits(ctx, apiKey.GenfityUserID, reservation.RequestCredits, actual); err != nil {
@@ -2041,7 +2085,7 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 	// back to the user's balance.
 	if reservation.PaygUSD > 0 {
 		actual := 0.0
-		if success {
+		if settlement.ChargeUsage {
 			actual = actualUSD
 		}
 		if err := h.usage.FinalizePaygUsdBalance(ctx, apiKey.GenfityUserID, reservation.PaygUSD, actual); err != nil {
@@ -2051,28 +2095,25 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 	return nil
 }
 
-func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) error {
-	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusCode, body, publicModel)
+func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string, providerStarted bool) (usageSettlement, error) {
+	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusCode, body, publicModel, providerStarted)
 	if err != nil {
-		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, false)
-		return err
+		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{})
+		return usageSettlement{}, err
 	}
-	// Durable request_count backs the customer's RPP display. It must follow
-	// the same genuine-success decision as RPD/RPP pre-counters; heartbeat-only,
-	// partial, provider-error, and client-disconnected attempts release their
-	// reservation without consuming the period request allowance.
-	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, settlement.Success)
+	// Durable request_count backs the customer's RPP display. It follows the
+	// billing decision: completed requests count, disconnects with reliable
+	// usage count, and unlimited requests count once the provider has started.
+	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement)
 	if finalizeErr != nil {
-		return finalizeErr
+		return settlement, finalizeErr
 	}
 
 	// Push the debit to genfity-app so User.aiGatewayCreditBalance and
 	// the AiGatewayCreditLedger stay in sync. Fire-and-forget — failures
-	// do not affect the request response. We only call this when the
-	// request actually succeeded AND a paid billing schema settled it
-	// (free models / unlimited cover are no-ops for the customer
-	// balance).
-	if settlement.Success && h.callback != nil && h.callback.Enabled() {
+	// do not affect the request response. Delivery status is independent:
+	// a disconnected request with reliable usage still posts its debit.
+	if settlement.ChargeUsage && h.callback != nil && h.callback.Enabled() {
 		switch reservation.BillingMode {
 		case "credit_package":
 			if settlement.ActualCredits > 0 {
@@ -2104,7 +2145,7 @@ func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey st
 	if reservation.RequestCredits > 0 || reservation.PaygUSD > 0 || reservation.CreditUSD > 0 {
 		h.entitlements.InvalidateUser(ctx, apiKey.GenfityUserID)
 	}
-	return finalizeErr
+	return settlement, finalizeErr
 }
 
 // recordAndFinalizeAsync runs recordAndFinalizeRuntime in a detached
@@ -2122,7 +2163,7 @@ func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey st
 //
 // Streaming path still uses the sync version because the client-facing
 // response is already complete by the time we settle.
-func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) {
+func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string, providerStarted bool) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 30*time.Second)
 	go func() {
 		defer cancel()
@@ -2135,7 +2176,7 @@ func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKe
 					Msg("async settlement panicked; reservation may be inconsistent")
 			}
 		}()
-		if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, statusCode, body, publicModel); err != nil {
+		if _, err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, statusCode, body, publicModel, providerStarted); err != nil {
 			zerolog.Ctx(parentCtx).Warn().
 				Err(err).
 				Str("public_model", publicModel).
@@ -2171,12 +2212,18 @@ func (h *GatewayHandler) recordAndFinalizeClientDisconnect(parentCtx context.Con
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 30*time.Second)
 	defer cancel()
 
-	_, recordErr := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusClientClosedRequest, nil, publicModel)
-	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, false)
+	settlement, recordErr := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusClientClosedRequest, nil, publicModel, false)
+	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement)
 	return errors.Join(recordErr, finalizeErr)
 }
 
-func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel, streamProtocol string) ([]byte, bool) {
+type streamForwardResult struct {
+	Body                  []byte
+	DownstreamWriteFailed bool
+	ProviderStarted       bool
+}
+
+func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel, streamProtocol string) streamForwardResult {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
@@ -2196,6 +2243,10 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
+			// Capture before writing downstream. If the provider's final usage
+			// frame races with a client disconnect, accounting must retain that
+			// reliable usage even though the write itself fails.
+			_, _ = captured.Write(chunk)
 			// Network reads split SSE payloads arbitrarily, so buffer until
 			// we have one or more complete events before sanitizing/rewriting.
 			safe := rewriter.append(chunk, publicModel)
@@ -2206,10 +2257,9 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 					// upstream body immediately so no provider work continues while
 					// the cancellation signal propagates through the transport.
 					_ = resp.Body.Close()
-					return captured.Bytes(), true
+					return streamForwardResult{Body: captured.Bytes(), DownstreamWriteFailed: true, ProviderStarted: rewriter.providerStarted}
 				}
 			}
-			_, _ = captured.Write(chunk)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -2218,7 +2268,7 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 			if safe := rewriter.flush(publicModel); len(safe) > 0 {
 				if _, writeErr := w.Write(safe); writeErr != nil {
 					_ = resp.Body.Close()
-					return captured.Bytes(), true
+					return streamForwardResult{Body: captured.Bytes(), DownstreamWriteFailed: true, ProviderStarted: rewriter.providerStarted}
 				}
 				if flusher != nil {
 					flusher.Flush()
@@ -2227,7 +2277,7 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 			break
 		}
 	}
-	return captured.Bytes(), false
+	return streamForwardResult{Body: captured.Bytes(), ProviderStarted: rewriter.providerStarted}
 }
 
 func (h *GatewayHandler) clientForRouter(ctx context.Context, routerInstanceCode string) (*router.CLIProxyClient, bool) {
@@ -2581,7 +2631,7 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		bgCtx := context.Background()
-		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{})
 	}()
 
 	client, ok := h.clientForRouter(ctx, "")
@@ -2602,7 +2652,7 @@ func (h *GatewayHandler) ImagesGenerations(w http.ResponseWriter, r *http.Reques
 	if success && reservation.BillingMode != "" {
 		settled = true
 		bgCtx := context.Background()
-		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, true, true)
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{ChargeUsage: true, CountRequest: true})
 	}
 
 	finished := time.Now().UTC()
@@ -2698,7 +2748,7 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bgCtx := context.Background()
-		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{})
 	}()
 
 	client, ok := h.clientForRouter(ctx, "")
@@ -2719,7 +2769,7 @@ func (h *GatewayHandler) ImagesEdits(w http.ResponseWriter, r *http.Request) {
 	if success && reservation.BillingMode != "" {
 		settled = true
 		bgCtx := context.Background()
-		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, true, true)
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{ChargeUsage: true, CountRequest: true})
 	}
 
 	finished := time.Now().UTC()
@@ -2872,7 +2922,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 		}
 		// Release reservations on early/abnormal exit (panic, ctx cancel before settlement).
 		bgCtx := context.Background()
-		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{})
 	}()
 
 	type candidate struct {
@@ -2942,10 +2992,11 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body, downstreamWriteFailed := h.streamUpstreamResponse(w, resp, publicModel, "anthropic")
+			forward := h.streamUpstreamResponse(w, resp, publicModel, "anthropic")
+			body := forward.Body
 			resp.Body.Close()
 			settlementCode := settlementStatus(ctx, statusCode, body)
-			if downstreamWriteFailed {
+			if forward.DownstreamWriteFailed {
 				settlementCode = statusClientClosedRequest
 			}
 			// The client already has the full stream, so settle on a
@@ -2954,13 +3005,17 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			// write and strand tokens_reserved (false quota_exceeded until
 			// the sweeper runs). WithoutCancel keeps the settlement alive.
 			settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel); err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).
+			settlement, settleErr := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel, forward.ProviderStarted)
+			if settleErr != nil {
+				zerolog.Ctx(ctx).Error().Err(settleErr).
 					Str("public_model", publicModel).
 					Str("router_instance_code", cand.routerInstanceCode).
 					Str("router_model", cand.routerModel).
 					Str("api_key_id", apiKey.ID.String()).
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
+			}
+			if settlement.CountRequest {
+				preCounters.commit(settleCtx)
 			}
 			settleCancel()
 			settled = true
@@ -2971,9 +3026,6 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			// truncated stream doesn't burn the user's RPD slot. Without
 			// this check, every failed streaming attempt ticked the
 			// counter even though recordUsage flagged the row as failed.
-			if shouldCountAsSuccess(settlementCode, body) {
-				preCounters.commit(ctx)
-			}
 			return
 		}
 
@@ -2992,8 +3044,8 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			resp.Body.Close()
 			settlementCode := settlementStatus(ctx, statusCode, body)
 			settled = true
-			if shouldCountAsSuccess(settlementCode, body) {
-				preCounters.commit(ctx)
+			if shouldCountSettlementRequest(reservation, settlementCode, body, true) {
+				preCounters.commit(nil)
 			}
 			// Rewrite the response "model" field to the requested public
 			// model so a disguised combo's real upstream (e.g. minimax)
@@ -3007,7 +3059,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(statusCode)
 			_, _ = w.Write(outBody)
-			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel, true)
 			return
 		}
 
@@ -3023,7 +3075,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+			if _, err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel, true); err != nil {
 				respondError(w, http.StatusInternalServerError, "settlement_failed")
 				return
 			}
@@ -3052,7 +3104,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if lastResp != nil {
-		if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, lastStatusCode, lastBody, publicModel); err != nil {
+		if _, err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, route, reservation, started, lastStatusCode, lastBody, publicModel, true); err != nil {
 			respondError(w, http.StatusInternalServerError, "settlement_failed")
 			return
 		}
@@ -3075,7 +3127,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 	// All candidates failed without ever reaching upstream successfully —
 	// release the period slot so the user isn't penalized for our outage.
 	// preCounters rollback runs via the deferred call above.
-	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
+	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{CountRequest: true}); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
 	}
@@ -3270,7 +3322,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		bgCtx := context.Background()
-		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{}, false, false)
+		_ = h.finalizeRuntimeReservation(bgCtx, apiKey, reservation, usageSettlement{})
 	}()
 
 	// Build the candidate list: primary route first, then combo fallbacks if any.
@@ -3343,10 +3395,11 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body, downstreamWriteFailed := h.streamUpstreamResponse(w, resp, publicModel, "openai")
+			forward := h.streamUpstreamResponse(w, resp, publicModel, "openai")
+			body := forward.Body
 			resp.Body.Close()
 			settlementCode := settlementStatus(ctx, statusCode, body)
-			if downstreamWriteFailed {
+			if forward.DownstreamWriteFailed {
 				settlementCode = statusClientClosedRequest
 			}
 			// Settle on a detached context — see the /v1/messages streaming
@@ -3354,13 +3407,17 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			// ctx, which would fail the finalize DB write and strand
 			// tokens_reserved (false quota_exceeded until the sweeper runs).
 			settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel); err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).
+			settlement, settleErr := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel, forward.ProviderStarted)
+			if settleErr != nil {
+				zerolog.Ctx(ctx).Error().Err(settleErr).
 					Str("public_model", publicModel).
 					Str("router_instance_code", cand.routerInstanceCode).
 					Str("router_model", cand.routerModel).
 					Str("api_key_id", apiKey.ID.String()).
 					Msg("streaming settlement failed; quota/credit reservation may be inconsistent")
+			}
+			if settlement.CountRequest {
+				preCounters.commit(settleCtx)
 			}
 			settleCancel()
 			settled = true
@@ -3368,9 +3425,6 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			// proof of a real completion, so gate the counter commit on
 			// shouldCountAsSuccess to avoid charging the user when the
 			// stream errored out or never produced content.
-			if shouldCountAsSuccess(settlementCode, body) {
-				preCounters.commit(ctx)
-			}
 			return
 		}
 
@@ -3389,11 +3443,11 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			resp.Body.Close()
 			settlementCode := settlementStatus(ctx, statusCode, body)
 			settled = true
-			if shouldCountAsSuccess(settlementCode, body) {
-				preCounters.commit(ctx)
+			if shouldCountSettlementRequest(reservation, settlementCode, body, true) {
+				preCounters.commit(nil)
 			}
 			h.writeUpstreamResponse(w, resp, body, publicModel)
-			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel, true)
 			return
 		}
 
@@ -3420,7 +3474,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				preCounters.commit(ctx)
 			}
 			h.writeUpstreamResponse(w, resp, body, publicModel)
-			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel, true)
 			return
 		}
 
@@ -3448,11 +3502,11 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 		}
 		w.WriteHeader(lastStatusCode)
 		_, _ = w.Write(safeLastBody)
-		h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, lastStatusCode, lastBody, publicModel)
+		h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, lastStatusCode, lastBody, publicModel, true)
 		return
 	}
 
-	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true); err != nil {
+	if err := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{CountRequest: true}); err != nil {
 		respondError(w, http.StatusInternalServerError, "settlement_failed")
 		return
 	}
@@ -3476,7 +3530,7 @@ func clonePayload(original map[string]any) (map[string]any, error) {
 
 // --- usage recording ---
 
-func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation *runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) (usageSettlement, error) {
+func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation *runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string, providerStarted bool) (usageSettlement, error) {
 	finished := time.Now().UTC()
 	latencyMs := finished.Sub(started).Milliseconds()
 
@@ -3532,8 +3586,10 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	// HTTP 200 is not sufficient proof of success. Heartbeat-only streams are
 	// empty, while streams that emitted output but never reached a terminal
 	// event are partial. Neither may debit credits or commit quota counters.
+	completionState := classifyCompletionBody(body)
+	providerCompleted := completionState == completionBodyComplete
 	if statusStr == "success" {
-		switch classifyCompletionBody(body) {
+		switch completionState {
 		case completionBodyComplete:
 			// Genuine completion.
 		case completionBodyPartial:
@@ -3549,8 +3605,9 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		}
 	}
 	success := statusStr == "success"
+	decision := decideSettlementBilling(reservation, success, statusCode, totalTokens, providerStarted)
 	actualCredits := 0.0
-	if success && reservation != nil {
+	if decision.ChargeUsage && reservation != nil {
 		creditPricePer20k := 0.0
 		switch reservation.BillingMode {
 		case "credit_package":
@@ -3578,7 +3635,14 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	apiKeyID := apiKey.ID
 	latencyMs32 := int32(latencyMs)
 
-	var entryMeta map[string]any
+	entryMeta := map[string]any{
+		"provider_started":   providerStarted,
+		"provider_completed": providerCompleted,
+		"billable":           decision.Billable,
+		"charge_usage":       decision.ChargeUsage,
+		"count_request":      decision.CountRequest,
+		"billing_reason":     decision.BillingReason,
+	}
 	// Pricing group source-of-truth: prefer the billing_mode the
 	// reservation actually charged on. That keeps the usage_ledger
 	// consistent with the debit even when the entitlement metadata is
@@ -3632,18 +3696,13 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		}
 	}
 	if pricingGroup != "" {
-		entryMeta = map[string]any{
-			"pricing_group": pricingGroup,
-			"is_unlimited":  pricingGroup == "unlimited_plan" || pricingGroup == "unlimited",
-		}
+		entryMeta["pricing_group"] = pricingGroup
+		entryMeta["is_unlimited"] = pricingGroup == "unlimited_plan" || pricingGroup == "unlimited"
 		if planCode != "" {
 			entryMeta["plan_code"] = planCode
 		}
 	}
-	var entryMetaJSON []byte
-	if entryMeta != nil {
-		entryMetaJSON, _ = json.Marshal(entryMeta)
-	}
+	entryMetaJSON, _ := json.Marshal(entryMeta)
 
 	var errorCodePtr *string
 	if bodyErrorCode != "" {
@@ -3667,7 +3726,7 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 		if bm != "" {
 			billingModePtr = &bm
 		}
-		if success {
+		if decision.ChargeUsage {
 			if actualCredits > 0 {
 				amt := fmt.Sprintf("%.4f", actualCredits)
 				amountCreditsPtr = &amt
@@ -3746,19 +3805,25 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	}
 
 	return usageSettlement{
-		PromptTokens:     promptTokens,
-		CompletionTokens: completionTokens,
-		TotalTokens:      totalTokens,
-		TotalCostUSD:     totalCostUsd,
-		ActualCredits:    actualCredits,
-		Success:          success,
-		ErrorCode:        bodyErrorCode,
-		RequestID:        entry.RequestID,
+		PromptTokens:      promptTokens,
+		CompletionTokens:  completionTokens,
+		TotalTokens:       totalTokens,
+		TotalCostUSD:      totalCostUsd,
+		ActualCredits:     actualCredits,
+		Success:           success,
+		ProviderStarted:   providerStarted,
+		ProviderCompleted: providerCompleted,
+		Billable:          decision.Billable,
+		ChargeUsage:       decision.ChargeUsage,
+		CountRequest:      decision.CountRequest,
+		BillingReason:     decision.BillingReason,
+		ErrorCode:         bodyErrorCode,
+		RequestID:         entry.RequestID,
 	}, nil
 }
 
 func (h *GatewayHandler) recordUsageWithLegacyBilling(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, started time.Time, statusCode int, body []byte, publicModel string) {
-	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, nil, started, statusCode, body, publicModel)
+	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, nil, started, statusCode, body, publicModel, statusCode >= 200 && statusCode < 300)
 	if err != nil {
 		return
 	}

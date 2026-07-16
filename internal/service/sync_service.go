@@ -253,7 +253,7 @@ func (s *SyncService) replayUsageEntries(ctx context.Context, userID string, sin
 }
 
 func replayPayloadFromUsage(entry store.UsageLedgerEntry) (UsageDebitPayload, bool) {
-	if entry.Status != "success" || entry.BillingMode == nil || entry.RequestID == "" || entry.GenfityUserID == "" {
+	if !usageEntryIsBillable(entry) || entry.BillingMode == nil || entry.RequestID == "" || entry.GenfityUserID == "" {
 		return UsageDebitPayload{}, false
 	}
 
@@ -287,6 +287,16 @@ func replayPayloadFromUsage(entry store.UsageLedgerEntry) (UsageDebitPayload, bo
 	default:
 		return UsageDebitPayload{}, false
 	}
+}
+
+func usageEntryIsBillable(entry store.UsageLedgerEntry) bool {
+	if entry.Status == "success" {
+		return true
+	}
+	var metadata struct {
+		Billable bool `json:"billable"`
+	}
+	return len(entry.Metadata) > 0 && json.Unmarshal(entry.Metadata, &metadata) == nil && metadata.Billable
 }
 
 func parseUsageAmount(value *string) (float64, bool) {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"genfity-ai-gateway-service/internal/service"
@@ -155,6 +156,62 @@ func TestSettlementStatusMarksCanceledIncompleteRequest(t *testing.T) {
 	}
 	if got := settlementStatus(context.Background(), 200, heartbeat); got != 200 {
 		t.Fatalf("live request status changed unexpectedly: %d", got)
+	}
+}
+
+func TestDecideSettlementBillingHybridDisconnectPolicy(t *testing.T) {
+	tests := []struct {
+		name            string
+		mode            string
+		success         bool
+		status          int
+		tokens          int64
+		providerStarted bool
+		wantBillable    bool
+		wantCharge      bool
+		wantCount       bool
+		wantReason      string
+	}{
+		{
+			name: "completed request",
+			mode: "credit_package", success: true, status: http.StatusOK,
+			wantBillable: true, wantCharge: true, wantCount: true, wantReason: "completed",
+		},
+		{
+			name: "disconnect with reliable usage",
+			mode: "credit_package", status: statusClientClosedRequest, tokens: 42, providerStarted: true,
+			wantBillable: true, wantCharge: true, wantCount: true, wantReason: "client_disconnected_with_usage",
+		},
+		{
+			name: "unlimited provider started without usage",
+			mode: "unlimited", status: statusClientClosedRequest, providerStarted: true,
+			wantBillable: true, wantCount: true, wantReason: "client_disconnected_after_provider_started",
+		},
+		{
+			name: "credit provider started without usage",
+			mode: "credit_package", status: statusClientClosedRequest, providerStarted: true,
+			wantReason: "client_disconnected_without_usage",
+		},
+		{
+			name: "payg provider started without usage",
+			mode: "payg_topup", status: statusClientClosedRequest, providerStarted: true,
+			wantReason: "client_disconnected_without_usage",
+		},
+		{
+			name: "provider failure never bills",
+			mode: "unlimited", status: http.StatusBadGateway, providerStarted: true, tokens: 99,
+			wantReason: "not_billable_failure",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reservation := &runtimeReservation{BillingMode: tc.mode}
+			got := decideSettlementBilling(reservation, tc.success, tc.status, tc.tokens, tc.providerStarted)
+			if got.Billable != tc.wantBillable || got.ChargeUsage != tc.wantCharge || got.CountRequest != tc.wantCount || got.BillingReason != tc.wantReason {
+				t.Fatalf("decision = %+v, want billable=%v charge=%v count=%v reason=%q", got, tc.wantBillable, tc.wantCharge, tc.wantCount, tc.wantReason)
+			}
+		})
 	}
 }
 
