@@ -32,10 +32,17 @@ type observedToolCall struct {
 // validateToolHistory applies provider-neutral invariants shared by OpenAI
 // Chat Completions and Anthropic Messages:
 //   - declarations and call IDs are unique;
-//   - every call names a currently declared tool;
 //   - arguments are syntactically valid JSON objects;
 //   - every result refers to one earlier call and every historical call has a
 //     single result.
+//
+// Historical calls deliberately do not have to appear in the current request's
+// tools list. Agent clients routinely change their active tool set between
+// turns while retaining completed tool calls in the conversation history. That
+// history is valid at the public API boundary. Provider-specific restrictions
+// (notably Kiro's requirement that every historical call is declared again)
+// belong in candidate preflight, where an incompatible provider can be skipped
+// without rejecting the request or penalising provider health.
 //
 // Historical calls are deliberately not revalidated against today's JSON
 // schema. Tool executors commonly return an error result for a model-produced
@@ -48,7 +55,7 @@ type observedToolCall struct {
 // name pattern, or request byte size; those belong in CLIProxy's candidate
 // preflight so another combo provider can still serve a valid public payload.
 func validateToolHistory(payload map[string]any) *toolHistoryValidationError {
-	declared, issue := collectDeclaredTools(payload["tools"])
+	_, issue := collectDeclaredTools(payload["tools"])
 	if issue != nil {
 		return issue
 	}
@@ -65,9 +72,8 @@ func validateToolHistory(payload map[string]any) *toolHistoryValidationError {
 		if _, exists := calls[id]; exists {
 			return &toolHistoryValidationError{Code: "duplicate_tool_call_id", Reason: "tool call ID must be unique", ToolName: name, ToolCallID: id}
 		}
-		_, ok := declared[name]
-		if !ok || name == "" {
-			return &toolHistoryValidationError{Code: "undeclared_tool", Reason: "tool call name is not present in tools", ToolName: name, ToolCallID: id}
+		if name == "" {
+			return &toolHistoryValidationError{Code: "invalid_tool_name", Reason: "tool call name is required", ToolCallID: id}
 		}
 		if _, err := decodeToolArguments(arguments); err != nil {
 			return &toolHistoryValidationError{Code: "invalid_tool_arguments", Reason: err.Error(), ToolName: name, ToolCallID: id}

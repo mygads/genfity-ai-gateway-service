@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"testing"
 
 	"genfity-ai-gateway-service/internal/service"
@@ -64,5 +65,95 @@ func TestEstimateReservedRequestCredits_UsesEstimatedBuckets(t *testing.T) {
 	estimate := tokenReservationEstimate{TotalTokens: 30_000}
 	if got := estimateReservedRequestCredits(3, estimate); got != 6 {
 		t.Fatalf("estimateReservedRequestCredits() = %v, want 6", got)
+	}
+}
+
+func TestClassifyCompletionBodyIgnoresHeartbeatOnlyStreams(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want completionBodyState
+	}{
+		{
+			name: "openai heartbeat only",
+			body: "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null,\"index\":0}]}\n\ndata: [DONE]\n\n",
+			want: completionBodyEmpty,
+		},
+		{
+			name: "anthropic ping only",
+			body: "event: ping\ndata: {\"type\":\"ping\"}\n\n",
+			want: completionBodyEmpty,
+		},
+		{
+			name: "done only",
+			body: "data: [DONE]\n\n",
+			want: completionBodyEmpty,
+		},
+		{
+			name: "openai output without terminal",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null,\"index\":0}]}\n\n",
+			want: completionBodyPartial,
+		},
+		{
+			name: "openai completed output",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null,\"index\":0}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",
+			want: completionBodyComplete,
+		},
+		{
+			name: "anthropic completed tool use",
+			body: "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+			want: completionBodyComplete,
+		},
+		{
+			name: "non streaming json remains complete",
+			body: `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`,
+			want: completionBodyComplete,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyCompletionBody([]byte(tc.body)); got != tc.want {
+				t.Fatalf("classifyCompletionBody() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldCountAsSuccessRequiresCompletedStream(t *testing.T) {
+	heartbeat := []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n")
+	partial := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+	complete := append(append([]byte{}, partial...), []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")...)
+
+	if shouldCountAsSuccess(200, heartbeat) {
+		t.Fatal("heartbeat-only stream must not count as success")
+	}
+	if shouldCountAsSuccess(200, partial) {
+		t.Fatal("unterminated partial stream must not count as success")
+	}
+	if !shouldCountAsSuccess(200, complete) {
+		t.Fatal("completed stream should count as success")
+	}
+}
+
+func TestSettlementStatusMarksCanceledIncompleteRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	heartbeat := []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n")
+	partial := []byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+	complete := append(append([]byte{}, partial...), []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")...)
+
+	if got := settlementStatus(ctx, 200, heartbeat); got != statusClientClosedRequest {
+		t.Fatalf("heartbeat-only canceled request status = %d, want %d", got, statusClientClosedRequest)
+	}
+	if got := settlementStatus(ctx, 200, partial); got != statusClientClosedRequest {
+		t.Fatalf("partial canceled request status = %d, want %d", got, statusClientClosedRequest)
+	}
+	if got := settlementStatus(ctx, 200, complete); got != 200 {
+		t.Fatalf("completed response must retain upstream status, got %d", got)
+	}
+	if got := settlementStatus(context.Background(), 200, heartbeat); got != 200 {
+		t.Fatalf("live request status changed unexpectedly: %d", got)
 	}
 }

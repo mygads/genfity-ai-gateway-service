@@ -175,6 +175,7 @@ func NewGatewayHandler(
 const (
 	maxRuntimeRequestBodyBytes int64 = 8 << 20
 	maxStreamCaptureBytes            = 1 << 20
+	statusClientClosedRequest        = 499
 )
 
 func decodeRuntimePayload(w http.ResponseWriter, r *http.Request, payload *map[string]any) error {
@@ -374,28 +375,36 @@ func namespaceUpstreamErrorCode(code string) string {
 	return "upstream_" + code
 }
 
-// expected shape of a real completion (OpenAI choices[], Anthropic
-// content[], or an SSE stream that started emitting). Used as the
-// "is this really a success" gate for tick-on-success counters —
-// stricter than detectProviderErrorFromBody, which only catches the
-// known error envelopes. Some providers return HTTP 200 with shapes
-// like `{"message":"Improperly formed request.","reason":null}` that
-// neither match the success schema nor any error envelope; treating
-// those as success would charge users for failed requests.
-func looksLikeSuccessfulCompletion(body []byte) bool {
-	if len(body) == 0 {
-		return false
+type completionBodyState uint8
+
+const (
+	completionBodyEmpty completionBodyState = iota
+	completionBodyPartial
+	completionBodyComplete
+)
+
+// classifyCompletionBody distinguishes a real completion from a stream that
+// only emitted liveness frames. CLIProxy intentionally sends protocol-native
+// heartbeat events while a thinking provider is quiet. Those events contain a
+// `data:` line, but they are not model output and must never commit quota or
+// debit credits on their own.
+func classifyCompletionBody(body []byte) completionBodyState {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return completionBodyEmpty
 	}
-	// SSE: presence of any `data:` line means the stream started — at
-	// that point the request reached upstream and produced output. We
-	// trust the streaming body's own error detection elsewhere.
-	if bytes.Contains(body, []byte("data:")) {
-		return true
-	}
+
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return false
+	if err := json.Unmarshal(body, &payload); err == nil {
+		if looksLikeSuccessfulJSONCompletion(payload) {
+			return completionBodyComplete
+		}
+		return completionBodyEmpty
 	}
+
+	return classifySSECompletion(body)
+}
+
+func looksLikeSuccessfulJSONCompletion(payload map[string]any) bool {
 	// OpenAI-shape: choices is a non-empty array.
 	if choices, ok := payload["choices"].([]any); ok && len(choices) > 0 {
 		return true
@@ -416,6 +425,103 @@ func looksLikeSuccessfulCompletion(body []byte) bool {
 		return true
 	}
 	return false
+}
+
+func classifySSECompletion(body []byte) completionBodyState {
+	var event strings.Builder
+	sawOutput := false
+	sawTerminal := false
+	sawSSE := false
+
+	flush := func() {
+		data := strings.TrimSpace(event.String())
+		event.Reset()
+		if data == "" {
+			return
+		}
+		sawSSE = true
+		if data == "[DONE]" {
+			sawTerminal = true
+			return
+		}
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			return
+		}
+		if sseEventHasOutput(payload) {
+			sawOutput = true
+		}
+		if isFinalSSEEvent(payload) || isTerminalSSEEvent(payload) {
+			sawTerminal = true
+		}
+	}
+
+	for _, rawLine := range strings.Split(string(body), "\n") {
+		line := strings.TrimRight(rawLine, "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			if event.Len() > 0 {
+				event.WriteByte('\n')
+			}
+			event.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	flush()
+
+	if sawOutput && sawTerminal {
+		return completionBodyComplete
+	}
+	if sawOutput {
+		return completionBodyPartial
+	}
+	if sawSSE {
+		return completionBodyEmpty
+	}
+	return completionBodyEmpty
+}
+
+func sseEventHasOutput(payload map[string]any) bool {
+	if extractContentCharsFromSSEEvent(payload) > 0 {
+		return true
+	}
+	// OpenAI refusal chunks are user-visible output but are intentionally not
+	// included in token estimation's normal content paths.
+	if choices, ok := payload["choices"].([]any); ok {
+		for _, rawChoice := range choices {
+			choice, _ := rawChoice.(map[string]any)
+			delta, _ := choice["delta"].(map[string]any)
+			if refusal, _ := delta["refusal"].(string); refusal != "" {
+				return true
+			}
+		}
+	}
+	// Responses API-compatible streams use a top-level delta string.
+	if eventType, _ := payload["type"].(string); eventType == "response.output_text.delta" || eventType == "response.function_call_arguments.delta" {
+		if delta, _ := payload["delta"].(string); delta != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func isTerminalSSEEvent(payload map[string]any) bool {
+	eventType, _ := payload["type"].(string)
+	switch eventType {
+	case "message_stop", "response.completed", "response.done":
+		return true
+	default:
+		return false
+	}
+}
+
+// expected shape of a real completion (OpenAI choices[], Anthropic content[],
+// or an SSE stream with both usable output and a terminal event). Used as the
+// "is this really a success" gate for tick-on-success counters.
+func looksLikeSuccessfulCompletion(body []byte) bool {
+	return classifyCompletionBody(body) == completionBodyComplete
 }
 
 // shouldCountAsSuccess combines HTTP status, in-body error detection,
@@ -1941,10 +2047,14 @@ func (h *GatewayHandler) finalizeRuntimeReservation(ctx context.Context, apiKey 
 func (h *GatewayHandler) recordAndFinalizeRuntime(ctx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, statusCode int, body []byte, publicModel string) error {
 	settlement, err := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusCode, body, publicModel)
 	if err != nil {
-		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, true)
+		_ = h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, false)
 		return err
 	}
-	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, true)
+	// Durable request_count backs the customer's RPP display. It must follow
+	// the same genuine-success decision as RPD/RPP pre-counters; heartbeat-only,
+	// partial, provider-error, and client-disconnected attempts release their
+	// reservation without consuming the period request allowance.
+	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, settlement, settlement.Success, settlement.Success)
 	if finalizeErr != nil {
 		return finalizeErr
 	}
@@ -2026,6 +2136,37 @@ func (h *GatewayHandler) recordAndFinalizeAsync(parentCtx context.Context, apiKe
 				Msg("async settlement failed")
 		}
 	}()
+}
+
+func requestContextCanceled(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	return errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)
+}
+
+// settlementStatus preserves a completed response even if the request context
+// is cancelled immediately after the final byte. If cancellation happened
+// before a terminal completion, the ledger records client_disconnected and all
+// reservations are released instead of booking a phantom success.
+func settlementStatus(ctx context.Context, upstreamStatus int, body []byte) int {
+	if requestContextCanceled(ctx) && classifyCompletionBody(body) != completionBodyComplete {
+		return statusClientClosedRequest
+	}
+	return upstreamStatus
+}
+
+// recordAndFinalizeClientDisconnect durably records a downstream cancellation
+// using a detached context. The provider request remains tied to the original
+// request context (so work stops when the client leaves), but accounting and
+// reservation cleanup must survive that cancellation.
+func (h *GatewayHandler) recordAndFinalizeClientDisconnect(parentCtx context.Context, apiKey store.APIKey, subscription *service.ActiveSubscription, model *store.AIModel, route *store.AIModelRoute, reservation runtimeReservation, started time.Time, publicModel string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parentCtx), 30*time.Second)
+	defer cancel()
+
+	_, recordErr := h.recordUsage(ctx, apiKey, subscription, model, route, &reservation, started, statusClientClosedRequest, nil, publicModel)
+	finalizeErr := h.finalizeRuntimeReservation(ctx, apiKey, reservation, usageSettlement{}, false, false)
+	return errors.Join(recordErr, finalizeErr)
 }
 
 func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel, streamProtocol string) []byte {
@@ -2759,6 +2900,18 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				Str("router_instance_code", cand.routerInstanceCode).
 				Str("router_model", cand.routerModel).
 				Msg("messages upstream candidate failed")
+			if requestContextCanceled(ctx) {
+				if err := h.recordAndFinalizeClientDisconnect(ctx, apiKey, subscription, model, route, reservation, started, publicModel); err != nil {
+					zerolog.Ctx(ctx).Error().Err(err).
+						Str("public_model", publicModel).
+						Str("router_instance_code", cand.routerInstanceCode).
+						Str("router_model", cand.routerModel).
+						Str("api_key_id", apiKey.ID.String()).
+						Msg("client-disconnect settlement failed")
+				}
+				settled = true
+				return
+			}
 			continue
 		}
 
@@ -2774,13 +2927,14 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			body := h.streamUpstreamResponse(w, resp, publicModel, "anthropic")
 			resp.Body.Close()
+			settlementCode := settlementStatus(ctx, statusCode, body)
 			// The client already has the full stream, so settle on a
 			// detached context: if the client disconnected mid-stream the
 			// request ctx is cancelled, which would fail the finalize DB
 			// write and strand tokens_reserved (false quota_exceeded until
 			// the sweeper runs). WithoutCancel keeps the settlement alive.
 			settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).
 					Str("public_model", publicModel).
 					Str("router_instance_code", cand.routerInstanceCode).
@@ -2797,7 +2951,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			// truncated stream doesn't burn the user's RPD slot. Without
 			// this check, every failed streaming attempt ticked the
 			// counter even though recordUsage flagged the row as failed.
-			if shouldCountAsSuccess(statusCode, body) {
+			if shouldCountAsSuccess(settlementCode, body) {
 				preCounters.commit(ctx)
 			}
 			return
@@ -2816,16 +2970,9 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			body := readBodyWithKeepalive(w, resp.Body, 25*time.Second)
 			resp.Body.Close()
-			if err := h.recordAndFinalizeRuntime(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
-				zerolog.Ctx(ctx).Error().Err(err).
-					Str("public_model", publicModel).
-					Str("router_instance_code", cand.routerInstanceCode).
-					Str("router_model", cand.routerModel).
-					Str("api_key_id", apiKey.ID.String()).
-					Msg("non-streaming settlement failed")
-			}
+			settlementCode := settlementStatus(ctx, statusCode, body)
 			settled = true
-			if shouldCountAsSuccess(statusCode, body) {
+			if shouldCountAsSuccess(settlementCode, body) {
 				preCounters.commit(ctx)
 			}
 			// Rewrite the response "model" field to the requested public
@@ -2840,6 +2987,7 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 			}
 			w.WriteHeader(statusCode)
 			_, _ = w.Write(outBody)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel)
 			return
 		}
 
@@ -3150,6 +3298,18 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				Str("router_instance_code", cand.routerInstanceCode).
 				Str("router_model", cand.routerModel).
 				Msg("chat upstream candidate failed")
+			if requestContextCanceled(ctx) {
+				if err := h.recordAndFinalizeClientDisconnect(ctx, apiKey, subscription, model, route, reservation, started, publicModel); err != nil {
+					zerolog.Ctx(ctx).Error().Err(err).
+						Str("public_model", publicModel).
+						Str("router_instance_code", cand.routerInstanceCode).
+						Str("router_model", cand.routerModel).
+						Str("api_key_id", apiKey.ID.String()).
+						Msg("client-disconnect settlement failed")
+				}
+				settled = true
+				return
+			}
 			continue
 		}
 
@@ -3165,12 +3325,13 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			}
 			body := h.streamUpstreamResponse(w, resp, publicModel, "openai")
 			resp.Body.Close()
+			settlementCode := settlementStatus(ctx, statusCode, body)
 			// Settle on a detached context — see the /v1/messages streaming
 			// branch: a client disconnect mid-stream cancels the request
 			// ctx, which would fail the finalize DB write and strand
 			// tokens_reserved (false quota_exceeded until the sweeper runs).
 			settleCtx, settleCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel); err != nil {
+			if err := h.recordAndFinalizeRuntime(settleCtx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel); err != nil {
 				zerolog.Ctx(ctx).Error().Err(err).
 					Str("public_model", publicModel).
 					Str("router_instance_code", cand.routerInstanceCode).
@@ -3184,7 +3345,7 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			// proof of a real completion, so gate the counter commit on
 			// shouldCountAsSuccess to avoid charging the user when the
 			// stream errored out or never produced content.
-			if shouldCountAsSuccess(statusCode, body) {
+			if shouldCountAsSuccess(settlementCode, body) {
 				preCounters.commit(ctx)
 			}
 			return
@@ -3203,12 +3364,13 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 			}
 			body := readBodyWithKeepalive(w, resp.Body, 25*time.Second)
 			resp.Body.Close()
+			settlementCode := settlementStatus(ctx, statusCode, body)
 			settled = true
-			if shouldCountAsSuccess(statusCode, body) {
+			if shouldCountAsSuccess(settlementCode, body) {
 				preCounters.commit(ctx)
 			}
 			h.writeUpstreamResponse(w, resp, body, publicModel)
-			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, statusCode, body, publicModel)
+			h.recordAndFinalizeAsync(ctx, apiKey, subscription, model, effectiveRoute, reservation, started, settlementCode, body, publicModel)
 			return
 		}
 
@@ -3335,24 +3497,32 @@ func (h *GatewayHandler) recordUsage(ctx context.Context, apiKey store.APIKey, s
 	// `{"error": ...}` payload when the underlying provider call failed. Treat
 	// those as failed so the ledger and reservation finalize reflect reality.
 	bodyErrorCode := ""
+	if statusCode == statusClientClosedRequest {
+		bodyErrorCode = "client_disconnected"
+	}
 	if statusCode < 400 {
 		bodyErrorCode = namespaceUpstreamErrorCode(detectProviderErrorFromBody(body))
 		if bodyErrorCode != "" {
 			statusStr = "failed"
 		}
 	}
-	// An HTTP 200 with an empty or non-completion body is NOT a success:
-	// ai-core2 returns 200 then a body of only keep-alive newlines when the
-	// upstream stalls/times out, or the client disconnects before any content
-	// lands. Those rows were recorded status=success with 0/0/0 tokens and $0
-	// cost — polluting analytics and, worse, never burning the unlimited
-	// plan's token quota, so a timed-out request looked free. Reuse
-	// looksLikeSuccessfulCompletion (the same gate the counter-commit path
-	// already trusts) so the ledger status matches whether real output landed.
-	if statusStr == "success" && !looksLikeSuccessfulCompletion(body) {
-		statusStr = "failed"
-		if bodyErrorCode == "" {
-			bodyErrorCode = "empty_upstream_response"
+	// HTTP 200 is not sufficient proof of success. Heartbeat-only streams are
+	// empty, while streams that emitted output but never reached a terminal
+	// event are partial. Neither may debit credits or commit quota counters.
+	if statusStr == "success" {
+		switch classifyCompletionBody(body) {
+		case completionBodyComplete:
+			// Genuine completion.
+		case completionBodyPartial:
+			statusStr = "failed"
+			if bodyErrorCode == "" {
+				bodyErrorCode = "partial_upstream_response"
+			}
+		default:
+			statusStr = "failed"
+			if bodyErrorCode == "" {
+				bodyErrorCode = "empty_upstream_response"
+			}
 		}
 	}
 	success := statusStr == "success"

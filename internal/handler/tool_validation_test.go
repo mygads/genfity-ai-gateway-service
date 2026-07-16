@@ -52,9 +52,9 @@ func TestValidateToolHistoryRejectsStructuralProblems(t *testing.T) {
 			code: "duplicate_tool_call_id",
 		},
 		{
-			name: "undeclared name",
-			raw:  `{"tools":[{"type":"function","function":{"name":"search"}}],"messages":[{"role":"assistant","tool_calls":[{"id":"c1","function":{"name":"shell","arguments":"{}"}}]}]}`,
-			code: "undeclared_tool",
+			name: "missing call name",
+			raw:  `{"tools":[{"type":"function","function":{"name":"search"}}],"messages":[{"role":"assistant","tool_calls":[{"id":"c1","function":{"arguments":"{}"}}]}]}`,
+			code: "invalid_tool_name",
 		},
 		{
 			name: "malformed arguments",
@@ -79,6 +79,19 @@ func TestValidateToolHistoryRejectsStructuralProblems(t *testing.T) {
 				t.Fatalf("issue=%#v want code=%s", issue, tc.code)
 			}
 		})
+	}
+}
+
+func TestValidateToolHistoryAllowsCompletedUndeclaredHistoricalTool(t *testing.T) {
+	payload := decodeToolTestPayload(t, `{
+        "tools":[{"type":"function","function":{"name":"search"}}],
+        "messages":[
+          {"role":"assistant","tool_calls":[{"id":"old_1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},
+          {"role":"tool","tool_call_id":"old_1","content":"contents"},
+          {"role":"user","content":"continue"}
+        ]}`)
+	if issue := validateToolHistory(payload); issue != nil {
+		t.Fatalf("completed historical tools may be absent from the current declaration set: %+v", issue)
 	}
 }
 
