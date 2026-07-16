@@ -28,7 +28,12 @@ type CLIProxyClient struct {
 
 const requestBudgetHeader = "X-Genfity-Request-Budget-Ms"
 
-const safePreconnectMaxAttempts = 20
+// CLIProxy performs a graceful drain before Docker replaces the container.
+// During a busy rollout the service name can reject new connections for
+// roughly a minute even though in-flight requests are being protected. Keep
+// safe pre-connect retries alive across that drain window; the request context
+// still cancels immediately when the downstream client leaves.
+const safePreconnectMaxAttempts = 80
 
 func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
 	return NewCLIProxyClientWithManagementKey(baseURL, apiKey, "", timeout)
