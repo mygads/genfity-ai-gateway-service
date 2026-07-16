@@ -12,8 +12,10 @@ import (
 func TestForwardJSONPropagatesRequestID(t *testing.T) {
 	const requestID = "gateway-to-cliproxy-123"
 	var upstreamRequestID string
+	var upstreamBudget string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamRequestID = r.Header.Get("X-Request-ID")
+		upstreamBudget = r.Header.Get(requestBudgetHeader)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))
@@ -33,5 +35,8 @@ func TestForwardJSONPropagatesRequestID(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 	if upstreamRequestID != requestID {
 		t.Fatalf("upstream request ID=%q want=%q", upstreamRequestID, requestID)
+	}
+	if upstreamBudget != "5000" {
+		t.Fatalf("upstream request budget=%q want=5000", upstreamBudget)
 	}
 }

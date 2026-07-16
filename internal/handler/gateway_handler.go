@@ -351,6 +351,13 @@ func detectErrorFromPayload(payload map[string]any) string {
 				return code
 			}
 			if msg, ok := v["message"].(string); ok && strings.TrimSpace(msg) != "" {
+				// CLIProxy uses this marker for a valid public payload that a
+				// particular provider cannot represent. It is a routing outcome,
+				// not an upstream outage, and must remain distinguishable in the
+				// usage ledger even when the public error envelope has no code.
+				if strings.Contains(strings.ToLower(msg), "incompatible_payload") {
+					return "incompatible_payload"
+				}
 				return "provider_error"
 			}
 			if t, ok := v["type"].(string); ok && t != "" {
@@ -369,7 +376,7 @@ func detectErrorFromPayload(payload map[string]any) string {
 // making "model busy" indistinguishable from "account hit its quota". An empty
 // code stays empty; already-namespaced codes are left untouched.
 func namespaceUpstreamErrorCode(code string) string {
-	if code == "" || strings.HasPrefix(code, "upstream_") {
+	if code == "" || code == "incompatible_payload" || strings.HasPrefix(code, "upstream_") {
 		return code
 	}
 	return "upstream_" + code

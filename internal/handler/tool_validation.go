@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 )
@@ -32,7 +33,7 @@ type observedToolCall struct {
 // validateToolHistory applies provider-neutral invariants shared by OpenAI
 // Chat Completions and Anthropic Messages:
 //   - declarations and call IDs are unique;
-//   - arguments are syntactically valid JSON objects;
+//   - arguments are syntactically valid JSON;
 //   - every result refers to one earlier call and every historical call has a
 //     single result.
 //
@@ -189,25 +190,33 @@ func collectDeclaredTools(raw any) (map[string]declaredTool, *toolHistoryValidat
 	return declared, nil
 }
 
-func decodeToolArguments(raw any) (map[string]any, error) {
+func decodeToolArguments(raw any) (any, error) {
 	if raw == nil {
 		return map[string]any{}, nil
 	}
-	if args, ok := raw.(map[string]any); ok {
-		return args, nil
+	if _, ok := raw.(string); !ok {
+		// Anthropic tool input is embedded directly in the request JSON. Once
+		// the outer payload has decoded successfully, arrays and scalars are
+		// syntactically valid historical values even though Kiro cannot execute
+		// them. Provider-specific shape checks belong in candidate preflight.
+		return raw, nil
 	}
-	text, ok := raw.(string)
-	if !ok || strings.TrimSpace(text) == "" {
-		return nil, fmt.Errorf("tool arguments must be a JSON object")
+	text := raw.(string)
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("tool arguments are not valid JSON: empty input")
 	}
 	decoder := json.NewDecoder(bytes.NewBufferString(text))
 	decoder.UseNumber()
-	var args map[string]any
+	var args any
 	if err := decoder.Decode(&args); err != nil {
 		return nil, fmt.Errorf("tool arguments are not valid JSON: %w", err)
 	}
-	if args == nil {
-		return nil, fmt.Errorf("tool arguments must be a JSON object")
+	// Decoder.Decode accepts a valid value followed by another value. Reject
+	// trailing data so the gateway still enforces the universal JSON syntax
+	// invariant instead of passing an ambiguous history downstream.
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, fmt.Errorf("tool arguments are not valid JSON: trailing data")
 	}
 	return args, nil
 }

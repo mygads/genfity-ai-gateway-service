@@ -106,3 +106,41 @@ func TestValidateToolHistoryAllowsHistoricalSchemaMismatchForRecovery(t *testing
 		t.Fatalf("schema-mismatched historical call with an error result must remain recoverable: %+v", issue)
 	}
 }
+
+func TestValidateToolHistoryAllowsCompletedNonObjectArgumentsForRecovery(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+	}{
+		{name: "array", arguments: `[]`},
+		{name: "scalar", arguments: `"\"candidate-a\""`},
+		{name: "null", arguments: `null`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := decodeToolTestPayload(t, `{
+                "tools":[],
+                "messages":[
+                  {"role":"assistant","tool_calls":[{"id":"old_1","type":"function","function":{"name":"get_top_candidates","arguments":`+tc.arguments+`}}]},
+                  {"role":"tool","tool_call_id":"old_1","content":"invalid arguments"},
+                  {"role":"user","content":"retry"}
+                ]}`)
+			if issue := validateToolHistory(payload); issue != nil {
+				t.Fatalf("completed malformed historical call must remain recoverable: %+v", issue)
+			}
+		})
+	}
+}
+
+func TestValidateToolHistoryRejectsMultipleJSONArgumentValues(t *testing.T) {
+	payload := decodeToolTestPayload(t, `{
+        "tools":[],
+        "messages":[
+          {"role":"assistant","tool_calls":[{"id":"old_1","type":"function","function":{"name":"get_top_candidates","arguments":"{} []"}}]},
+          {"role":"tool","tool_call_id":"old_1","content":"invalid arguments"}
+        ]}`)
+	issue := validateToolHistory(payload)
+	if issue == nil || issue.Code != "invalid_tool_arguments" {
+		t.Fatalf("issue=%+v want invalid_tool_arguments", issue)
+	}
+}

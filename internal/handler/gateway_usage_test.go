@@ -157,3 +157,14 @@ func TestSettlementStatusMarksCanceledIncompleteRequest(t *testing.T) {
 		t.Fatalf("live request status changed unexpectedly: %d", got)
 	}
 }
+
+func TestDetectProviderErrorPreservesIncompatiblePayloadRoutingOutcome(t *testing.T) {
+	body := []byte(`{"error":{"message":"incompatible_payload: candidate skipped (request_too_large)","type":"invalid_request_error"}}`)
+	code := detectProviderErrorFromBody(body)
+	if code != "incompatible_payload" {
+		t.Fatalf("detectProviderErrorFromBody() = %q, want incompatible_payload", code)
+	}
+	if namespaced := namespaceUpstreamErrorCode(code); namespaced != "incompatible_payload" {
+		t.Fatalf("namespaceUpstreamErrorCode() = %q, want incompatible_payload", namespaced)
+	}
+}

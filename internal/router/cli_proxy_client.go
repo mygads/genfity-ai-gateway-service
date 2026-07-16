@@ -26,6 +26,8 @@ type CLIProxyClient struct {
 	httpClient    *http.Client
 }
 
+const requestBudgetHeader = "X-Genfity-Request-Budget-Ms"
+
 func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
 	return NewCLIProxyClientWithManagementKey(baseURL, apiKey, "", timeout)
 }
@@ -173,6 +175,9 @@ func (c *CLIProxyClient) forwardJSON(ctx context.Context, path string, payload m
 	}
 	if requestID := httpmiddleware.GetRequestID(ctx); requestID != "" {
 		req.Header.Set("X-Request-ID", requestID)
+	}
+	if timeout := c.httpClient.Timeout; timeout > 0 {
+		req.Header.Set(requestBudgetHeader, fmt.Sprintf("%d", timeout.Milliseconds()))
 	}
 	return c.httpClient.Do(req)
 }
