@@ -367,7 +367,12 @@ type sseRewriteBuffer struct {
 	providerStarted bool
 }
 
-const providerStartedSSEMarker = ": genfity-provider-started\n\n"
+const (
+	providerStartedOpenAISSEMarker        = "data: {\"type\":\"genfity.provider_started\",\"genfity_internal\":true}\n\n"
+	providerStartedClaudeSSEMarker        = "event: genfity.provider_started\ndata: {\"type\":\"genfity.provider_started\",\"genfity_internal\":true}\n\n"
+	providerStartedLegacySSEMarker        = ": genfity-provider-started\n\n"
+	providerStartedWrappedLegacySSEMarker = "data: : genfity-provider-started\n\n"
+)
 
 func (b *sseRewriteBuffer) append(chunk []byte, publicModel string) []byte {
 	if len(chunk) == 0 {
@@ -394,11 +399,19 @@ func (b *sseRewriteBuffer) flush(publicModel string) []byte {
 }
 
 func (b *sseRewriteBuffer) stripProviderStartedMarker(chunk []byte) []byte {
-	if !bytes.Contains(chunk, []byte(providerStartedSSEMarker)) {
+	if !bytes.Contains(chunk, []byte("genfity-provider-started")) && !bytes.Contains(chunk, []byte("genfity.provider_started")) {
 		return chunk
 	}
 	b.providerStarted = true
-	return bytes.ReplaceAll(chunk, []byte(providerStartedSSEMarker), nil)
+	for _, marker := range []string{
+		providerStartedOpenAISSEMarker,
+		providerStartedClaudeSSEMarker,
+		providerStartedLegacySSEMarker,
+		providerStartedWrappedLegacySSEMarker,
+	} {
+		chunk = bytes.ReplaceAll(chunk, []byte(marker), nil)
+	}
+	return chunk
 }
 
 func rewriteAndSanitizeSSEPayload(chunk []byte, publicModel, streamProtocol string) []byte {

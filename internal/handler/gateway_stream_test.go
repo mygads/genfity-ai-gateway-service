@@ -59,7 +59,7 @@ func TestStreamUpstreamResponseStopsOnDownstreamWriteFailure(t *testing.T) {
 }
 
 func TestStreamUpstreamResponseConsumesProviderStartedMarker(t *testing.T) {
-	body := &closeTrackingBody{Reader: strings.NewReader(providerStartedSSEMarker + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n")}
+	body := &closeTrackingBody{Reader: strings.NewReader(providerStartedOpenAISSEMarker + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n")}
 	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
 	w := &recordingStreamWriter{header: make(http.Header)}
 
@@ -69,6 +69,20 @@ func TestStreamUpstreamResponseConsumesProviderStartedMarker(t *testing.T) {
 	}
 	if strings.Contains(w.body.String(), "genfity-provider-started") {
 		t.Fatalf("internal marker leaked downstream: %q", w.body.String())
+	}
+}
+
+func TestStreamUpstreamResponseConsumesWrappedLegacyProviderMarker(t *testing.T) {
+	body := &closeTrackingBody{Reader: strings.NewReader(providerStartedWrappedLegacySSEMarker + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n")}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+	w := &recordingStreamWriter{header: make(http.Header)}
+
+	result := (&GatewayHandler{}).streamUpstreamResponse(w, resp, "genfity/test", "openai")
+	if !result.ProviderStarted {
+		t.Fatal("wrapped legacy provider-started marker was not detected")
+	}
+	if strings.Contains(w.body.String(), "genfity-provider-started") {
+		t.Fatalf("wrapped legacy marker leaked downstream: %q", w.body.String())
 	}
 }
 
