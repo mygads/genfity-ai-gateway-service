@@ -28,6 +28,8 @@ type CLIProxyClient struct {
 
 const requestBudgetHeader = "X-Genfity-Request-Budget-Ms"
 
+const safePreconnectMaxAttempts = 20
+
 func NewCLIProxyClient(baseURL, apiKey string, timeout time.Duration) *CLIProxyClient {
 	return NewCLIProxyClientWithManagementKey(baseURL, apiKey, "", timeout)
 }
@@ -165,21 +167,63 @@ func (c *CLIProxyClient) forwardJSON(ctx context.Context, path string, payload m
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < safePreconnectMaxAttempts; attempt++ {
+		req, requestErr := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+		if requestErr != nil {
+			return nil, requestErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if c.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		}
+		if requestID := httpmiddleware.GetRequestID(ctx); requestID != "" {
+			req.Header.Set("X-Request-ID", requestID)
+		}
+		if timeout := c.httpClient.Timeout; timeout > 0 {
+			req.Header.Set(requestBudgetHeader, fmt.Sprintf("%d", timeout.Milliseconds()))
+		}
+		resp, callErr := c.httpClient.Do(req)
+		if callErr == nil || !isSafePreconnectError(callErr) || attempt == safePreconnectMaxAttempts-1 {
+			return resp, callErr
+		}
+
+		delay := safePreconnectRetryDelay(attempt)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	return nil, fmt.Errorf("preconnect retry loop exhausted")
+}
+
+func safePreconnectRetryDelay(attempt int) time.Duration {
+	delay := 250 * time.Millisecond
+	for i := 0; i < attempt && delay < time.Second; i++ {
+		delay *= 2
 	}
-	if requestID := httpmiddleware.GetRequestID(ctx); requestID != "" {
-		req.Header.Set("X-Request-ID", requestID)
+	if delay > time.Second {
+		return time.Second
 	}
-	if timeout := c.httpClient.Timeout; timeout > 0 {
-		req.Header.Set(requestBudgetHeader, fmt.Sprintf("%d", timeout.Milliseconds()))
+	return delay
+}
+
+// isSafePreconnectError is intentionally narrower than isRetriableError.
+// These failures prove that no HTTP request reached CLIProxy, so retrying
+// cannot double-bill a provider. EOF, reset, broken pipe, and response timeout
+// are deliberately excluded because the upstream may already be processing.
+func isSafePreconnectError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return c.httpClient.Do(req)
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "no such host") ||
+		strings.Contains(message, "server misbehaving") ||
+		strings.Contains(message, "network is unreachable") ||
+		strings.Contains(message, "temporary failure in name resolution")
 }
 
 func (c *CLIProxyClient) get(ctx context.Context, path string) (map[string]any, error) {
