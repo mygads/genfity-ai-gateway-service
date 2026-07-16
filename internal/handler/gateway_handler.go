@@ -2176,7 +2176,7 @@ func (h *GatewayHandler) recordAndFinalizeClientDisconnect(parentCtx context.Con
 	return errors.Join(recordErr, finalizeErr)
 }
 
-func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel, streamProtocol string) []byte {
+func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *http.Response, publicModel, streamProtocol string) ([]byte, bool) {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
@@ -2200,7 +2200,14 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 			// we have one or more complete events before sanitizing/rewriting.
 			safe := rewriter.append(chunk, publicModel)
 			if len(safe) > 0 {
-				_, _ = w.Write(safe)
+				if _, writeErr := w.Write(safe); writeErr != nil {
+					// net/http normally cancels r.Context when the downstream
+					// disappears, but the write error can arrive first. Close the
+					// upstream body immediately so no provider work continues while
+					// the cancellation signal propagates through the transport.
+					_ = resp.Body.Close()
+					return captured.Bytes(), true
+				}
 			}
 			_, _ = captured.Write(chunk)
 			if flusher != nil {
@@ -2209,7 +2216,10 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 		}
 		if err != nil {
 			if safe := rewriter.flush(publicModel); len(safe) > 0 {
-				_, _ = w.Write(safe)
+				if _, writeErr := w.Write(safe); writeErr != nil {
+					_ = resp.Body.Close()
+					return captured.Bytes(), true
+				}
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -2217,7 +2227,7 @@ func (h *GatewayHandler) streamUpstreamResponse(w http.ResponseWriter, resp *htt
 			break
 		}
 	}
-	return captured.Bytes()
+	return captured.Bytes(), false
 }
 
 func (h *GatewayHandler) clientForRouter(ctx context.Context, routerInstanceCode string) (*router.CLIProxyClient, bool) {
@@ -2932,9 +2942,12 @@ func (h *GatewayHandler) Messages(w http.ResponseWriter, r *http.Request) {
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body := h.streamUpstreamResponse(w, resp, publicModel, "anthropic")
+			body, downstreamWriteFailed := h.streamUpstreamResponse(w, resp, publicModel, "anthropic")
 			resp.Body.Close()
 			settlementCode := settlementStatus(ctx, statusCode, body)
+			if downstreamWriteFailed {
+				settlementCode = statusClientClosedRequest
+			}
 			// The client already has the full stream, so settle on a
 			// detached context: if the client disconnected mid-stream the
 			// request ctx is cancelled, which would fail the finalize DB
@@ -3330,9 +3343,12 @@ func (h *GatewayHandler) ChatCompletions(w http.ResponseWriter, r *http.Request)
 				Status:             route.Status,
 				CreatedAt:          route.CreatedAt,
 			}
-			body := h.streamUpstreamResponse(w, resp, publicModel, "openai")
+			body, downstreamWriteFailed := h.streamUpstreamResponse(w, resp, publicModel, "openai")
 			resp.Body.Close()
 			settlementCode := settlementStatus(ctx, statusCode, body)
+			if downstreamWriteFailed {
+				settlementCode = statusClientClosedRequest
+			}
 			// Settle on a detached context — see the /v1/messages streaming
 			// branch: a client disconnect mid-stream cancels the request
 			// ctx, which would fail the finalize DB write and strand
